@@ -10,8 +10,8 @@ pip3 install mini-code-cli
 
 2. Run agent: (get LLM running via SGLang or Vllm)
 ```bash
-mini_code_cli #run the agent loop
-mini_code_cli --url "0.0.0.0" --allowed-dir ./experiments/ --api-key "sk-dummy" #localhost and 30000 is default, allowed_dir ./ is default
+mini-code #run the agent loop
+mini-code --url "https://api.deepseek.com" --model "deepseek-v4-flash" --api-key "sk-dummy" --allowed-dir ./experiments/
 ```
 
 

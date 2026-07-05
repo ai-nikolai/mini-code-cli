@@ -1,6 +1,6 @@
 [project]
 name = "mini-code-cli"
-version = "0.0.1"
+version = "0.0.3"
 description = "Minimal Coding CLI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,14 +13,14 @@ license = {file = "LICENSE"}
 urls = {"Homepage" = "https://github.com/ai-nikolai/mini-code-cli"}
 
 
-[project.scripts]
-mini-code-cli = "agent_loop:main"
-
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["mini_code_cli"]
 include = ["*"]
+
+[project.scripts]
+mini-code = "mini_code_cli.agent_loop:main"
 
