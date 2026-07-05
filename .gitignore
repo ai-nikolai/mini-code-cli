@@ -1,7 +1,11 @@
 experiments/*
+pypi_build.sh
+pypi_upload.sh
 
 __pycache__
+*.egg-info./
 *.egg-info
+dist
 
 history.json
 tools*.json
