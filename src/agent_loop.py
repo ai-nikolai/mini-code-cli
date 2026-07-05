@@ -8,6 +8,16 @@ import utils
 import argparse
 import sys
 
+# ANSI escape codes for colors and bold
+BOLD = '\033[1m'
+RED = '\033[91m'
+GREEN = '\033[92m'
+YELLOW = '\033[93m'
+BLUE = '\033[94m'
+MAGENTA = '\033[95m'
+CYAN = '\033[96m'
+RESET = '\033[0m'
+
 def save_history(messages):
     # Save messages to history.json
     with open("history.json", "w") as f:
@@ -50,7 +60,7 @@ def main():
         llm_tool_response_flag = False
         try:
             print("-"*30)
-            user_input = input("You: ")
+            user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
             if user_input.lower() in ["quit", "exit"]:
                 print("\nThank you. Goodbye! Saving history...")
                 save_history(messages)
@@ -72,13 +82,14 @@ def main():
         )
 
         if response_text:
-            print(f"Assistant: {response_text}")
+            print(f"{BOLD}{GREEN}Assistant:{RESET} {response_text}")
             messages.append({"role": "assistant", "content": response_text})
         else:
             llm_response_flag = True
 
         if tool_calls:
             # Tool call parsing and execution
+            print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
             if tool_calls:
                 for call in tool_calls:
                     call_id = call.get("id", "")
@@ -87,7 +98,7 @@ def main():
                     try:
                         tool_params = json.loads(params_str)
                     except json.JSONDecodeError:
-                        print(f"Error parsing arguments for tool {name}")
+                        print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
                         continue
 
                     if name in tools_dict:
@@ -97,12 +108,16 @@ def main():
                             if name == "write_file":
                                 filepath = tool_params.get("filepath", "")
                             if filepath and not os.path.abspath(filepath).startswith(allowed_dir):
-                                print(f"Error: File operation not allowed outside allowed directory: {allowed_dir}")
+                                print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
                                 continue
 
                         func = tools_dict[name]["function"]
                         result = func(**tool_params)
-                        print(f"Tool Call: '{name}' returned: {result}")
+                        # Limiting output to 300 characters for readability
+                        result_str = str(result)
+                        if len(result_str) > 300:
+                            result_str = result_str[:300] + "... (truncated to 300 chars)"
+                        print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {result_str}")
 
                         messages.append({
                             "role": "tool",
@@ -110,12 +125,12 @@ def main():
                             "content": str(result)
                         })
                     else:
-                        print(f"Unknown tool: {name}")
+                        print(f"{BOLD}{RED}Warning:{RESET} Unknown tool: {name}")
         else:
             llm_tool_response_flag = True
         
         if llm_response_flag and llm_tool_response_flag:
-            print("Warning: No response was given by the LLM.")
+            print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
 
         save_history(messages)
 

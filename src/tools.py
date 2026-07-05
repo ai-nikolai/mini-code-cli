@@ -13,7 +13,6 @@ def read_file(filepath):
     except Exception as e:
         print(f"Error: {e}")
 
-    return f"Read file from: {filepath}"
 
 def write_file(filepath, content):
     """Write content to a file. Overwrites if file exists. Param: filepath, content"""
@@ -22,7 +21,7 @@ def write_file(filepath, content):
             f.write(content)
     except Exception as e:
         print(f"Error: {e}")
-    return f"Wrote, the content to file: {filepath}"
+    return f"Wrote to file: {filepath}, content: {content}."
 
 def grep(pattern, filepath):
     """Search for a pattern in a file using grep and return matching lines. Param: pattern, filepath"""
