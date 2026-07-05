@@ -1,9 +1,9 @@
 import os
 import json
 
-import prompts
-import tools
-import utils
+from . import prompts
+from . import tools
+from . import utils
 
 import argparse
 import sys

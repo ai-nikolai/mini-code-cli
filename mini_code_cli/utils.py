@@ -72,7 +72,7 @@ def parse_args():
 
 
 if __name__ == '__main__':
-    import tools
+    from . import tools
     tools_dict = tools.util_get_tools()
 
     args = parse_args()

@@ -42,7 +42,7 @@ Conversation:
     return prompt.strip()
 
 if __name__=="__main__":
-    import tools
+    from . import tools
     tools_dict = tools.util_get_tools_dict()
     print(system_prompt(tools_dict))
 
