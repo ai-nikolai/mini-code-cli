@@ -3,7 +3,7 @@ import json
 import argparse
 
 
-def call_openai_server(messages, tools=None, max_tokens=2048, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None):
+def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None,):
     """
     Querying an OpenAI-compatible server (local or remote) using the requests library.
     Supports authentication via API key if provided.
@@ -24,6 +24,10 @@ def call_openai_server(messages, tools=None, max_tokens=2048, temperature=0.0, t
         "top_p": top_p
     }
 
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
     try:
         response = requests.post(
             url,
@@ -36,6 +40,7 @@ def call_openai_server(messages, tools=None, max_tokens=2048, temperature=0.0, t
         result = response.json().get("choices", [{}])[0].get("message", {})
         content = result.get("content", "")
         tool_calls = result.get("tool_calls", [])
+
         return content, tool_calls
 
     except requests.exceptions.RequestException as e:
@@ -46,7 +51,7 @@ def call_openai_server(messages, tools=None, max_tokens=2048, temperature=0.0, t
         return None, None
 
 # Alternative: use the newer SGLang API format (v0.3+)
-def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None):
+def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None):
     """
     OpenAI compatible call, pre-creating the messages object.
     """
@@ -54,7 +59,7 @@ def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.
             {"role": "user", "content": prompt}
         ]
 
-    return call_openai_server(messages, max_tokens, temperature, top_p, model, server_url=server_url, api_key=api_key)
+    return call_openai_server(messages, max_tokens, temperature, top_p, model, server_url=server_url, api_key=api_key, tools=tools)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
@@ -65,7 +70,11 @@ def parse_args():
 
     return parser.parse_args()
 
+
 if __name__ == '__main__':
+    import tools
+    tools_dict = tools.util_get_tools()
+
     args = parse_args()
     # Configuration for local SGLang deployment
     server_url=f"http://{args.host}:{args.port}" 
@@ -78,18 +87,25 @@ if __name__ == '__main__':
     print(f"Prompt:\n{prompt}")
     print("---")
  
-    response_text, tools = call_openai_server_prompt(prompt, server_url=server_url, api_key=args.api_key)
-    if response_text:
-        print(f"Response:\n{response_text}")
-        print("---")
+    response_text, tool_calls = call_openai_server_prompt(prompt, server_url=server_url, api_key=args.api_key, tools=tools_dict)
+    print(f"Response:\n{response_text}")
+    print("---")
+    print(f"Tools:\n{tool_calls}")
+    print("---")
 
+
+
+    # #################################
     # Test call to DeepSeek endpoint
-    deepseek_server_url = "https://api.deepseek.com"
-    deepseek_model = "deepseek-v4-flash"
-    print("="*60)
-    print("Entering DeepSeek call:")
-    print("-"*30)
-    response_text_ds, tools_ds = call_openai_server_prompt(prompt, server_url=deepseek_server_url, api_key=args.api_key, model=deepseek_model)
-    if response_text_ds:
-        print(f"DeepSeek Response:\n{response_text_ds}")
-        print("---")
+    # #################################
+
+    # deepseek_server_url = "https://api.deepseek.com"
+    # deepseek_model = "deepseek-v4-flash"
+    # print("="*60)
+    # print("Entering DeepSeek call:")
+    # print("-"*30)
+    # response_text_ds, tools_ds = call_openai_server_prompt(prompt, server_url=deepseek_server_url, api_key=args.api_key, model=deepseek_model, tools=tools_dict)
+    # print(f"DeepSeek Response:\n{response_text_ds}")
+    # print("---")
+    # print(f"Tools:\n{tools_ds}")
+    # print("---")

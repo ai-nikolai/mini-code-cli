@@ -7,13 +7,22 @@ import json
 
 def read_file(filepath):
     """Read the contents of a file and return as a string. Param: filepath"""
-    with open(filepath, 'r', encoding='utf-8') as f:
-        return f.read()
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        print(f"Error: {e}")
+
+    return f"Read file from: {filepath}"
 
 def write_file(filepath, content):
     """Write content to a file. Overwrites if file exists. Param: filepath, content"""
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(content)
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+    except Exception as e:
+        print(f"Error: {e}")
+    return f"Wrote, the content to file: {filepath}"
 
 def grep(pattern, filepath):
     """Search for a pattern in a file using grep and return matching lines. Param: pattern, filepath"""
@@ -25,7 +34,10 @@ def grep(pattern, filepath):
 
 def glob(pattern):
     """Return list of file paths matching the given glob pattern. Param: pattern"""
-    return glob_module.glob(pattern)
+    try:
+        return glob_module.glob(pattern)
+    except Exception as e:
+        return f"Error: {e}"
 
 def web_search(query):
     """Perform a simple web search using DuckDuckGo's API and return top results. Param: query"""
@@ -54,21 +66,25 @@ def read_website(url):
     except Exception as e:
         return f"Error: {e}"
 
-def util_get_tools():
+def util_get_tools(tool_names=None):
     """Return a JSON string describing all tool functions in this file for LLM usage."""
     import inspect
     tools = []
-    func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_")]
+    if tool_names:
+        func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_") and name in tool_names]
+    else:
+        func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_")]
+
     for name in func_names:
         func = globals()[name]
         sig = inspect.signature(func)
         parameters = {}
         for param_name, param in sig.parameters.items():
-            param_type = str(param.annotation) if param.annotation != inspect.Parameter.empty else "str"
+            param_type = str(param.annotation) if param.annotation != inspect.Parameter.empty else "string"
             # Simplify common types
-            if 'int' in param_type.lower():
+            if 'int' in param_type.lower() or 'integer' in param_type.lower():
                 param_type = "integer"
-            elif 'float' in param_type.lower():
+            elif 'float' in param_type.lower() or 'number' in param_type.lower():
                 param_type = "number"
             elif 'bool' in param_type.lower():
                 param_type = "boolean"
@@ -76,19 +92,21 @@ def util_get_tools():
                 param_type = "array"
             else:
                 param_type = "string"
-            parameters[param_name] = {"type": param_type, "description": f"Parameter {param_name}"}
+            parameters[param_name] = {"type": param_type}
         tool = {
-            "type" : "function",
-            "name": name,
-            "description": func.__doc__ if func.__doc__ else f"Function {name}",
-            "parameters": {
-                "type": "object",
-                "properties": parameters,
-                "required": [p for p in sig.parameters if sig.parameters[p].default == inspect.Parameter.empty]
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": func.__doc__ if func.__doc__ else f"Function {name}",
+                "parameters": {
+                    "type": "object",
+                    "properties": parameters,
+                    "required": [p for p in sig.parameters if sig.parameters[p].default == inspect.Parameter.empty]
+                }
             }
         }
         tools.append(tool)
-    return json.dumps(tools, indent=2)
+    return tools
 
 
 def util_get_tools_dict():
@@ -103,4 +121,5 @@ def util_get_tools_dict():
 
 
 if __name__=="__main__":
-    print(util_get_tools())
+    # print(util_get_tools())
+    print(json.dumps(tools_dict, indent=4))

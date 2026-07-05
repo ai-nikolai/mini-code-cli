@@ -1,8 +1,11 @@
 # System prompt defining available tools and compaction behavior
-def system_prompt(tools_dict=None):
+def system_prompt(tools_dict=None, allowed_dir=None):
     """
     Takes a list of tool names and returns a system prompt string.
     """
+    allowed_dir_prompt = ""
+    if allowed_dir:
+        allowed_dir_prompt = f"\nThe path you are allowed to operate in is called: {allowed_dir}"
     if tools_dict:
         tool_descriptions = "\n".join([f"{name} : {data['description']}" for name, data in tools_dict.items()])
         base_prompt = "You are a helpful AI coding assistant with access to the following tools:\n"
@@ -14,7 +17,7 @@ def system_prompt(tools_dict=None):
     
     prompt = f"""
 {base_prompt}
-{tool_descriptions}{end_prompt}
+{tool_descriptions}{end_prompt}{allowed_dir_prompt}
 Keep responses concise and focused.
 """
     return prompt.strip()

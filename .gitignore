@@ -1,3 +1,7 @@
+experiments/*
+
 __pycache__
-history.json
 *.egg-info
+
+history.json
+tools*.json
