@@ -23,16 +23,39 @@ def save_history(messages):
     with open("history.json", "w") as f:
         json.dump(messages, f, indent=2)
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
     parser.add_argument("--url", type=str, default="http://0.0.0.0:30000", help="API host")
+    parser.add_argument("--system_prompt", type=str, help="API host")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication")
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations")
-    parser.add_argument("--max-tokens", type=int, default=2048, help="Maximum tokens for LLM response")
+    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response")
     parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for LLM")
     parser.add_argument("--model", type=str, default="default", help="Model name")
     args = parser.parse_args()
     return args
+
+def print_welcome(allowed_dir, server_url):
+    # Calculate the length of the longest line inside the box
+    lines = [
+        "       Coding Agent Loop Started",
+        "  Type 'quit' or 'exit' to exit the loop.",
+        f"  Allowed dir: {allowed_dir}",
+        f"  Server URL: {server_url}"
+    ]
+    max_len = max(len(line) for line in lines)
+    margin = 2  # Space on each side inside the box
+    inner_width = max_len + 2 * margin
+    # Build the box
+    top_bottom = "╔" + "═" * inner_width + "╗"
+    print(top_bottom)
+    for line in lines:
+        # Pad the line to inner_width characters
+        padded = line.ljust(inner_width)
+        print(f"║{padded}║")
+    bottom = "╚" + "═" * inner_width + "╝"
+    print(bottom)
 
 def main():
     args = parse_args()
@@ -43,17 +66,14 @@ def main():
     tools_dict = tools.util_get_tools_dict()
     llm_tools_dict = tools.util_get_tools()
 
-    system_prompt = prompts.system_prompt(tools_dict=tools_dict, allowed_dir=allowed_dir)
+    if args.system_prompt:
+        system_prompt = args.system_prompt
+    else:
+        system_prompt = prompts.system_prompt(tools_dict=tools_dict, allowed_dir=allowed_dir)
 
     messages = [{"role": "system", "content": system_prompt}]
 
-    print(f"""
-    ╔═══════════════════════════════════════════════════════════════════╗
-    ║       Coding Agent Loop Started\t\t\t\t\t║
-    ║  Type 'quit' or 'exit' to exit the loop.\t\t\t\t║
-    ║  Allowed dir: {allowed_dir}\t║    
-    ╚═══════════════════════════════════════════════════════════════════╝
-    """)
+    print_welcome(allowed_dir, server_url)
 
     while True:
         llm_response_flag = False
@@ -90,42 +110,42 @@ def main():
         if tool_calls:
             # Tool call parsing and execution
             print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
-            if tool_calls:
-                for call in tool_calls:
-                    call_id = call.get("id", "")
-                    name = call.get("function", {}).get("name", "")
-                    params_str = call.get("function", {}).get("arguments", "{}")
-                    try:
-                        tool_params = json.loads(params_str)
-                    except json.JSONDecodeError:
-                        print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
-                        continue
 
-                    if name in tools_dict:
-                        # Check allowed directory for file operations
-                        if name in ["read_file", "write_file", "grep", "glob"]:
+            for call in tool_calls:
+                call_id = call.get("id", "")
+                name = call.get("function", {}).get("name", "")
+                params_str = call.get("function", {}).get("arguments", "{}")
+                try:
+                    tool_params = json.loads(params_str)
+                except json.JSONDecodeError:
+                    print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
+                    continue
+
+                if name in tools_dict:
+                    # Check allowed directory for file operations
+                    if name in ["read_file", "write_file", "grep", "glob"]:
+                        filepath = tool_params.get("filepath", "")
+                        if name == "write_file":
                             filepath = tool_params.get("filepath", "")
-                            if name == "write_file":
-                                filepath = tool_params.get("filepath", "")
-                            if filepath and not os.path.abspath(filepath).startswith(allowed_dir):
-                                print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
-                                continue
+                        if filepath and not os.path.abspath(filepath).startswith(allowed_dir):
+                            print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
+                            continue
 
-                        func = tools_dict[name]["function"]
-                        result = func(**tool_params)
-                        # Limiting output to 300 characters for readability
-                        result_str = str(result)
-                        if len(result_str) > 300:
-                            result_str = result_str[:300] + "... (truncated to 300 chars)"
-                        print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {result_str}")
+                    func = tools_dict[name]["function"]
+                    result = func(**tool_params)
+                    # Limiting output to 300 characters for readability
+                    result_str = str(result)
+                    if len(result_str) > 300:
+                        result_str = result_str[:300] + "... (truncated to 300 chars)"
+                    print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {result_str}")
 
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": str(result)
-                        })
-                    else:
-                        print(f"{BOLD}{RED}Warning:{RESET} Unknown tool: {name}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": str(result)
+                    })
+                else:
+                    print(f"{BOLD}{RED}Warning:{RESET} Unknown tool: {name}")
         else:
             llm_tool_response_flag = True
         

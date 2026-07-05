@@ -19,9 +19,9 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
     payload = {
         "model": model,
         "messages": messages,
-        "max_tokens": max_tokens,
         "temperature": temperature,
-        "top_p": top_p
+        # "max_tokens": max_tokens,
+        # "top_p": top_p
     }
 
     if tools:
