@@ -1,6 +1,8 @@
 # A minimal coding agent cli
 
-Purpose: no bloat, minimal coding cli, to enjoy experimenting and researching things...
+> No bloat, no dependencies, no tracking...
+
+Purpose: A no bloat, minimal coding cli, to enjoy experimenting and researching...
 
 ## Getting started:
 1. Installation (from pypi)
@@ -12,6 +14,11 @@ pip3 install mini-code-cli
 ```bash
 mini-code #run the agent loop
 mini-code --url "https://api.deepseek.com" --model "deepseek-v4-flash" --api-key "sk-dummy" --allowed-dir ./experiments/
+```
+
+3. Get help:
+```bash
+mini-code --help
 ```
 
 

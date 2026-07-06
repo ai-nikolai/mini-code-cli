@@ -1,3 +1,13 @@
+"""
+Usage:
+    mini-code
+
+Prompt:
+
+write a similar model.py file but for a LSTM based language model. Make it minimal and call it model_lstm.py it should still be compatible with eval.py
+
+"""
+
 import os
 import json
 
@@ -33,16 +43,27 @@ def parse_args():
     parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response")
     parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for LLM")
     parser.add_argument("--model", type=str, default="default", help="Model name")
+    parser.add_argument("--step_by_step", action="store_true", help="Whether to run the agent step by step. Default is to run in 'Permission' mode.")
+    parser.add_argument("--ask_permission", action="store_true", help="Ask for permission before any tool call.")
+
     args = parser.parse_args()
     return args
 
-def print_welcome(allowed_dir, server_url):
+def print_welcome(allowed_dir, server_url, args):
     # Calculate the length of the longest line inside the box
+    version = __import__('mini_code_cli').__version__
+    
+    permission_mode = "All tool calls require permission." if args.ask_permission else "Tool calls will execute without asking for permission."
+    agent_mode = "Agent is in manual-mode." if args.step_by_step else "Agent is in auto-mode."
+
     lines = [
-        "       Coding Agent Loop Started",
-        "  Type 'quit' or 'exit' to exit the loop.",
+        f"  MiniCodeCLI (v{version})",
+         "  Type 'quit' or 'exit' to exit the loop.",
         f"  Allowed dir: {allowed_dir}",
-        f"  Server URL: {server_url}"
+        f"  Server URL: {server_url}",
+        f"  {permission_mode}",
+        f"  {agent_mode}",
+         "  Shell disabled."
     ]
     max_len = max(len(line) for line in lines)
     margin = 2  # Space on each side inside the box
@@ -56,6 +77,14 @@ def print_welcome(allowed_dir, server_url):
         print(f"║{padded}║")
     bottom = "╚" + "═" * inner_width + "╝"
     print(bottom)
+
+def print_help(allowed_dir, server_url, args):
+    print_welcome(allowed_dir, server_url, args)
+    
+    help_message = ""
+    help_message += "Manual-mode means the agent will ask for user input after each LLM prediction." if args.step_by_step else "Auto-mode means the agent will keep calling the LLM until no further LLM calls are possible."
+
+    print(f"{BOLD}{GREEN}HELP:{RESET} {help_message}")
 
 def main():
     args = parse_args()
@@ -73,24 +102,43 @@ def main():
 
     messages = [{"role": "system", "content": system_prompt}]
 
-    print_welcome(allowed_dir, server_url)
+    print_welcome(allowed_dir, server_url, args)
 
+    llm_response_flag = False
+    llm_tool_response_flag = False
+    llm_repeat_flag = False
+    tool_count = 0
+    
     while True:
-        llm_response_flag = False
-        llm_tool_response_flag = False
-        try:
-            print("-"*30)
-            user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
-            if user_input.lower() in ["quit", "exit"]:
+        if llm_tool_response_flag and not args.step_by_step: #skip user input and try to call the model again until there no more tool calls.
+            print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls.")
+            llm_repeat_flag = True
+        else:
+        # get user input
+            if llm_repeat_flag:
+                print(f"{BOLD}{YELLOW}System:{RESET} Called {tool_count} tools in total. Exiting tool loop.")
+
+            tool_count = 0
+            try:
+                print("-"*30)
+                user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
+                if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
+                    print("\nThank you. Goodbye! Saving history...")
+                    save_history(messages)
+                    break
+            except KeyboardInterrupt:
                 print("\nThank you. Goodbye! Saving history...")
                 save_history(messages)
                 break
-        except KeyboardInterrupt:
-            print("\nThank you. Goodbye! Saving history...")
-            save_history(messages)
-            break
+            
+            if user_input == "/help":
+                print_help(allowed_dir, server_url, args)
+                continue
 
-        messages.append({"role": "user", "content": user_input})
+            messages.append({"role": "user", "content": user_input})
+
+        llm_response_flag = False
+        llm_tool_response_flag = False
 
         response_text, tool_calls = utils.call_openai_server(
             messages, 
@@ -102,16 +150,23 @@ def main():
         )
 
         if response_text:
-            print(f"{BOLD}{GREEN}Assistant:{RESET} {response_text}")
-            messages.append({"role": "assistant", "content": response_text})
-        else:
             llm_response_flag = True
+            print(f"{BOLD}{GREEN}Assistant:{RESET} {response_text}")
 
         if tool_calls:
+            llm_tool_response_flag = True
+            
+            messages.append({
+                    "role": "assistant",
+                    "content": response_text,
+                    "tool_calls": tool_calls
+            })
             # Tool call parsing and execution
             print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
 
             for call in tool_calls:
+                tool_count += 1
+
                 call_id = call.get("id", "")
                 name = call.get("function", {}).get("name", "")
                 params_str = call.get("function", {}).get("arguments", "{}")
@@ -132,6 +187,24 @@ def main():
                             continue
 
                     func = tools_dict[name]["function"]
+                    # asking permissions
+                    if args.ask_permission:
+                        print(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool?")
+                        print(f"name: {name}, parameters: {params_str}")
+                        try:
+                            permission_input = input("Type: 'y' or 'yes'\n")
+                        except KeyboardInterrupt:
+                            print("\nThank you. Goodbye! Saving history...")
+                            save_history(messages)
+                            sys.exit(0)
+
+                        if not permission_input in ['y', 'yes']:
+                            print(f"{BOLD}{YELLOW}Tool permission denied:{RESET}.")
+                            messages.append({
+                                "role": "user",
+                                "content": f"User denied permission for tool {name} and params {params_str}."
+                            })
+                            continue
                     result = func(**tool_params)
                     # Limiting output to 300 characters for readability
                     result_str = str(result)
@@ -145,11 +218,15 @@ def main():
                         "content": str(result)
                     })
                 else:
-                    print(f"{BOLD}{RED}Warning:{RESET} Unknown tool: {name}")
+                    print(f"{BOLD}{RED}Warning:{RESET} Unknown tool: {name}, params {params_str}")
         else:
-            llm_tool_response_flag = True
+            messages.append({
+                    "role": "assistant",
+                    "content": response_text,
+                    # "tool_calls": tool_calls
+            })
         
-        if llm_response_flag and llm_tool_response_flag:
+        if not llm_response_flag and not llm_tool_response_flag:
             print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
 
         save_history(messages)
