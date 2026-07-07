@@ -10,6 +10,8 @@ write a similar model.py file but for a LSTM based language model. Make it minim
 
 import os
 import json
+import signal
+
 
 from . import prompts
 from . import tools
@@ -41,15 +43,15 @@ def parse_args():
     parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response")
     parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for LLM")
     parser.add_argument("--model", type=str, default="default", help="Model name")
-    parser.add_argument("--api-key", type=str, default=None, help="API key for authentication")
+    parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
 
     # Agent behaviour related
-    parser.add_argument("--system_prompt", type=str, help="API host")
+    parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
     parser.add_argument("--auto-mode", action="store_true", help="Whether to run the agent in `auto-mode'. Or default: `manual-mode'.")
     parser.add_argument("--agent-md", type=str, help="If the agent should use an agent-md file... (it will added after system message.)")
 
     # Agent permissions related
-    parser.add_argument("--ask_permission", action="store_true", help="Ask for permission before any tool call.")
+    parser.add_argument("--ask-permission", action="store_true", help="Ask for permission before any tool call.")
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations")
     parser.add_argument("--enable-shell", action="store_true", help="Allow shell execution. Default: False") #todo
 
@@ -96,20 +98,58 @@ def print_help(allowed_dir, server_url, args):
 
     print(f"{BOLD}{GREEN}HELP:{RESET} {help_message}")
 
+def call_function_with_timeout(func, tool_params, name):
+    """calls function with params"""
+    class TimeoutError(Exception):
+        pass
+
+    def timeout_handler(signum, frame):
+        raise TimeoutError("Function call timed out")
+
+    timeout_seconds = 30  # Set your desired timeout in seconds
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout_seconds)
+    try:
+        result = func(**tool_params)
+    except TimeoutError:
+        print(f"{BOLD}{RED}Error:{RESET} Function {name} timed out after {timeout_seconds} seconds.")
+        result = "Error:Function {name} timed out after {timeout_seconds} seconds."
+    finally:
+        signal.alarm(0)  # Disable the alarm
+    
+    return result
+
 def main():
     args = parse_args()
 
-    allowed_dir = os.path.abspath(args.allowed_dir)
+
+    # LLM Related
     server_url = f"{args.url}"
+    api_key = None
+    if args.api_key:
+        api_key = args.api_key
+    else:
+        api_key = os.environ.get("MINI_CODE_API_KEY", "")
+        if api_key:
+            print(f"{YELLOW}API Key found at MINI_CODE_API_KEY{RESET}")
+        else:
+            print(f"{YELLOW}NO API Key found at MINI_CODE_API_KEY. Set it with export MINI_CODE_API_KEY='sk-api-key'{RESET}")
+
+    
+    # Permissions related
+    allowed_dir = os.path.abspath(args.allowed_dir)
 
     if not args.enable_shell:
         forbidden_tools = tools.shell_tools
     else:
         forbidden_tools = None
 
+    # TOOLs
     tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden_tools)
     llm_tools_dict = tools.util_get_tools(forbidden_tools=forbidden_tools)
 
+
+    # System Message and Agent.md
     if args.system_prompt:
         system_prompt = args.system_prompt
     else:
@@ -134,6 +174,7 @@ def main():
 
     print_welcome(allowed_dir, server_url, args)
 
+    # Agent Logic Flags
     llm_response_flag = False
     llm_tool_response_flag = False
     llm_repeat_flag = False
@@ -141,7 +182,7 @@ def main():
     
     while True:
         if llm_tool_response_flag and args.auto_mode: #skip user input and try to call the model again until there no more tool calls.
-            print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls.")
+            print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls. [Tool count={tool_count}]")
             llm_repeat_flag = True
         else:
         # get user input
@@ -176,7 +217,8 @@ def main():
             temperature=args.temperature, 
             model=args.model, 
             server_url=server_url, 
-            tools=llm_tools_dict
+            tools=llm_tools_dict,
+            api_key=api_key,
         )
 
         if response_text:
@@ -235,7 +277,9 @@ def main():
                                 "content": f"User denied permission for tool {name} and params {params_str}."
                             })
                             continue
-                    result = func(**tool_params)
+
+                    print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call: {name} with {tool_params}.")
+                    result = call_function_with_timeout(func, tool_params, name)
                     # Limiting output to 300 characters for readability
                     result_str = str(result)
                     if len(result_str) > 300:
