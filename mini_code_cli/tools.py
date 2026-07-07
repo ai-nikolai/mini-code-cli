@@ -65,14 +65,27 @@ def read_website(url):
     except Exception as e:
         return f"Error: {e}"
 
-def util_get_tools(tool_names=None):
+def run_shell_command(command):
+    """Run a shell command and return its output. Param: command (string)"""
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
+        output = result.stdout
+        if result.stderr:
+            output += "\nSTDERR:\n" + result.stderr
+        return output
+    except Exception as e:
+        return f"Error: {e}"
+
+def util_get_tools(allowed_tools=None, forbidden_tools=None):
     """Return a JSON string describing all tool functions in this file for LLM usage."""
     import inspect
     tools = []
-    if tool_names:
-        func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_") and name in tool_names]
-    else:
-        func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_")]
+    func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_")]
+    
+    if allowed_tools:
+        func_names = [name for name in func_names if name in allowed_tools]
+    if forbidden_tools:
+        func_names = [name for name in func_names if name not in forbidden_tools]
 
     for name in func_names:
         func = globals()[name]
@@ -108,17 +121,25 @@ def util_get_tools(tool_names=None):
     return tools
 
 
-def util_get_tools_dict():
+def util_get_tools_dict(allowed_tools=None, forbidden_tools=None):
     """Return a dictionary mapping tool names to their function objects."""
     result = {}
     func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_")]
+    if allowed_tools:
+        func_names = [name for name in func_names if name in allowed_tools]
+    if forbidden_tools:
+        func_names = [name for name in func_names if name not in forbidden_tools]
+
     for name in func_names:
         func = globals()[name]
         desc = func.__doc__ if func.__doc__ else f"Function {name}"
         result[name] = {"function": func, "description": desc}
     return result
 
+shell_tools = [
+    "run_shell_command"
+]
 
 if __name__=="__main__":
-    # print(util_get_tools())
-    print(json.dumps(tools_dict, indent=4))
+    print(util_get_tools())
+    # print(json.dumps(tools_dict, indent=4))

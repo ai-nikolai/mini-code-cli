@@ -36,25 +36,35 @@ def save_history(messages):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
+    # MODEL / LLM related
     parser.add_argument("--url", type=str, default="http://0.0.0.0:30000", help="API host")
-    parser.add_argument("--system_prompt", type=str, help="API host")
-    parser.add_argument("--api-key", type=str, default=None, help="API key for authentication")
-    parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations")
     parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response")
     parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for LLM")
     parser.add_argument("--model", type=str, default="default", help="Model name")
-    parser.add_argument("--step_by_step", action="store_true", help="Whether to run the agent step by step. Default is to run in 'Permission' mode.")
+    parser.add_argument("--api-key", type=str, default=None, help="API key for authentication")
+
+    # Agent behaviour related
+    parser.add_argument("--system_prompt", type=str, help="API host")
+    parser.add_argument("--auto-mode", action="store_true", help="Whether to run the agent in `auto-mode'. Or default: `manual-mode'.")
+    parser.add_argument("--agent-md", type=str, help="If the agent should use an agent-md file... (it will added after system message.)")
+
+    # Agent permissions related
     parser.add_argument("--ask_permission", action="store_true", help="Ask for permission before any tool call.")
+    parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations")
+    parser.add_argument("--enable-shell", action="store_true", help="Allow shell execution. Default: False") #todo
+
 
     args = parser.parse_args()
     return args
+
 
 def print_welcome(allowed_dir, server_url, args):
     # Calculate the length of the longest line inside the box
     version = __import__('mini_code_cli').__version__
     
     permission_mode = "All tool calls require permission." if args.ask_permission else "Tool calls will execute without asking for permission."
-    agent_mode = "Agent is in manual-mode." if args.step_by_step else "Agent is in auto-mode."
+    agent_mode = "Agent is in manual-mode." if not args.auto_mode else "Agent is in auto-mode."
+    shell_mode = "Shell disabled." if not args.enable_shell else "Shell enabled."
 
     lines = [
         f"  MiniCodeCLI (v{version})",
@@ -63,7 +73,7 @@ def print_welcome(allowed_dir, server_url, args):
         f"  Server URL: {server_url}",
         f"  {permission_mode}",
         f"  {agent_mode}",
-         "  Shell disabled."
+        f"  {shell_mode}"
     ]
     max_len = max(len(line) for line in lines)
     margin = 2  # Space on each side inside the box
@@ -82,7 +92,7 @@ def print_help(allowed_dir, server_url, args):
     print_welcome(allowed_dir, server_url, args)
     
     help_message = ""
-    help_message += "Manual-mode means the agent will ask for user input after each LLM prediction." if args.step_by_step else "Auto-mode means the agent will keep calling the LLM until no further LLM calls are possible."
+    help_message += "Manual-mode means the agent will ask for user input after each LLM prediction." if not args.auto_mode else "Auto-mode means the agent will keep calling the LLM until no further LLM calls are possible."
 
     print(f"{BOLD}{GREEN}HELP:{RESET} {help_message}")
 
@@ -92,8 +102,13 @@ def main():
     allowed_dir = os.path.abspath(args.allowed_dir)
     server_url = f"{args.url}"
 
-    tools_dict = tools.util_get_tools_dict()
-    llm_tools_dict = tools.util_get_tools()
+    if not args.enable_shell:
+        forbidden_tools = tools.shell_tools
+    else:
+        forbidden_tools = None
+
+    tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden_tools)
+    llm_tools_dict = tools.util_get_tools(forbidden_tools=forbidden_tools)
 
     if args.system_prompt:
         system_prompt = args.system_prompt
@@ -101,6 +116,21 @@ def main():
         system_prompt = prompts.system_prompt(tools_dict=tools_dict, allowed_dir=allowed_dir)
 
     messages = [{"role": "system", "content": system_prompt}]
+
+    if args.agent_md:
+        print(f"{YELLOW}AGENT.md '{args.agent_md}' specified.{RESET}")
+
+        # Check if the file exists
+        if not os.path.isfile(args.agent_md):
+            print(f"{RED}Error: The AGENT.md '{args.agent_md}' does not exist.{RESET}")
+        else:
+            # Load the content of agent-md file and add it after system message
+            with open(args.agent_md, 'r', encoding='utf-8') as f:
+                agent_md_content = f.read()
+            print(f"{YELLOW}AGENT.md '{args.agent_md}' loaded.{RESET}")
+
+        # Append the content as a user message after the system prompt
+        messages.append({"role": "user", "content": agent_md_content})
 
     print_welcome(allowed_dir, server_url, args)
 
@@ -110,7 +140,7 @@ def main():
     tool_count = 0
     
     while True:
-        if llm_tool_response_flag and not args.step_by_step: #skip user input and try to call the model again until there no more tool calls.
+        if llm_tool_response_flag and args.auto_mode: #skip user input and try to call the model again until there no more tool calls.
             print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls.")
             llm_repeat_flag = True
         else:
