@@ -43,6 +43,30 @@ Write an agent.md file for me that helps an LLM write efficient triton kernels, 
 ```bash
 mini-code --help
 ```
+```
+Agent loop for interacting with a language model
+
+options:
+  -h, --help            show this help message and exit
+  --url URL             API host
+  --max-tokens MAX_TOKENS
+                        Maximum tokens for LLM response
+  --temperature TEMPERATURE
+                        Temperature for LLM
+  --model MODEL         Model name
+  --api-key API_KEY     API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.
+  --cache-dir CACHE_DIR
+                        The cache dir for the session histories.
+  --system-prompt SYSTEM_PROMPT
+                        Replace system prompt, with a custom system prompt.
+  --auto-mode           Whether to run the agent in `auto-mode'. Or default: `manual-mode'.
+  --agent-md AGENT_MD   If the agent should use an agent-md file... (it will added after system message.)
+  --prompt PROMPT       An initial prompt from the user...
+  --ask-permission      Ask for permission before any tool call.
+  --allowed-dir ALLOWED_DIR
+                        Allowed directory for file operations
+  --enable-shell        Allow shell execution. Default: False
+  ```
 
 
 ## (C) Nikolai Rozanov, 2026 - Present

@@ -12,13 +12,16 @@ import os
 import json
 import signal
 
+import time
+import uuid
+
+import argparse
+import sys
 
 from . import prompts
 from . import tools
 from . import utils
 
-import argparse
-import sys
 
 # ANSI escape codes for colors and bold
 BOLD = '\033[1m'
@@ -30,11 +33,21 @@ MAGENTA = '\033[95m'
 CYAN = '\033[96m'
 RESET = '\033[0m'
 
-def save_history(messages):
+def save_history(messages, args, session_name=""):
     # Save messages to history.json
-    with open("history.json", "w") as f:
+    if args.cache_dir:
+        cache_dir = args.cache_dir
+    else:
+        cache_dir = os.path.expanduser("~/.cache/mini_code/sessions/")
+    os.makedirs(cache_dir, exist_ok=True)
+    history_path = os.path.join(cache_dir, f"history_{session_name}.json")
+    with open(history_path, 'w') as f:
         json.dump(messages, f, indent=2)
 
+def generate_unique_id():
+    """Generate a unique ID based on current time and a random component."""
+    timestamp = int(time.time() * 1000000)  # microseconds
+    return f"{timestamp}-{uuid.uuid4().hex[:8]}"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
@@ -45,10 +58,15 @@ def parse_args():
     parser.add_argument("--model", type=str, default="default", help="Model name")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
 
+    # Other settings:
+    parser.add_argument("--cache-dir", type=str, help="The cache dir for the session histories.")
+
+
     # Agent behaviour related
     parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
     parser.add_argument("--auto-mode", action="store_true", help="Whether to run the agent in `auto-mode'. Or default: `manual-mode'.")
     parser.add_argument("--agent-md", type=str, help="If the agent should use an agent-md file... (it will added after system message.)")
+    parser.add_argument("--prompt", type=str, help="An initial prompt from the user...")
 
     # Agent permissions related
     parser.add_argument("--ask-permission", action="store_true", help="Ask for permission before any tool call.")
@@ -60,7 +78,7 @@ def parse_args():
     return args
 
 
-def print_welcome(allowed_dir, server_url, args):
+def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir):
     # Calculate the length of the longest line inside the box
     version = __import__('mini_code_cli').__version__
     
@@ -70,6 +88,8 @@ def print_welcome(allowed_dir, server_url, args):
 
     lines = [
         f"  MiniCodeCLI (v{version})",
+        f"  The session-id is: {unique_id}" ,
+        f"  It will be saved under: `{cache_dir}`",
          "  Type 'quit' or 'exit' to exit the loop.",
         f"  Allowed dir: {allowed_dir}",
         f"  Server URL: {server_url}",
@@ -90,8 +110,8 @@ def print_welcome(allowed_dir, server_url, args):
     bottom = "╚" + "═" * inner_width + "╝"
     print(bottom)
 
-def print_help(allowed_dir, server_url, args):
-    print_welcome(allowed_dir, server_url, args)
+def print_help(allowed_dir, server_url, args, unique_id, cache_dir):
+    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir)
     
     help_message = ""
     help_message += "Manual-mode means the agent will ask for user input after each LLM prediction." if not args.auto_mode else "Auto-mode means the agent will keep calling the LLM until no further LLM calls are possible."
@@ -119,9 +139,14 @@ def call_function_with_timeout(func, tool_params, name):
     
     return result
 
+
+
 def main():
     args = parse_args()
 
+    # Get session unique ID:
+    unique_id = generate_unique_id()
+    cache_dir = args.cache_dir if args.cache_dir else "~/.cache/mini_code/sessions/"
 
     # LLM Related
     server_url = f"{args.url}"
@@ -172,7 +197,7 @@ def main():
         # Append the content as a user message after the system prompt
         messages.append({"role": "user", "content": agent_md_content})
 
-    print_welcome(allowed_dir, server_url, args)
+    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir)
 
     # Agent Logic Flags
     llm_response_flag = False
@@ -180,7 +205,10 @@ def main():
     llm_repeat_flag = False
     tool_count = 0
     
+    user_input = args.prompt
+
     while True:
+
         if llm_tool_response_flag and args.auto_mode: #skip user input and try to call the model again until there no more tool calls.
             print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls. [Tool count={tool_count}]")
             llm_repeat_flag = True
@@ -190,23 +218,29 @@ def main():
                 print(f"{BOLD}{YELLOW}System:{RESET} Called {tool_count} tools in total. Exiting tool loop.")
 
             tool_count = 0
-            try:
-                print("-"*30)
-                user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
-                if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
+            if not user_input:
+                try:
+                    print("-"*30)
+                    user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
+                    if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
+                        print("\nThank you. Goodbye! Saving history...")
+                        save_history(messages, args, unique_id)
+                        break
+                except KeyboardInterrupt:
                     print("\nThank you. Goodbye! Saving history...")
-                    save_history(messages)
+                    save_history(messages, args, unique_id)
                     break
-            except KeyboardInterrupt:
-                print("\nThank you. Goodbye! Saving history...")
-                save_history(messages)
-                break
+            else:
+                print("-"*30)
+                print(f"{BOLD}{CYAN}You (preset): {RESET}{user_input}")
             
             if user_input == "/help":
-                print_help(allowed_dir, server_url, args)
+                print_help(allowed_dir, server_url, args, unique_id, cache_dir)
+                user_input = ""
                 continue
 
             messages.append({"role": "user", "content": user_input})
+            user_input = ""
 
         llm_response_flag = False
         llm_tool_response_flag = False
@@ -267,7 +301,7 @@ def main():
                             permission_input = input("Type: 'y' or 'yes'\n")
                         except KeyboardInterrupt:
                             print("\nThank you. Goodbye! Saving history...")
-                            save_history(messages)
+                            save_history(messages, args, unique_id)
                             sys.exit(0)
 
                         if not permission_input in ['y', 'yes']:
@@ -292,7 +326,12 @@ def main():
                         "content": str(result)
                     })
                 else:
-                    print(f"{BOLD}{RED}Warning:{RESET} Unknown tool: {name}, params {params_str}")
+                    print(f"{BOLD}{RED}Error:{RESET} Unknown tool: {name}, params {params_str}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": f"Error: Unknown tool: {name}, params {params_str}"
+                    })
         else:
             messages.append({
                     "role": "assistant",
@@ -303,7 +342,7 @@ def main():
         if not llm_response_flag and not llm_tool_response_flag:
             print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
 
-        save_history(messages)
+        save_history(messages, args, unique_id)
 
 if __name__ == "__main__":
     main()

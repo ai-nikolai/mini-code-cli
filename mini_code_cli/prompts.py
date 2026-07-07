@@ -6,7 +6,7 @@ def system_prompt(tools_dict=None, allowed_dir=None):
 
     if tools_dict:
         tool_descriptions = "\n".join([f"{name} : {data['description']}" for name, data in tools_dict.items()])
-        base_prompt = "You are a helpful AI assistant with access to the following tools:\n"
+        base_prompt = "You are a helpful AI assistant with access to the following tools (only):\n"
         end_prompt = (
         "Choose the most appropriate tool for the task at hand. "
         "If a tool fails or you hit a limit, analyze the error and try a different approach. "
