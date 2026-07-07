@@ -61,7 +61,6 @@ def parse_args():
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help="The cache dir for the session histories.")
 
-
     # Agent behaviour related
     parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
     parser.add_argument("--auto-mode", action="store_true", help="Whether to run the agent in `auto-mode'. Or default: `manual-mode'.")
@@ -208,141 +207,154 @@ def main():
     user_input = args.prompt
 
     while True:
+        try:
 
-        if llm_tool_response_flag and args.auto_mode: #skip user input and try to call the model again until there no more tool calls.
-            print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls. [Tool count={tool_count}]")
-            llm_repeat_flag = True
-        else:
-        # get user input
-            if llm_repeat_flag:
-                print(f"{BOLD}{YELLOW}System:{RESET} Called {tool_count} tools in total. Exiting tool loop.")
+            if llm_tool_response_flag and args.auto_mode: #skip user input and try to call the model again until there no more tool calls.
+                print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls. [Tool count={tool_count}]")
+                llm_repeat_flag = True
+            else:
+            # get user input
+                if llm_repeat_flag:
+                    print(f"{BOLD}{YELLOW}System:{RESET} Called {tool_count} tools in total. Exiting tool loop.")
 
-            tool_count = 0
-            if not user_input:
-                try:
-                    print("-"*30)
-                    user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
-                    if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
-                        print("\nThank you. Goodbye! Saving history...")
+                tool_count = 0
+                if not user_input:
+                    try:
+                        print("-"*30)
+                        user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
+                        if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
+                            print("\nThank you. Goodbye!")
+                            print(f"Saving history to: {cache_dir}/{unique_id}")
+                            save_history(messages, args, unique_id)
+                            break
+                    except KeyboardInterrupt:
+                        print("\nThank you. Goodbye!")
+                        print(f"Saving history to: {cache_dir}/{unique_id}")
                         save_history(messages, args, unique_id)
                         break
-                except KeyboardInterrupt:
-                    print("\nThank you. Goodbye! Saving history...")
-                    save_history(messages, args, unique_id)
-                    break
-            else:
-                print("-"*30)
-                print(f"{BOLD}{CYAN}You (preset): {RESET}{user_input}")
-            
-            if user_input == "/help":
-                print_help(allowed_dir, server_url, args, unique_id, cache_dir)
-                user_input = ""
-                continue
-
-            messages.append({"role": "user", "content": user_input})
-            user_input = ""
-
-        llm_response_flag = False
-        llm_tool_response_flag = False
-
-        response_text, tool_calls = utils.call_openai_server(
-            messages, 
-            max_tokens=args.max_tokens, 
-            temperature=args.temperature, 
-            model=args.model, 
-            server_url=server_url, 
-            tools=llm_tools_dict,
-            api_key=api_key,
-        )
-
-        if response_text:
-            llm_response_flag = True
-            print(f"{BOLD}{GREEN}Assistant:{RESET} {response_text}")
-
-        if tool_calls:
-            llm_tool_response_flag = True
-            
-            messages.append({
-                    "role": "assistant",
-                    "content": response_text,
-                    "tool_calls": tool_calls
-            })
-            # Tool call parsing and execution
-            print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
-
-            for call in tool_calls:
-                tool_count += 1
-
-                call_id = call.get("id", "")
-                name = call.get("function", {}).get("name", "")
-                params_str = call.get("function", {}).get("arguments", "{}")
-                try:
-                    tool_params = json.loads(params_str)
-                except json.JSONDecodeError:
-                    print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
+                else:
+                    print("-"*30)
+                    print(f"{BOLD}{CYAN}You (preset): {RESET}{user_input}")
+                
+                if user_input == "/help":
+                    print_help(allowed_dir, server_url, args, unique_id, cache_dir)
+                    user_input = ""
                     continue
 
-                if name in tools_dict:
-                    # Check allowed directory for file operations
-                    if name in ["read_file", "write_file", "grep", "glob"]:
-                        filepath = tool_params.get("filepath", "")
-                        if name == "write_file":
+                messages.append({"role": "user", "content": user_input})
+                user_input = ""
+
+            llm_response_flag = False
+            llm_tool_response_flag = False
+
+            response_text, tool_calls = utils.call_openai_server(
+                messages, 
+                max_tokens=args.max_tokens, 
+                temperature=args.temperature, 
+                model=args.model, 
+                server_url=server_url, 
+                tools=llm_tools_dict,
+                api_key=api_key,
+            )
+
+            if response_text:
+                llm_response_flag = True
+                print(f"{BOLD}{GREEN}Assistant:{RESET} {response_text}")
+
+            if tool_calls:
+                llm_tool_response_flag = True
+                
+                messages.append({
+                        "role": "assistant",
+                        "content": response_text,
+                        "tool_calls": tool_calls
+                })
+                # Tool call parsing and execution
+                print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
+
+                for call in tool_calls:
+                    tool_count += 1
+
+                    call_id = call.get("id", "")
+                    name = call.get("function", {}).get("name", "")
+                    params_str = call.get("function", {}).get("arguments", "{}")
+                    try:
+                        tool_params = json.loads(params_str)
+                    except json.JSONDecodeError:
+                        print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
+                        continue
+
+                    if name in tools_dict:
+                        # Check allowed directory for file operations
+                        if name in ["read_file", "write_file", "grep", "glob"]:
                             filepath = tool_params.get("filepath", "")
-                        if filepath and not os.path.abspath(filepath).startswith(allowed_dir):
-                            print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
-                            continue
+                            if name == "write_file":
+                                filepath = tool_params.get("filepath", "")
+                            if filepath and not os.path.abspath(filepath).startswith(allowed_dir):
+                                print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
+                                continue
 
-                    func = tools_dict[name]["function"]
-                    # asking permissions
-                    if args.ask_permission:
-                        print(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool?")
-                        print(f"name: {name}, parameters: {params_str}")
-                        try:
-                            permission_input = input("Type: 'y' or 'yes'\n")
-                        except KeyboardInterrupt:
-                            print("\nThank you. Goodbye! Saving history...")
-                            save_history(messages, args, unique_id)
-                            sys.exit(0)
+                        func = tools_dict[name]["function"]
+                        # asking permissions
+                        if args.ask_permission:
+                            print(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool?")
+                            print(f"name: {name}, parameters: {params_str}")
+                            try:
+                                permission_input = input("Type: 'y' or 'yes'\n")
+                            except KeyboardInterrupt:
+                                print("\nThank you. Goodbye! Saving history...")
+                                save_history(messages, args, unique_id)
+                                sys.exit(0)
 
-                        if not permission_input in ['y', 'yes']:
-                            print(f"{BOLD}{YELLOW}Tool permission denied:{RESET}.")
-                            messages.append({
-                                "role": "user",
-                                "content": f"User denied permission for tool {name} and params {params_str}."
-                            })
-                            continue
+                            if not permission_input in ['y', 'yes']:
+                                print(f"{BOLD}{YELLOW}Tool permission denied:{RESET}.")
+                                messages.append({
+                                    "role": "user",
+                                    "content": f"User denied permission for tool {name} and params {params_str}."
+                                })
+                                continue
 
-                    print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call: {name} with {tool_params}.")
-                    result = call_function_with_timeout(func, tool_params, name)
-                    # Limiting output to 300 characters for readability
-                    result_str = str(result)
-                    if len(result_str) > 300:
-                        result_str = result_str[:300] + "... (truncated to 300 chars)"
-                    print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {result_str}")
+                        print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call: {name} with {tool_params}.")
+                        result = call_function_with_timeout(func, tool_params, name)
+                        # Limiting output to 300 characters for readability
+                        result_str = str(result)
+                        if len(result_str) > 300:
+                            result_str = result_str[:300] + "... (truncated to 300 chars)"
+                        print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {result_str}")
 
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": str(result)
-                    })
-                else:
-                    print(f"{BOLD}{RED}Error:{RESET} Unknown tool: {name}, params {params_str}")
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": f"Error: Unknown tool: {name}, params {params_str}"
-                    })
-        else:
-            messages.append({
-                    "role": "assistant",
-                    "content": response_text,
-                    # "tool_calls": tool_calls
-            })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": str(result)
+                        })
+                    else:
+                        print(f"{BOLD}{RED}Error:{RESET} Unknown tool: {name}, params {params_str}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": f"Error: Unknown tool: {name}, params {params_str}"
+                        })
+            else:
+                messages.append({
+                        "role": "assistant",
+                        "content": response_text,
+                        # "tool_calls": tool_calls
+                })
+            
+            if not llm_response_flag and not llm_tool_response_flag:
+                print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
+
+            save_history(messages, args, unique_id)
+
+        except KeyboardInterrupt:
+            print(f"{BOLD}{RED}INTERRUPTING:{RESET} Mini Code Exiting...")
+
+        except Exception as e:
+            print(f"{BOLD}{RED}FATAL ERROR:{RESET} Mini Code Crashed...:\n{e}")
         
-        if not llm_response_flag and not llm_tool_response_flag:
-            print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
-
-        save_history(messages, args, unique_id)
+        finally:
+            print(f"Saving history to: {cache_dir}/{unique_id}")
+            save_history(messages, args, unique_id)
 
 if __name__ == "__main__":
     main()
