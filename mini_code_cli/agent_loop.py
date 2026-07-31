@@ -54,7 +54,12 @@ def parse_args():
     # MODEL / LLM related
     parser.add_argument("--url", type=str, default="http://0.0.0.0:30000", help="API host")
     parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for LLM")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Temperature for LLM. If omitted, use the model provider's default.",
+    )
     parser.add_argument("--model", type=str, default="default", help="Model name")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
 
@@ -66,6 +71,11 @@ def parse_args():
     parser.add_argument("--auto-mode", action="store_true", help="Whether to run the agent in `auto-mode'. Or default: `manual-mode'.")
     parser.add_argument("--agent-md", type=str, help="If the agent should use an agent-md file... (it will added after system message.)")
     parser.add_argument("--prompt", type=str, help="An initial prompt from the user...")
+    parser.add_argument(
+        "--exit-after-run",
+        action="store_true",
+        help="Exit after the initial prompt finishes. With --auto-mode, wait until the tool loop finishes.",
+    )
 
     # Agent permissions related
     parser.add_argument("--ask-permission", action="store_true", help="Ask for permission before any tool call.")
@@ -345,6 +355,9 @@ def main():
                 print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
 
             save_history(messages, args, unique_id)
+
+            if args.exit_after_run and (not args.auto_mode or not llm_tool_response_flag):
+                break
 
         except KeyboardInterrupt:
             print(f"{BOLD}{RED}INTERRUPTING:{RESET} Mini Code Exiting...")
