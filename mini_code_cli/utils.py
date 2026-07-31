@@ -3,7 +3,7 @@ import json
 import argparse
 
 
-def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None,):
+def call_openai_server(messages, max_tokens=2048, temperature=None, top_p=0.95, model="default", server_url=None, api_key=None, tools=None,):
     """
     Querying an OpenAI-compatible server (local or remote) using the requests library.
     Supports authentication via API key if provided.
@@ -19,10 +19,12 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
         # "max_tokens": max_tokens,
         # "top_p": top_p
     }
+
+    if temperature is not None:
+        payload["temperature"] = temperature
 
     if tools:
         payload["tools"] = tools
@@ -44,14 +46,24 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         return content, tool_calls
 
     except requests.exceptions.RequestException as e:
+        error_detail = ""
+        if e.response is not None:
+            try:
+                error_payload = e.response.json()
+                error_detail = error_payload.get("error", {}).get("message", "")
+            except (ValueError, AttributeError):
+                error_detail = e.response.text.strip()
+
         print(f"Error calling OpenAI Server...: {e}")
+        if error_detail:
+            print(f"API error: {error_detail}")
         return None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")
         return None, None
 
 # Alternative: use the newer SGLang API format (v0.3+)
-def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None):
+def call_openai_server_prompt(prompt, max_tokens=1024, temperature=None, top_p=0.95, model="default", server_url=None, api_key=None, tools=None):
     """
     OpenAI compatible call, pre-creating the messages object.
     """

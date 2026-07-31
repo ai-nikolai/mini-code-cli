@@ -39,6 +39,14 @@ mini-code --enable-shell --auto-mode --agent-md "./skill.md" --allowed-dir "./" 
 Write an agent.md file for me that helps an LLM write efficient triton kernels, given a reference implementation.
 ```
 
+Run a single prompt and exit:
+```bash
+mini-code --prompt "Explain this codebase" --exit-after-run
+```
+
+Combine `--exit-after-run` with `--auto-mode` to keep executing tool calls until
+the tool loop finishes, then exit.
+
 4. Get help:
 ```bash
 mini-code --help
@@ -62,6 +70,7 @@ options:
   --auto-mode           Whether to run the agent in `auto-mode'. Or default: `manual-mode'.
   --agent-md AGENT_MD   If the agent should use an agent-md file... (it will added after system message.)
   --prompt PROMPT       An initial prompt from the user...
+  --exit-after-run      Exit after the initial prompt finishes. With --auto-mode, wait until the tool loop finishes.
   --ask-permission      Ask for permission before any tool call.
   --allowed-dir ALLOWED_DIR
                         Allowed directory for file operations
