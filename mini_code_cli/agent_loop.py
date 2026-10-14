@@ -36,6 +36,8 @@ RESET = '\033[0m'
 DEFAULT_CACHE_LOCATION=os.path.expanduser("~/.cache/mini_code/sessions")
 DEFAULT_MODEL_URL="http://0.0.0.0:30000"
 DEFAULT_TEMPERATURE=1.0
+DEFAULT_TOOL_TIMEOUT=120  # seconds before a single tool call is aborted
+DEFAULT_HTTP_TIMEOUT=300  # seconds before an LLM HTTP request is aborted
 
 def save_history(messages, args, session_name=""):
     # Save messages to history.json
@@ -75,6 +77,8 @@ def parse_args():
     parser.add_argument("--ask-permission", action="store_true", help="Ask for permission before any tool call.")
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations, default='./'")
     parser.add_argument("--enable-shell", action="store_true", help="Allow shell execution. default= False") 
+    parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
+    parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
 
 
     args = parser.parse_args()
@@ -128,15 +132,14 @@ def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
 
     print(f"{BOLD}{GREEN}HELP:{RESET} {help_message}")
 
-def call_function_with_timeout(func, tool_params, name):
-    """calls function with params"""
+def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_TOOL_TIMEOUT):
+    """calls function with params, aborting after `timeout_seconds`."""
     class TimeoutError(Exception):
         pass
 
     def timeout_handler(signum, frame):
         raise TimeoutError("Function call timed out")
 
-    timeout_seconds = 30  # Set your desired timeout in seconds
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(timeout_seconds)
     try:
@@ -273,6 +276,7 @@ def main():
                 server_url=server_url, 
                 tools=llm_tools_dict,
                 api_key=api_key,
+                timeout=args.llm_timeout,
             )
 
             if response_text:
@@ -341,7 +345,7 @@ def main():
                                 continue
 
                         print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call: {name} with {tool_params}.")
-                        result = call_function_with_timeout(func, tool_params, name)
+                        result = call_function_with_timeout(func, tool_params, name, timeout_seconds=args.tool_timeout)
                         # Limiting output to 300 characters for readability
                         result_str = str(result)
                         if len(result_str) > 300:

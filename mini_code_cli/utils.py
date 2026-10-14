@@ -3,7 +3,7 @@ import json
 import argparse
 
 
-def determine_vllm_model(server_url, api_key=None):
+def determine_vllm_model(server_url, api_key=None, timeout=120):
     """in case of vllm local server..."""
     url = f"{server_url}/v1/models"
 
@@ -17,7 +17,7 @@ def determine_vllm_model(server_url, api_key=None):
         response = requests.get(
             url,
             headers=headers,
-            timeout=60
+            timeout=timeout
         )
         response.raise_for_status()
 
@@ -36,10 +36,12 @@ def determine_vllm_model(server_url, api_key=None):
 
 
 
-def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None,):
+def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None, timeout=300,):
     """
     Querying an OpenAI-compatible server (local or remote) using the requests library.
     Supports authentication via API key if provided.
+    `timeout` is the number of seconds before the HTTP request is aborted. Reasoning
+    models can take a while to produce a response, so the default is deliberately high.
     """
     url = f"{server_url}/v1/chat/completions"
 
@@ -53,9 +55,12 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         "model": model, 
         "messages": messages,
         "temperature": temperature,
-        # "max_tokens": max_tokens,
+        "timeout": timeout,
         # "top_p": top_p
     }
+
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
 
     if tools:
         payload["tools"] = tools
@@ -66,7 +71,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
             url,
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=timeout
         )
         response.raise_for_status()
 
@@ -78,23 +83,26 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
 
     except requests.exceptions.RequestException as e:
         print(f"HTTP Error: {e}")
-        print(f"Status Code: {response.status_code}")
-        # Print the raw response body to see the detailed validation error
-        print(f"Response Body: {response.text}")
-        # If the response is JSON, you can parse and pretty-print it
         try:
-            error_details = response.json()
-            print("Parsed Error Details:")
-            print(json.dumps(error_details, indent=2))
-        except json.JSONDecodeError:
-            print("Response body is not valid JSON.")
+            print(f"Status Code: {response.status_code}")
+            # Print the raw response body to see the detailed validation error
+            print(f"Response Body: {response.text}")
+            # If the response is JSON, you can parse and pretty-print it
+            try:
+                error_details = response.json()
+                print("Parsed Error Details:")
+                print(json.dumps(error_details, indent=2))
+            except json.JSONDecodeError:
+                print("Response body is not valid JSON.")
+        except Exception as e:
+            print(f"Problem with (error) response: {e}")
         return None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")
         return None, None
 
 # Alternative: use the newer SGLang API format (v0.3+)
-def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None):
+def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None, timeout=300):
     """
     OpenAI compatible call, pre-creating the messages object.
     """
@@ -102,7 +110,7 @@ def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.
             {"role": "user", "content": prompt}
         ]
 
-    return call_openai_server(messages, max_tokens, temperature, top_p, model, server_url=server_url, api_key=api_key, tools=tools)
+    return call_openai_server(messages, max_tokens, temperature, top_p, model, server_url=server_url, api_key=api_key, tools=tools, timeout=timeout)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
