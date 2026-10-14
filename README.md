@@ -68,5 +68,18 @@ options:
   --enable-shell        Allow shell execution. Default: False
   ```
 
+## Other useful commands:
+
+### Serving a vllm model locally (with correct tools). vllm v0.30 (tested):
+```bash
+vllm serve ornith-ai/Ornith-1.5-397B-FP8 \
+    --tensor-parallel-size 4 \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_xml \
+    --reasoning-parser qwen3 \
+    --trust-remote-code
+```
 
 ## (C) Nikolai Rozanov, 2026 - Present

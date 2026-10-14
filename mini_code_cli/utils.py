@@ -3,6 +3,39 @@ import json
 import argparse
 
 
+def determine_vllm_model(server_url, api_key=None):
+    """in case of vllm local server..."""
+    url = f"{server_url}/v1/models"
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=60
+        )
+        response.raise_for_status()
+
+        result = response.json().get('data',[{}])[0]
+        model_name = result.get("id", "")
+
+        return model_name
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling OpenAI Server...: {e}")
+        return None
+
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        print(f"Error processing response: {e}")
+        return None
+
+
+
 def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None,):
     """
     Querying an OpenAI-compatible server (local or remote) using the requests library.
@@ -17,7 +50,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         headers["Authorization"] = f"Bearer {api_key}"
 
     payload = {
-        # "model": model, 
+        "model": model, 
         "messages": messages,
         "temperature": temperature,
         # "max_tokens": max_tokens,
@@ -44,7 +77,17 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         return content, tool_calls
 
     except requests.exceptions.RequestException as e:
-        print(f"Error calling OpenAI Server...: {e}")
+        print(f"HTTP Error: {e}")
+        print(f"Status Code: {response.status_code}")
+        # Print the raw response body to see the detailed validation error
+        print(f"Response Body: {response.text}")
+        # If the response is JSON, you can parse and pretty-print it
+        try:
+            error_details = response.json()
+            print("Parsed Error Details:")
+            print(json.dumps(error_details, indent=2))
+        except json.JSONDecodeError:
+            print("Response body is not valid JSON.")
         return None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")

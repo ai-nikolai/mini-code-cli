@@ -81,7 +81,7 @@ def parse_args():
     return args
 
 
-def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir):
+def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None):
     # Calculate the length of the longest line inside the box
     version = __import__('mini_code_cli').__version__
     
@@ -96,6 +96,7 @@ def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir):
          "  Type 'quit' or 'exit' to exit the loop.",
         f"  Allowed dir: {allowed_dir}",
         f"  Server URL: {server_url}",
+        f"  Model Name: {model_name}",
         f"  {permission_mode}",
         f"  {agent_mode}",
         f"  {shell_mode}"
@@ -113,8 +114,8 @@ def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir):
     bottom = "╚" + "═" * inner_width + "╝"
     print(bottom)
 
-def print_help(allowed_dir, server_url, args, unique_id, cache_dir):
-    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir)
+def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
+    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name)
     
     help_message = ""
     help_message += "Manual-mode means the agent will ask for user input after each LLM prediction." if not args.auto_mode else "Auto-mode means the agent will keep calling the LLM until no further LLM calls are possible."
@@ -149,10 +150,17 @@ def main():
 
     # Get session unique ID:
     unique_id = generate_unique_id()
-    cache_dir = args.cache_dir if args.cache_dir else "~/.cache/mini_code/sessions/"
+    cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
     # LLM Related
     server_url = f"{args.url}"
+    new_model_name = utils.determine_vllm_model(server_url)
+
+    if new_model_name:
+        actual_model = new_model_name
+    else:
+        actual_model = args.model
+
     api_key = None
     if args.api_key:
         api_key = args.api_key
@@ -200,7 +208,7 @@ def main():
         # Append the content as a user message after the system prompt
         messages.append({"role": "user", "content": agent_md_content})
 
-    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir)
+    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, actual_model)
 
     # Agent Logic Flags
     llm_response_flag = False
@@ -228,12 +236,12 @@ def main():
                         user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
                         if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
                             print("\nThank you. Goodbye!")
-                            print(f"Saving history to: {cache_dir}/{unique_id}")
+                            print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
                             save_history(messages, args, unique_id)
                             break
                     except KeyboardInterrupt:
                         print("\nThank you. Goodbye!")
-                        print(f"Saving history to: {cache_dir}/{unique_id}")
+                        print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
                         save_history(messages, args, unique_id)
                         break
                 else:
@@ -241,7 +249,7 @@ def main():
                     print(f"{BOLD}{CYAN}You (preset): {RESET}{user_input}")
                 
                 if user_input == "/help":
-                    print_help(allowed_dir, server_url, args, unique_id, cache_dir)
+                    print_help(allowed_dir, server_url, args, unique_id, cache_dir, actual_model)
                     user_input = ""
                     continue
 
@@ -255,7 +263,7 @@ def main():
                 messages, 
                 max_tokens=args.max_tokens, 
                 temperature=args.temperature, 
-                model=args.model, 
+                model=actual_model, 
                 server_url=server_url, 
                 tools=llm_tools_dict,
                 api_key=api_key,
@@ -357,7 +365,7 @@ def main():
             print(f"{BOLD}{RED}FATAL ERROR:{RESET} Mini Code Crashed...:\n{e}")
         
         finally:
-            print(f"Saving history to: {cache_dir}/{unique_id}")
+            print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
             save_history(messages, args, unique_id)
 
 if __name__ == "__main__":
