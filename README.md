@@ -73,6 +73,28 @@ options:
   --enable-shell        Allow shell execution. Default: False
   ```
 
+## Testing
+
+The project ships with a small standard-library test suite (no extra dependencies to install):
+
+```bash
+# Run the whole suite from the repo root:
+python3 -m unittest discover -s tests -p "test_*.py"
+
+# ...or run a single test file:
+python3 tests/test_tools.py
+python3 tests/test_sandboxing.py
+python3 tests/test_agent_loop.py
+```
+
+The tests focus on the parts of the agent that are easy to get wrong and worth guarding:
+
+- **`test_sandboxing.py`** — the `--allowed-dir` sandbox. Verifies that child paths are allowed, while `..` traversal and sibling paths outside the allowed directory are rejected.
+- **`test_tools.py`** — the tool functions. Confirms they *return* their results/errors (instead of printing), that `run_shell_command` captures stderr and honors a timeout, and that the generated tool schema exposes the expected parameters.
+- **`test_agent_loop.py`** — agent-loop behaviour. Confirms that enabling the shell forces per-command permission prompts, that memory compaction is correctly wired (accepts token accounting), and that token-usage formatting handles servers that report no usage.
+
+This keeps the tool honest as it grows, and makes it safe to experiment with riskier features (like `--enable-shell`) without regressions.
+
 ## Other useful commands:
 
 ### Serving a vllm model locally (with correct tools). vllm v0.30 (tested):

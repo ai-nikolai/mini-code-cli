@@ -5,13 +5,17 @@ import urllib.parse
 import urllib.request
 import json
 
+# Default timeout (seconds) for a single tool invocation. Mirrors the CLI's
+# --tool-timeout default so a tool that is slow/hangs gets aborted.
+DEFAULT_TOOL_TIMEOUT = 120
+
+
 def read_file(filepath):
     """Read the contents of a file and return as a string. Param: filepath"""
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             return f.read()
     except Exception as e:
-        print(f"Error: {e}")
         return f"Error: {e}"
 
 
@@ -20,9 +24,10 @@ def write_file(filepath, content):
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
+        return f"Wrote to file: {filepath}"
     except Exception as e:
-        print(f"Error: {e}")
-    return f"Wrote to file: {filepath}, content: {content}."
+        return f"Error: {e}"
+
 
 def grep(pattern, filepath):
     """Search for a pattern in a file using grep and return matching lines. Param: pattern, filepath"""
@@ -32,12 +37,14 @@ def grep(pattern, filepath):
     except Exception as e:
         return f"Error: {e}"
 
+
 def glob(pattern):
     """Return list of file paths matching the given glob pattern. Param: pattern"""
     try:
         return glob_module.glob(pattern)
     except Exception as e:
         return f"Error: {e}"
+
 
 def web_search(query):
     """Perform a simple web search using DuckDuckGo's API and return top results. Param: query"""
@@ -58,6 +65,7 @@ def web_search(query):
     except Exception as e:
         return f"Error: {e}"
 
+
 def read_website(url):
     """Fetch and return the text content of a given URL (simplified, returns raw HTML). Param: url"""
     try:
@@ -66,16 +74,18 @@ def read_website(url):
     except Exception as e:
         return f"Error: {e}"
 
-def run_shell_command(command):
+
+def run_shell_command(command, timeout=DEFAULT_TOOL_TIMEOUT):
     """Run a shell command and return its output. Param: command (string)"""
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout, check=False)
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
         return output
     except Exception as e:
         return f"Error: {e}"
+
 
 def util_get_tools(allowed_tools=None, forbidden_tools=None):
     """Return a JSON string describing all tool functions in this file for LLM usage."""

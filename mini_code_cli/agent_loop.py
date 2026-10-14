@@ -211,7 +211,7 @@ def is_within_allowed_dir(filepath, allowed_dir):
         return False
 
 
-def maybe_compact(messages, server_url, model, api_key, llm_timeout, max_messages=DEFAULT_MAX_MESSAGES):
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, max_messages=DEFAULT_MAX_MESSAGES):
     """Compact the conversation history once it grows beyond `max_messages`.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
@@ -253,6 +253,17 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, max_message
     return messages
 
 
+def shell_forces_ask_permission(args):
+    """Whether enabling the shell should force per-command permission prompts.
+
+    Running shell commands without asking is dangerous (the agent can run any
+    command and escape --allowed-dir), so whenever the shell is enabled we
+    force ask-permission for the whole session. Exposed as a pure function so it
+    can be unit-tested independently of argparse / stdin.
+    """
+    return bool(getattr(args, "enable_shell", False))
+
+
 def main():
     args = parse_args()
 
@@ -292,6 +303,13 @@ def main():
         print(f"{BOLD}{RED}WARNING:{RESET} Shell execution is ENABLED and will run WITHOUT any permission "
               f"checks. The agent can execute ANY command on this system and can escape --allowed-dir. "
               f"Use with extreme caution.")
+
+    # Safety: enabling shell forces per-command permission prompts for the whole session,
+    # so the agent can never run arbitrary, unsupervised commands.
+    if shell_forces_ask_permission(args):
+        print(f"{BOLD}{YELLOW}NOTE:{RESET} Shell execution is ENABLED. For safety, this forces "
+              f"per-command permission prompts for the entire session.")
+        args.ask_permission = True
 
     # TOOLs
     tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden_tools)
@@ -387,7 +405,7 @@ def main():
             llm_tool_response_flag = False
 
             # Compact the history if it's getting long, to avoid overflowing the context window.
-            messages = maybe_compact(messages, server_url, actual_model, api_key, args.llm_timeout)
+            messages = maybe_compact(messages, server_url, actual_model, api_key, args.llm_timeout, token_stats)
 
             response_text, tool_calls, usage = utils.call_openai_server(
                 messages, 
@@ -440,11 +458,11 @@ def main():
                         continue
 
                     if name in tools_dict:
-                        # Check allowed directory for file operations
+                        # Check allowed directory for file operations.
+                        # Applies to every filesystem tool (read/write/grep/glob) so the agent
+                        # cannot read or write anything outside --allowed-dir.
+                        filepath = tool_params.get("filepath", "")
                         if name in ["read_file", "write_file", "grep", "glob"]:
-                            filepath = tool_params.get("filepath", "")
-                            if name == "write_file":
-                                filepath = tool_params.get("filepath", "")
                             if filepath and not is_within_allowed_dir(filepath, allowed_dir):
                                 print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
                                 continue
