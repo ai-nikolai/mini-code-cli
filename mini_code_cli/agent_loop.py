@@ -33,7 +33,7 @@ MAGENTA = '\033[95m'
 CYAN = '\033[96m'
 RESET = '\033[0m'
 
-DEFAULT_CACHE_LOCATION=os.path.expanduser("~/.cache/mini_code/sessions")
+DEFAULT_CACHE_LOCATION=os.path.expanduser("~/.cache/mini_code/sessions/")
 DEFAULT_MODEL_URL="http://0.0.0.0:30000"
 DEFAULT_TEMPERATURE=1.0
 DEFAULT_TOOL_TIMEOUT=120  # seconds before a single tool call is aborted
@@ -47,9 +47,50 @@ def save_history(messages, args, session_name=""):
     else:
         cache_dir = DEFAULT_CACHE_LOCATION
     os.makedirs(cache_dir, exist_ok=True)
-    history_path = os.path.join(cache_dir, f"history_{session_name}.json")
+    os.makedirs(os.path.join(cache_dir,session_name), exist_ok=True)
+
+    history_path = os.path.join(cache_dir, session_name, f"history.json")
     with open(history_path, 'w') as f:
         json.dump(messages, f, indent=2)
+
+
+def accumulate_usage(token_stats, usage):
+    """Add a single LLM call's token usage into the running session totals."""
+    if not usage:
+        return
+    token_stats["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
+    token_stats["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+    token_stats["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+    token_stats["llm_calls"] += 1
+
+
+def format_usage(usage):
+    """Human-readable one-line summary of a single call's token usage."""
+    if not usage:
+        return "tokens: n/a (server did not report usage)"
+    return (f"tokens: input={usage.get('prompt_tokens', 0)} "
+            f"output={usage.get('completion_tokens', 0)} "
+            f"total={usage.get('total_tokens', 0)}")
+
+
+def save_usage(token_stats, cache_dir, session_name=""):
+    """Persist the accumulated token usage to the session folder."""
+    os.makedirs(cache_dir, exist_ok=True)
+    usage_path = os.path.join(cache_dir, session_name, f"usage.json")
+    with open(usage_path, 'w') as f:
+        json.dump(token_stats, f, indent=2)
+    return usage_path
+
+
+def print_usage_summary(token_stats):
+    """Print the accumulated token usage for the session so far."""
+    print("-"*20)
+    print(f"{BOLD}{CYAN}Token usage (this session):{RESET}")
+    print(f"  LLM calls      : {token_stats['llm_calls']}")
+    print(f"  Input tokens   : {token_stats['prompt_tokens']}")
+    print(f"  Output tokens  : {token_stats['completion_tokens']}")
+    print(f"  Total tokens   : {token_stats['total_tokens']}")
+    print("-"*20)
 
 def generate_unique_id():
     """Generate a unique ID based on current time and a random component."""
@@ -185,7 +226,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, max_message
     try:
         print(f"{BOLD}{YELLOW}System:{RESET} Compacting conversation history ({len(messages)} messages -> summary)...")
         summary_prompt = prompts.compaction_prompt(messages)
-        summary, _ = utils.call_openai_server(
+        summary, _, compact_usage = utils.call_openai_server(
             [{"role": "user", "content": summary_prompt}],
             max_tokens=1024,
             temperature=0.0,
@@ -194,6 +235,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, max_message
             api_key=api_key,
             timeout=llm_timeout,
         )
+        accumulate_usage(token_stats, compact_usage)
         if summary:
             system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
             compacted = []
@@ -281,6 +323,14 @@ def main():
 
     print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, actual_model)
 
+    # Token accounting
+    token_stats = {
+        "prompt_tokens": 0,      # input tokens
+        "completion_tokens": 0,  # output tokens
+        "total_tokens": 0,
+        "llm_calls": 0,
+    }
+
     # Agent Logic Flags
     llm_response_flag = False
     llm_tool_response_flag = False
@@ -309,11 +359,17 @@ def main():
                             print("\nThank you. Goodbye!")
                             print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
                             save_history(messages, args, unique_id)
+                            usage_path = save_usage(token_stats, cache_dir, unique_id)
+                            print_usage_summary(token_stats)
+                            print(f"Saving usage to: {usage_path}")
                             break
                     except KeyboardInterrupt:
                         print("\nThank you. Goodbye!")
                         print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
                         save_history(messages, args, unique_id)
+                        usage_path = save_usage(token_stats, cache_dir, unique_id)
+                        print_usage_summary(token_stats)
+                        print(f"Saving usage to: {usage_path}")
                         break
                 else:
                     print("="*30)
@@ -333,7 +389,7 @@ def main():
             # Compact the history if it's getting long, to avoid overflowing the context window.
             messages = maybe_compact(messages, server_url, actual_model, api_key, args.llm_timeout)
 
-            response_text, tool_calls = utils.call_openai_server(
+            response_text, tool_calls, usage = utils.call_openai_server(
                 messages, 
                 max_tokens=args.max_tokens, 
                 temperature=args.temperature, 
@@ -343,6 +399,10 @@ def main():
                 api_key=api_key,
                 timeout=args.llm_timeout,
             )
+
+            # Record and show the token usage for this LLM call.
+            accumulate_usage(token_stats, usage)
+            print(f"{BOLD}{CYAN}[{format_usage(usage)}]{RESET}")
 
             if response_text:
                 llm_response_flag = True
@@ -450,6 +510,9 @@ def main():
         finally:
             print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
             save_history(messages, args, unique_id)
+            usage_path = save_usage(token_stats, cache_dir, unique_id)
+            print(f"Saving usage to: {usage_path}")
+            print_usage_summary(token_stats)
 
 if __name__ == "__main__":
     main()

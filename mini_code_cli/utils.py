@@ -79,7 +79,17 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         content = result.get("content", "")
         tool_calls = result.get("tool_calls", [])
 
-        return content, tool_calls
+        # Token usage, when the server reports it (many local servers do not).
+        usage = response.json().get("usage", {}) or {}
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+
+        return content, tool_calls, {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
 
     except requests.exceptions.RequestException as e:
         print(f"HTTP Error: {e}")
@@ -96,10 +106,10 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
                 print("Response body is not valid JSON.")
         except Exception as e:
             print(f"Problem with (error) response: {e}")
-        return None, None
+        return None, None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")
-        return None, None
+        return None, None, None
 
 # Alternative: use the newer SGLang API format (v0.3+)
 def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None, timeout=300):
@@ -138,7 +148,7 @@ if __name__ == '__main__':
     print(f"Prompt:\n{prompt}")
     print("---")
  
-    response_text, tool_calls = call_openai_server_prompt(prompt, server_url=server_url, api_key=args.api_key, tools=tools_dict)
+    response_text, tool_calls, _ = call_openai_server_prompt(prompt, server_url=server_url, api_key=args.api_key, tools=tools_dict)
     print(f"Response:\n{response_text}")
     print("---")
     print(f"Tools:\n{tool_calls}")
