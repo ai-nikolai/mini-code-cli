@@ -81,6 +81,22 @@ def parse_args():
     return args
 
 
+def print_lines_with_border(lines):
+    """Prints any list of strings with a border."""
+    max_len = max(len(line) for line in lines)
+    margin = 2  # Space on each side inside the box
+    inner_width = max_len + 2 * margin
+    # Build the box
+    top_bottom = "╔" + "═" * inner_width + "╗"
+    print(top_bottom)
+    for line in lines:
+        # Pad the line to inner_width characters
+        padded = line.ljust(inner_width)
+        print(f"║{padded}║")
+    bottom = "╚" + "═" * inner_width + "╝"
+    print(bottom)
+
+
 def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None):
     # Calculate the length of the longest line inside the box
     version = __import__('mini_code_cli').__version__
@@ -101,18 +117,8 @@ def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_nam
         f"  {agent_mode}",
         f"  {shell_mode}"
     ]
-    max_len = max(len(line) for line in lines)
-    margin = 2  # Space on each side inside the box
-    inner_width = max_len + 2 * margin
-    # Build the box
-    top_bottom = "╔" + "═" * inner_width + "╗"
-    print(top_bottom)
-    for line in lines:
-        # Pad the line to inner_width characters
-        padded = line.ljust(inner_width)
-        print(f"║{padded}║")
-    bottom = "╚" + "═" * inner_width + "╝"
-    print(bottom)
+
+    print_lines_with_border(lines)
 
 def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
     print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name)
@@ -271,7 +277,9 @@ def main():
 
             if response_text:
                 llm_response_flag = True
-                print(f"{BOLD}{GREEN}Assistant:{RESET} {response_text}")
+                response_lines=[f"{BOLD}{GREEN}Assistant:{RESET}"]
+                response_lines.extend(response_text.split('\n'))
+                print_lines_with_border(response_lines)
 
             if tool_calls:
                 llm_tool_response_flag = True
