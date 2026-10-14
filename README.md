@@ -34,9 +34,13 @@ mini-code --enable-shell --auto-mode --agent-md "./skill.md" --allowed-dir "./" 
 ```
 - auto-mode: the agent will continue querying the LLM and executing tools, until no more tool calls are possible
 - agent.md: this will read an agent.md file with the specified name (e.g. ./skill.md)
-- shell-enabled: **Be careful**: This will allow the agent to execute shell commands. Specifically, there is no permission checks.
-- allowed-dir: this specifies which dirs the agent can read and write from, that does not stop the shell comands!
-- ask-permission: asks user permission before every tool call.
+- shell-enabled: **Be careful**: This will allow the agent to execute shell commands. **Every command is first checked by a shell-safety classifier** that sorts it into three tiers:
+    - **DENY** — obviously destructive commands (e.g. `rm -rf /`, `dd of=/dev/...`, `mkfs.*`, fork bombs) are **refused outright** and never run.
+    - **ASK** — risky commands (e.g. `rm file`, `sudo ...`, `chmod`, `curl ... | sh`) require your confirmation before running.
+    - **ALLOW** — clearly safe commands (e.g. `ls`, `cat`, `git status`) run without prompting.
+  This protection is **always enforced** for the shell tool, even in auto-mode / without `--ask-permission`, so the agent can never run dangerous commands unattended. (The classifier is a heuristic, not a sandbox — use with care.)
+- allowed-dir: this specifies which dirs the agent can read and write from, that does not stop the shell comands! (though dangerous shell commands are still blocked by the classifier above).
+- ask-permission: asks user permission before every tool call. For shell commands, commands in the ALLOW tier skip the prompt, DENY is blocked, and ASK always prompts.
 - system-prompt: you can override the default prompt by using a string. (Not Agent.md is always appended after the system prompt.)
 
 3. Try a prompt:
@@ -67,7 +71,7 @@ options:
   --auto-mode           Whether to run the agent in `auto-mode'. Or default: `manual-mode'.
   --agent-md AGENT_MD   If the agent should use an agent-md file... (it will added after system message.)
   --prompt PROMPT       An initial prompt from the user...
-  --ask-permission      Ask for permission before any tool call.
+  --ask-permission      Ask for permission before any tool call. (Shell ALLOW-tier commands skip the prompt; DENY is blocked.)
   --allowed-dir ALLOWED_DIR
                         Allowed directory for file operations
   --enable-shell        Allow shell execution. Default: False
@@ -85,6 +89,7 @@ python3 -m unittest discover -s tests -p "test_*.py"
 python3 tests/test_tools.py
 python3 tests/test_sandboxing.py
 python3 tests/test_agent_loop.py
+python3 tests/test_shell_safety.py
 ```
 
 The tests focus on the parts of the agent that are easy to get wrong and worth guarding:
@@ -92,6 +97,7 @@ The tests focus on the parts of the agent that are easy to get wrong and worth g
 - **`test_sandboxing.py`** — the `--allowed-dir` sandbox. Verifies that child paths are allowed, while `..` traversal and sibling paths outside the allowed directory are rejected.
 - **`test_tools.py`** — the tool functions. Confirms they *return* their results/errors (instead of printing), that `run_shell_command` captures stderr and honors a timeout, and that the generated tool schema exposes the expected parameters.
 - **`test_agent_loop.py`** — agent-loop behaviour. Confirms that enabling the shell forces per-command permission prompts, that memory compaction is correctly wired (accepts token accounting), and that token-usage formatting handles servers that report no usage.
+- **`test_shell_safety.py`** — the shell command classifier. Confirms commands are sorted into the three tiers correctly: destructive commands (`rm -rf /`, `dd of=/dev/...`, `mkfs.*`, fork bombs) are **DENY**, risky ones (`rm file`, `sudo`, `curl | sh`, redirects to `/etc/...`) are **ASK**, and safe ones (`ls`, `cat`, `git status`) are **ALLOW**.
 
 This keeps the tool honest as it grows, and makes it safe to experiment with riskier features (like `--enable-shell`) without regressions.
 

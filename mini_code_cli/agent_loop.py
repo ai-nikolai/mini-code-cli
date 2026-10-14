@@ -19,6 +19,7 @@ import argparse
 import sys
 
 from . import prompts
+from . import shell_safety_utils
 from . import tools
 from . import utils
 
@@ -38,7 +39,7 @@ DEFAULT_MODEL_URL="http://0.0.0.0:30000"
 DEFAULT_TEMPERATURE=1.0
 DEFAULT_TOOL_TIMEOUT=120  # seconds before a single tool call is aborted
 DEFAULT_HTTP_TIMEOUT=300  # seconds before an LLM HTTP request is aborted
-DEFAULT_MAX_MESSAGES=100  # messages in history before it is compacted to a summary
+DEFAULT_MAX_MESSAGES=150  # messages in history before it is compacted to a summary
 
 def save_history(messages, args, session_name=""):
     # Save messages to history.json
@@ -196,13 +197,13 @@ def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_
 
 
 
-def is_within_allowed_dir(filepath, allowed_dir):
-    """Return True if the resolved `filepath` lives inside `allowed_dir`.
+def is_within_allowed_dir(file_path, allowed_dir):
+    """Return True if the resolved `file_path` lives inside `allowed_dir`.
 
     Uses os.path.realpath to resolve symlinks and '..' so path-traversal or
     symlink tricks cannot escape the allowed directory.
     """
-    target = os.path.realpath(filepath)
+    target = os.path.realpath(file_path)
     root = os.path.realpath(allowed_dir)
     try:
         return os.path.commonpath([target, root]) == root
@@ -304,12 +305,16 @@ def main():
               f"checks. The agent can execute ANY command on this system and can escape --allowed-dir. "
               f"Use with extreme caution.")
 
-    # Safety: enabling shell forces per-command permission prompts for the whole session,
-    # so the agent can never run arbitrary, unsupervised commands.
+    # Safety: when the shell is enabled we use the shell-safety classifier
+    # (shell_safety_utils) to gate every command into DENY / ASK / ALLOW tiers.
+    # DENY commands are blocked outright, ASK commands still require a manual
+    # confirmation, and only clearly-safe commands run without prompting. This
+    # keeps the shell usable without constant prompting while still stopping
+    # the obvious foot-guns (e.g. `rm -rf /`).
     if shell_forces_ask_permission(args):
-        print(f"{BOLD}{YELLOW}NOTE:{RESET} Shell execution is ENABLED. For safety, this forces "
-              f"per-command permission prompts for the entire session.")
-        args.ask_permission = True
+        print(f"{BOLD}{YELLOW}NOTE:{RESET} Shell execution is ENABLED. Every command is "
+              f"checked by the shell-safety classifier: destructive commands are blocked, "
+              f"others require your confirmation.")
 
     # TOOLs
     tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden_tools)
@@ -461,17 +466,40 @@ def main():
                         # Check allowed directory for file operations.
                         # Applies to every filesystem tool (read/write/grep/glob) so the agent
                         # cannot read or write anything outside --allowed-dir.
-                        filepath = tool_params.get("filepath", "")
+                        file_path = tool_params.get("file_path", "")
                         if name in ["read_file", "write_file", "grep", "glob"]:
-                            if filepath and not is_within_allowed_dir(filepath, allowed_dir):
+                            if file_path and not is_within_allowed_dir(file_path, allowed_dir):
                                 print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
                                 continue
 
                         func = tools_dict[name]["function"]
+                        # Shell-safety gate. Classify shell commands into DENY / ASK /
+                        # ALLOW tiers. This is always enforced for the shell tool
+                        # (independent of --ask-permission) so the agent can never run
+                        # obviously destructive commands unattended.
+                        shell_cmd = None
+                        shell_tier = None
+                        shell_reason = None
+                        if name == "run_shell_command":
+                            shell_cmd = str(tool_params.get("command", ""))
+                            shell_tier, shell_reason = shell_safety_utils.classify_command(shell_cmd)
+                            if shell_safety_utils.is_deny(shell_tier):
+                                print(f"{BOLD}{RED}Tool safety:{RESET} Refusing to run dangerous command: {shell_cmd!r}")
+                                messages.append({
+                                    "role": "user",
+                                    "content": f"Command refused for safety reasons ({shell_reason}): {shell_cmd!r}. Please choose a safer command."
+                                })
+                                continue
                         # asking permissions
                         if args.ask_permission:
+                            # Shell commands already vetted as ALLOW still ask for manual prompt!
+                            # if shell_tier is not None and shell_safety_utils.is_allow(shell_tier):
+                            #     print(f"{BOLD}{GREEN}Tool Call:{RESET} LLM is calling: {name} with {tool_params}.")
+                            # else:
                             print(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool?")
                             print(f"name: {name}, parameters: {params_str}")
+                            if shell_cmd is not None and shell_safety_utils.is_ask(shell_tier):
+                                print(f"{BOLD}{YELLOW}Tool safety:{RESET} This command is flagged as risky: {shell_cmd!r} ({shell_reason})")
                             try:
                                 permission_input = input("Type: 'y' or 'yes'\n")
                             except KeyboardInterrupt:
@@ -484,6 +512,23 @@ def main():
                                 messages.append({
                                     "role": "user",
                                     "content": f"User denied permission for tool {name} and params {params_str}."
+                                })
+                                continue
+                        elif shell_cmd is not None and shell_safety_utils.is_ask(shell_tier):
+                            # --ask-permission is off, but the ASK tier is still enforced:
+                            # prompt the user for this one risky command before running it.
+                            print(f"{BOLD}{YELLOW}Tool safety:{RESET} This shell command is flagged as risky: {shell_cmd!r} ({shell_reason})")
+                            try:
+                                permission_input = input("Type: 'y' or 'yes' to run this command\n")
+                            except KeyboardInterrupt:
+                                print("\nThank you. Goodbye! Saving history...")
+                                save_history(messages, args, unique_id)
+                                sys.exit(0)
+                            if not permission_input in ['y', 'yes']:
+                                print(f"{BOLD}{YELLOW}Tool safety:{RESET} Command not run.")
+                                messages.append({
+                                    "role": "user",
+                                    "content": f"User declined to run risky command: {shell_cmd!r}."
                                 })
                                 continue
 
