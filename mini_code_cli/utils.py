@@ -17,7 +17,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         headers["Authorization"] = f"Bearer {api_key}"
 
     payload = {
-        "model": model,
+        # "model": model, 
         "messages": messages,
         "temperature": temperature,
         # "max_tokens": max_tokens,

@@ -33,12 +33,16 @@ MAGENTA = '\033[95m'
 CYAN = '\033[96m'
 RESET = '\033[0m'
 
+DEFAULT_CACHE_LOCATION=os.path.expanduser("~/.cache/mini_code/sessions")
+DEFAULT_MODEL_URL="http://0.0.0.0:30000"
+DEFAULT_TEMPERATURE=1.0
+
 def save_history(messages, args, session_name=""):
     # Save messages to history.json
     if args.cache_dir:
         cache_dir = args.cache_dir
     else:
-        cache_dir = os.path.expanduser("~/.cache/mini_code/sessions/")
+        cache_dir = DEFAULT_CACHE_LOCATION
     os.makedirs(cache_dir, exist_ok=True)
     history_path = os.path.join(cache_dir, f"history_{session_name}.json")
     with open(history_path, 'w') as f:
@@ -52,14 +56,14 @@ def generate_unique_id():
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
     # MODEL / LLM related
-    parser.add_argument("--url", type=str, default="http://0.0.0.0:30000", help="API host")
-    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for LLM")
-    parser.add_argument("--model", type=str, default="default", help="Model name")
+    parser.add_argument("--url", type=str, default=f"{DEFAULT_MODEL_URL}", help=f"API host, default={DEFAULT_MODEL_URL}")
+    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response, default=None")
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help=f"Temperature for LLM, default={DEFAULT_TEMPERATURE}")
+    parser.add_argument("--model", type=str, help="Model name, default=None")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
 
     # Other settings:
-    parser.add_argument("--cache-dir", type=str, help="The cache dir for the session histories.")
+    parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
 
     # Agent behaviour related
     parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
@@ -69,8 +73,8 @@ def parse_args():
 
     # Agent permissions related
     parser.add_argument("--ask-permission", action="store_true", help="Ask for permission before any tool call.")
-    parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations")
-    parser.add_argument("--enable-shell", action="store_true", help="Allow shell execution. Default: False") #todo
+    parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations, default='./'")
+    parser.add_argument("--enable-shell", action="store_true", help="Allow shell execution. default= False") 
 
 
     args = parser.parse_args()
