@@ -238,7 +238,7 @@ def main():
                 tool_count = 0
                 if not user_input:
                     try:
-                        print("-"*30)
+                        print("="*30)
                         user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
                         if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
                             print("\nThank you. Goodbye!")
@@ -251,7 +251,7 @@ def main():
                         save_history(messages, args, unique_id)
                         break
                 else:
-                    print("-"*30)
+                    print("="*30)
                     print(f"{BOLD}{CYAN}You (preset): {RESET}{user_input}")
                 
                 if user_input == "/help":
@@ -277,9 +277,15 @@ def main():
 
             if response_text:
                 llm_response_flag = True
-                response_lines=[f"{BOLD}{GREEN}Assistant:{RESET}"]
-                response_lines.extend(response_text.split('\n'))
-                print_lines_with_border(response_lines)
+                # response_lines=[]
+                # response_lines.extend(response_text.split('\n'))
+                # print_lines_with_border(response_lines)
+                print("-"*20)
+                print(f"{BOLD}{GREEN}Assistant:{RESET}")
+                print("-"*20)
+                print(response_text)
+                print("="*30)
+
 
             if tool_calls:
                 llm_tool_response_flag = True
