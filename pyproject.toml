@@ -6,7 +6,7 @@ description = "Minimal Coding CLI"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "requests==2.34.2"
+    "requests>=2.31,<3"
 ]
 authors = [
     {name = "Nikolai Rozanov", email = "nikolai.rozanov@gmail.com"},

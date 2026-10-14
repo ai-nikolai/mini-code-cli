@@ -38,6 +38,7 @@ DEFAULT_MODEL_URL="http://0.0.0.0:30000"
 DEFAULT_TEMPERATURE=1.0
 DEFAULT_TOOL_TIMEOUT=120  # seconds before a single tool call is aborted
 DEFAULT_HTTP_TIMEOUT=300  # seconds before an LLM HTTP request is aborted
+DEFAULT_MAX_MESSAGES=100  # messages in history before it is compacted to a summary
 
 def save_history(messages, args, session_name=""):
     # Save messages to history.json
@@ -154,6 +155,62 @@ def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_
 
 
 
+def is_within_allowed_dir(filepath, allowed_dir):
+    """Return True if the resolved `filepath` lives inside `allowed_dir`.
+
+    Uses os.path.realpath to resolve symlinks and '..' so path-traversal or
+    symlink tricks cannot escape the allowed directory.
+    """
+    target = os.path.realpath(filepath)
+    root = os.path.realpath(allowed_dir)
+    try:
+        return os.path.commonpath([target, root]) == root
+    except (ValueError, TypeError):
+        # Different drives (Windows) or a non-absolute path: fail closed.
+        return False
+
+
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, max_messages=DEFAULT_MAX_MESSAGES):
+    """Compact the conversation history once it grows beyond `max_messages`.
+
+    Long (especially auto-mode) sessions can overflow the model's context window.
+    When the history gets too large we ask the LLM to summarize it and replace the
+    old turns with that summary, keeping the original system prompt as the first
+    message. The compaction call itself is a single, tool-free request, so it
+    cannot trigger further tool calls or recurse into compaction.
+    """
+    if len(messages) <= max_messages:
+        return messages
+
+    try:
+        print(f"{BOLD}{YELLOW}System:{RESET} Compacting conversation history ({len(messages)} messages -> summary)...")
+        summary_prompt = prompts.compaction_prompt(messages)
+        summary, _ = utils.call_openai_server(
+            [{"role": "user", "content": summary_prompt}],
+            max_tokens=1024,
+            temperature=0.0,
+            model=model,
+            server_url=server_url,
+            api_key=api_key,
+            timeout=llm_timeout,
+        )
+        if summary:
+            system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+            compacted = []
+            if system_content:
+                compacted.append({"role": "system", "content": system_content})
+            compacted.append({
+                "role": "user",
+                "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
+            })
+            print(f"{BOLD}{YELLOW}System:{RESET} History compacted to {len(compacted)} messages.")
+            return compacted
+    except Exception as e:
+        print(f"{BOLD}{RED}Warning:{RESET} Failed to compact history: {e}")
+
+    return messages
+
+
 def main():
     args = parse_args()
 
@@ -188,6 +245,11 @@ def main():
         forbidden_tools = tools.shell_tools
     else:
         forbidden_tools = None
+
+    if args.enable_shell and not args.ask_permission:
+        print(f"{BOLD}{RED}WARNING:{RESET} Shell execution is ENABLED and will run WITHOUT any permission "
+              f"checks. The agent can execute ANY command on this system and can escape --allowed-dir. "
+              f"Use with extreme caution.")
 
     # TOOLs
     tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden_tools)
@@ -268,6 +330,9 @@ def main():
             llm_response_flag = False
             llm_tool_response_flag = False
 
+            # Compact the history if it's getting long, to avoid overflowing the context window.
+            messages = maybe_compact(messages, server_url, actual_model, api_key, args.llm_timeout)
+
             response_text, tool_calls = utils.call_openai_server(
                 messages, 
                 max_tokens=args.max_tokens, 
@@ -320,7 +385,7 @@ def main():
                             filepath = tool_params.get("filepath", "")
                             if name == "write_file":
                                 filepath = tool_params.get("filepath", "")
-                            if filepath and not os.path.abspath(filepath).startswith(allowed_dir):
+                            if filepath and not is_within_allowed_dir(filepath, allowed_dir):
                                 print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
                                 continue
 

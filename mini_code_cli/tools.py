@@ -12,6 +12,7 @@ def read_file(filepath):
             return f.read()
     except Exception as e:
         print(f"Error: {e}")
+        return f"Error: {e}"
 
 
 def write_file(filepath, content):
@@ -31,7 +32,7 @@ def grep(pattern, filepath):
     except Exception as e:
         return f"Error: {e}"
 
-def glob(pattern="./"):
+def glob(pattern):
     """Return list of file paths matching the given glob pattern. Param: pattern"""
     try:
         return glob_module.glob(pattern)
