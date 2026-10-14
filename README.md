@@ -22,7 +22,12 @@ mini-code #run the agent using `localhost:30000/v1` model
 export MINI_CODE_API_KEY="sk-YOUR_API_KEY"
 mini-code --url "https://api.deepseek.com" --model "deepseek-v4-flash"
 ```
+3. Auto-mode and shell enabled: (this will run localhost:30000)
+```bash
+mini-code --enable-shell --auto-mode
+```
 
+4. Advanced usage:
 Auto-mode, Agent.md, Shell Enabled mode and a specific allowed dir:
 ```bash
 mini-code --enable-shell --auto-mode --agent-md "./skill.md" --allowed-dir "./" --ask-permission --system-prompt "Your awesome new system prompt..."
