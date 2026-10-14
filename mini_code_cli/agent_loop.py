@@ -300,10 +300,10 @@ def main():
     else:
         forbidden_tools = None
 
-    if args.enable_shell and not args.ask_permission:
-        print(f"{BOLD}{RED}WARNING:{RESET} Shell execution is ENABLED and will run WITHOUT any permission "
-              f"checks. The agent can execute ANY command on this system and can escape --allowed-dir. "
-              f"Use with extreme caution.")
+    # if args.enable_shell and not args.ask_permission:
+    #     print(f"{BOLD}{RED}WARNING:{RESET} Shell execution is ENABLED and will run WITHOUT any permission "
+    #           f"checks. The agent can execute ANY command on this system and can escape --allowed-dir. "
+    #           f"Use with extreme caution.")
 
     # Safety: when the shell is enabled we use the shell-safety classifier
     # (shell_safety_utils) to gate every command into DENY / ASK / ALLOW tiers.
