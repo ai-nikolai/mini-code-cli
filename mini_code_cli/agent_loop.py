@@ -569,7 +569,7 @@ class AgentSession:
             if self.args.ask_permission:
                 ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
             else:
-                ok = self._ask_risky_command(shell_cmd, reason)
+                ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
             if not ok:
                 self._append_tool_result(call_id,
                     f"User denied permission for tool {name} and params {params_str}.")
@@ -615,23 +615,6 @@ class AgentSession:
             raise _Abort
 
         return permission_input.lower() in ["y", "yes"]
-
-    def _ask_risky_command(self, shell_cmd, reason):
-        """Prompt only for a shell command the classifier flagged as risky
-        (used when --ask-permission is off). Returns True to proceed."""
-        self.console.note(f"This shell command is flagged as risky: {shell_cmd!r} ({reason})", "warn")
-        try:
-            permission_input = input(f"Type: 'y' or 'yes' to run this command: ")
-        except KeyboardInterrupt:
-            print("\nThank you. Goodbye! Saving history...")
-            self.shutdown()
-            raise _Abort
-
-        if permission_input.lower() not in ["y", "yes"]:
-            self.console.note("Command not run.", "warn")
-            self._append_tool_result(None, f"User declined to run risky command: {shell_cmd!r}.")
-            return False
-        return True
 
     def _append_tool_result(self, call_id, content):
         self.messages.append({"role": "tool", "tool_call_id": call_id, "content": str(content)})
