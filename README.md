@@ -25,6 +25,7 @@ mini-code --url "https://api.deepseek.com" --model "deepseek-v4-flash"
 3. Auto-mode and shell enabled: (this will run localhost:30000)
 ```bash
 mini-code --enable-shell --auto-mode
+mini-code -s -a --sudo
 ```
 
 4. Advanced usage:

@@ -16,7 +16,6 @@ import time
 import uuid
 
 import argparse
-import sys
 
 from . import prompts
 from . import shell_safety_utils
@@ -30,10 +29,7 @@ from . import ui
 # the ui.Console in ui.py).
 BOLD = '\033[1m'
 RED = '\033[91m'
-GREEN = '\033[92m'
 YELLOW = '\033[93m'
-BLUE = '\033[94m'
-MAGENTA = '\033[95m'
 CYAN = '\033[96m'
 RESET = '\033[0m'
 
@@ -66,15 +62,6 @@ def accumulate_usage(token_stats, usage):
     token_stats["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
     token_stats["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
     token_stats["llm_calls"] += 1
-
-
-def format_usage(usage):
-    """Human-readable one-line summary of a single call's token usage."""
-    if not usage:
-        return "tokens: n/a (server did not report usage)"
-    return (f"tokens: input={usage.get('prompt_tokens', 0)} "
-            f"output={usage.get('completion_tokens', 0)} "
-            f"total={usage.get('total_tokens', 0)}")
 
 
 def save_usage(token_stats, cache_dir, session_name=""):
@@ -518,8 +505,6 @@ class AgentSession:
             timeout=self.args.llm_timeout,
         )
         accumulate_usage(self.token_stats, usage)
-        self.console.usage_line(usage, transient=not self.console.verbose)
-
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
             self.token_stats["tool_calls"] += len(tool_calls)
@@ -539,6 +524,16 @@ class AgentSession:
 
         if not response_text and not made_tool_calls:
             self.console.note("Warning: no response was given by the LLM.", "error")
+
+        # Mirror the running tool-call total into this call's usage dict so the
+        # per-call usage line reports the actual tool-call count (the server
+        # does not, so usage.get("tool_calls") would always be 0 otherwise).
+        usage["tool_calls"] = self.token_stats["tool_calls"]
+        # Print the usage line LAST, transiently, so it always sits at the very
+        # bottom of the screen. That way the next step can clear it in place
+        # (cursor up + wipe + reprint) instead of jumping up past the assistant
+        # turn above it -- which is what made the screen keep scrolling.
+        self.console.usage_line(usage, transient=not self.console.verbose)
 
         return made_tool_calls and self.args.auto_mode
 

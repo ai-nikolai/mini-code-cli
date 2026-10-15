@@ -17,7 +17,6 @@ from mini_code_cli.agent_loop import (
     maybe_compact,
     shell_forces_ask_permission,
     accumulate_usage,
-    format_usage,
 )
 
 
@@ -58,12 +57,6 @@ class TestMaybeCompactWiring(unittest.TestCase):
         accumulate_usage(stats, {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8})
         self.assertEqual(stats["prompt_tokens"], 3)
         self.assertEqual(stats["llm_calls"], 1)
-
-    def test_format_usage_handles_none(self):
-        # Server may report no usage at all.
-        self.assertIn("n/a", format_usage(None))
-        self.assertIn("input=1", format_usage({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}))
-
 
 if __name__ == "__main__":
     unittest.main()

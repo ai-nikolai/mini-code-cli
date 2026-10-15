@@ -1,10 +1,14 @@
 import requests
 import json
-import argparse
 
 
 def determine_vllm_model(server_url, api_key=None, timeout=120):
-    """in case of vllm local server..."""
+    """In case of a vLLm local server, read the first served model id from
+    ``{server_url}/v1/models`` so the caller does not have to name the model.
+
+    Returns the model id, or ``None`` if the server could not be reached or
+    did not return a usable response (never raises).
+    """
     url = f"{server_url}/v1/models"
 
     headers = {
@@ -21,10 +25,8 @@ def determine_vllm_model(server_url, api_key=None, timeout=120):
         )
         response.raise_for_status()
 
-        result = response.json().get('data',[{}])[0]
-        model_name = result.get("id", "")
-
-        return model_name
+        result = response.json().get('data', [{}])[0]
+        return result.get("id", "")
 
     except requests.exceptions.RequestException as e:
         print(f"Error calling OpenAI Server...: {e}")
@@ -35,13 +37,19 @@ def determine_vllm_model(server_url, api_key=None, timeout=120):
         return None
 
 
+def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="default",
+                       server_url=None, api_key=None, tools=None, timeout=300):
+    """Query an OpenAI-compatible server (local or remote) using ``requests``.
 
-def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None, timeout=300,):
-    """
-    Querying an OpenAI-compatible server (local or remote) using the requests library.
     Supports authentication via API key if provided.
-    `timeout` is the number of seconds before the HTTP request is aborted. Reasoning
-    models can take a while to produce a response, so the default is deliberately high.
+
+    ``timeout`` is the number of seconds before the HTTP request is aborted.
+    Reasoning models can take a while to produce a response, so the default is
+    deliberately high.
+
+    Returns ``(content, tool_calls, usage)``. On any failure it prints a
+    diagnostic and returns ``(None, None, None)`` so the caller can degrade
+    gracefully instead of crashing.
     """
     url = f"{server_url}/v1/chat/completions"
 
@@ -52,11 +60,10 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         headers["Authorization"] = f"Bearer {api_key}"
 
     payload = {
-        "model": model, 
+        "model": model,
         "messages": messages,
         "temperature": temperature,
         "timeout": timeout,
-        # "top_p": top_p
     }
 
     if max_tokens is not None:
@@ -95,9 +102,9 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
         print(f"HTTP Error: {e}")
         try:
             print(f"Status Code: {response.status_code}")
-            # Print the raw response body to see the detailed validation error
+            # Print the raw response body to see the detailed validation error.
             print(f"Response Body: {response.text}")
-            # If the response is JSON, you can parse and pretty-print it
+            # If the response is JSON, parse and pretty-print it.
             try:
                 error_details = response.json()
                 print("Parsed Error Details:")
@@ -110,63 +117,3 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, top_p=0.95, m
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")
         return None, None, None
-
-# Alternative: use the newer SGLang API format (v0.3+)
-def call_openai_server_prompt(prompt, max_tokens=1024, temperature=0.0, top_p=0.95, model="default", server_url=None, api_key=None, tools=None, timeout=300):
-    """
-    OpenAI compatible call, pre-creating the messages object.
-    """
-    messages = [
-            {"role": "user", "content": prompt}
-        ]
-
-    return call_openai_server(messages, max_tokens, temperature, top_p, model, server_url=server_url, api_key=api_key, tools=tools, timeout=timeout)
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
-    parser.add_argument("--host", type=str, default="localhost", help="API host")
-    parser.add_argument("--port", type=int, default=30000, help="API port")
-    parser.add_argument("--prompt", type=str, default="What is the purpose of life?", help="prompt")
-    parser.add_argument("--api-key", type=str, default=None, help="API key for authentication (optional)")
-
-    return parser.parse_args()
-
-
-if __name__ == '__main__':
-    from . import tools
-    tools_dict = tools.util_get_tools()
-
-    args = parse_args()
-    # Configuration for local SGLang deployment
-    server_url=f"http://{args.host}:{args.port}" 
-
-    print("="*60)
-    print("Entering LLM call:")
-    print("-"*30)
-    prompt = args.prompt
-
-    print(f"Prompt:\n{prompt}")
-    print("---")
- 
-    response_text, tool_calls, _ = call_openai_server_prompt(prompt, server_url=server_url, api_key=args.api_key, tools=tools_dict)
-    print(f"Response:\n{response_text}")
-    print("---")
-    print(f"Tools:\n{tool_calls}")
-    print("---")
-
-
-
-    # #################################
-    # Test call to DeepSeek endpoint
-    # #################################
-
-    # deepseek_server_url = "https://api.deepseek.com"
-    # deepseek_model = "deepseek-v4-flash"
-    # print("="*60)
-    # print("Entering DeepSeek call:")
-    # print("-"*30)
-    # response_text_ds, tools_ds = call_openai_server_prompt(prompt, server_url=deepseek_server_url, api_key=args.api_key, model=deepseek_model, tools=tools_dict)
-    # print(f"DeepSeek Response:\n{response_text_ds}")
-    # print("---")
-    # print(f"Tools:\n{tools_ds}")
-    # print("---")

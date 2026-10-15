@@ -95,10 +95,13 @@ class Console:
         # When False, only user/assistant/tool turns and warn/error notes are
         # shown. Defaults to True so existing callers keep the full output.
         self.verbose = verbose
-        # Live "transient" region used for the tool-call area in non-verbose
-        # mode: content drawn here is overwritten in place (via cursor moves)
-        # instead of scrolling, so the screen only keeps the final turns.
-        # ``_transient_lines`` is how many screen lines the current block holds.
+        # Live "transient" region (non-verbose mode) renders the tool-call area
+        # and the usage line without scrolling the screen. We keep a single
+        # invariant: whenever ``_transient_lines`` is > 0 a block of that many
+        # lines sits at the *bottom* of the screen and the cursor rests right
+        # below it. That lets us update it in place (move up, rewrite, or delete
+        # the block with the standard "Delete Line" escape) so the transcript
+        # never grows while the agent is mid-turn.
         self._transient_lines = 0
 
     # -- capability detection ----------------------------------------------
@@ -165,7 +168,25 @@ class Console:
         return "\033[" + ";".join(codes) + "m" + text + _RESET
 
     def emit(self, text=""):
-        """Write a single line to the stream."""
+        """Write a single line to the stream.
+
+        This is the one place every line of output is written, so it is also the
+        *commit point* for the transient region: if a transient block is
+        currently live (the tool-call area / usage line sitting at the bottom of
+        the screen in non-verbose mode), any permanent output here must first
+        erase that block in place -- otherwise the block would be stranded above
+        the new content and the next update could not clear it correctly (that
+        was exactly what made the screen keep scrolling).
+
+        We erase it with the standard CSI-n-M (Delete Line) escape, which shifts
+        the screen up to fill the gap. Crucially we do that *without* moving the
+        cursor, so the text we are about to print lands right where the transient
+        block used to be (the block is overwritten in place, not below it). This
+        keeps the transient block permanently pinned to the bottom of the
+        screen -- the only place it can be updated without scrolling.
+        """
+        if self._transient_lines > 0:
+            self._delete_transient_block()
         print(text, file=self.stream)
 
     def rule(self, title=None, char="═", fg="cyan"):
@@ -182,48 +203,72 @@ class Console:
 
     # -- transient (live, overwritten-in-place) region ----------------------
     def _can_clear_cursor(self):
-        """Whether we can move/erase the cursor (a real colour, utf-8 TTY)."""
+        """Whether we can move/erase the cursor (a real colour, utf-8 TTY).
+
+        Only on such a terminal can we redraw the transient region in place;
+        otherwise (piped / ASCII output) we fall back to plain scrolling emit.
+        """
         return self.color_enabled and self.unicode_enabled
 
-    def _clear_transient_locked(self):
-        """Erase the previously emitted transient block.
+    def _delete_transient_block(self):
+        """Erase the current transient block from the screen.
 
-        The cursor is assumed to be resting on the line just below the block
-        (the normal state after :meth:`emit`). When we can move the cursor we
-        walk up over the block, wipe each line and return below it, ready to
-        print again. Otherwise (piped / ASCII output) we just push the block up
-        with blank lines — there is no screen to clean anyway.
+        Uses the standard CSI n M (Delete Line, DL) escape, which removes n
+        lines and shifts everything below them up to fill the gap -- no blank
+        lines, no scroll, no leftover.
+
+        The cursor is always assumed to be sitting on the blank line directly
+        below the block (the normal resting state right after an :meth:`emit` of
+        an n-line block). To put the cursor on the block's *first* line, where
+        DL acts, we move up n lines first; DL then deletes the block in place
+        and leaves the cursor on what was the first line below it, exactly where
+        the next :meth:`emit` should land. Only called while a block is live.
         """
         n = self._transient_lines
+        if n > 0:
+            self.stream.write(f"\033[{n}A")   # move up onto the block's first line
+            self.stream.write(f"\033[{n}M")   # CSI n M = delete those n lines
+            self.stream.flush()
         self._transient_lines = 0
-        if n <= 0:
-            return
-        if self._can_clear_cursor():
-            self.stream.write(f"\033[{n}A")  # up to the first line of the block
-            for _ in range(n):
-                self.stream.write("\033[2K")  # clear the whole line
-                self.stream.write("\033[1B")  # step down (ends below block)
-            self.stream.flush()
-        else:
-            self.stream.write("\n" * n)
-            self.stream.flush()
 
     def clear_transient(self):
-        """Clear any pending transient output, leaving a clean screen."""
-        self._clear_transient_locked()
+        """Erase any pending transient output, leaving a clean screen."""
+        if self._can_clear_cursor() and self._transient_lines > 0:
+            self._delete_transient_block()
+
+    def _render_transient_block(self, text=""):
+        """Render *text* into the live region, replacing the current block in
+        place. Assumes the cursor already sits just below an existing block (or
+        there is none) and that nothing permanent follows it.
+
+        The new block is printed at the same spot and its height recorded so the
+        next update can delete exactly that many lines. Each line is padded to
+        the full width so a shorter follow-up fully overwrites any characters
+        left behind by a longer previous render.
+        """
+        lines = ("" if text is None else str(text)).split("\n")
+        padded = [line + " " * max(0, self.width - _visual_len(line)) for line in lines]
+        if self._can_clear_cursor():
+            self._delete_transient_block()
+            self.emit("\n".join(padded))
+            self._transient_lines = len(lines)
+        else:
+            self.emit("\n".join(padded))
 
     def emit_transient(self, text=""):
-        """Emit *text* into the live region, replacing any previous transient
-        content. Used for the tool-call area in non-verbose mode so those lines
-        flash while the agent works instead of scrolling the whole transcript.
+        """Render *text* into the live region, replacing the previous transient
+        block in place so the screen does not scroll. Used for the tool-call
+        area and the per-call usage line in non-verbose mode: those flash while
+        the agent is mid-turn and disappear -- without leaving a growing
+        transcript -- as soon as the next real (assistant / user) turn is drawn.
+
+        On a real colour, utf-8 terminal the block is deleted and reprinted at
+        the same spot (via the Delete-Line escape), so the transcript stays
+        pinned to a fixed height. On piped / ASCII output we cannot move the
+        cursor, so we simply emit the freshly rendered block (it scrolls like
+        any other line, but nothing is lost or mangled).
         """
-        self._clear_transient_locked()
-        lines = ("" if text is None else str(text)).split("\n")
-        # Pad each line to the full width so a shorter follow-up fully overwrites
-        # any leftover characters from a longer previous render.
-        padded = [line + " " * max(0, self.width - _visual_len(line)) for line in lines]
-        self.emit("\n".join(padded))
-        self._transient_lines = len(lines)
+        self._render_transient_block(text)
 
     # -- building blocks ----------------------------------------------------
     def box(self, lines, title=None, fg="cyan"):
