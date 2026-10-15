@@ -9,6 +9,7 @@ write a similar model.py file but for a LSTM based language model. Make it minim
 """
 
 import os
+import re
 import json
 import signal
 
@@ -40,18 +41,100 @@ DEFAULT_TOOL_TIMEOUT=120  # seconds before a single tool call is aborted
 DEFAULT_HTTP_TIMEOUT=500  # seconds before an LLM HTTP request is aborted
 DEFAULT_MAX_MESSAGES=150  # messages in history before it is compacted to a summary
 
-def save_history(messages, args, session_name=""):
-    # Save messages to history.json
+def history_dir(args, session_name=""):
+    """Return (creating it if needed) this session's on-disk history folder.
+
+    Everything a session writes lives under ``cache_dir/{session_name}/``: one
+    ``history_{n}.json`` file per conversation *segment* -- a brand-new segment
+    is started every time the history is compacted -- plus the high-level
+    recorder kept in ``summary_history.json``.
+    """
     if args.cache_dir:
         cache_dir = args.cache_dir
     else:
         cache_dir = DEFAULT_CACHE_LOCATION
     os.makedirs(cache_dir, exist_ok=True)
-    os.makedirs(os.path.join(cache_dir,session_name), exist_ok=True)
+    os.makedirs(os.path.join(cache_dir, session_name), exist_ok=True)
+    return os.path.join(cache_dir, session_name)
 
-    history_path = os.path.join(cache_dir, session_name, f"history.json")
-    with open(history_path, 'w') as f:
+
+def save_history(messages, args, session_name="", history_index=0):
+    """Persist a detailed conversation-history *segment* to disk.
+
+    A segment is written to ``history_{history_index}.json``. A session only
+    ever has one *active* segment (the current ``history_index``), which is
+    overwritten every step with the latest messages. Because messages only ever
+    *append* within a segment, any earlier index in it still marks a faithful
+    prefix -- so a recorded turn's ``index`` lets you rebuild the exact state at
+    the end of that turn. Compaction rolls the session over to a higher index
+    and freezes the old segment, so its turns stay intact snapshots.
+    """
+    d = history_dir(args, session_name)
+    history_path = os.path.join(d, f"history_{history_index}.json")
+    with open(history_path, "w", encoding="utf-8") as f:
         json.dump(messages, f, indent=2)
+    return history_path
+
+
+def save_summary(summary, args, session_name=""):
+    """Persist the high-level recorder to ``summary_history.json``.
+
+    The recorder is the flat list of per-turn records built by
+    :meth:`AgentSession._record_turn` (turn number, what happened, and where the
+    turn lives in the history segments). It lets the user navigate and rewind
+    the conversation without reading the full detailed histories.
+    """
+    d = history_dir(args, session_name)
+    summary_path = os.path.join(d, "summary_history.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    return summary_path
+
+
+def load_history_from_dir(directory):
+    """Load the most complete history for a session directory.
+
+    Prefers the newest ``history_{n}.json`` segment (sessions created by the
+    high-level recorder) and falls back to the classic ``history.json`` (older
+    sessions). Returns the messages list, or None if nothing could be loaded
+    (never raises: a failed restore must fall back to a fresh session).
+    """
+    if not directory or not os.path.isdir(directory):
+        return None
+    newest, highest = None, -1
+    for fn in os.listdir(directory):
+        m = re.fullmatch(r"history_(\d+)\.json", fn)
+        if m and int(m.group(1)) > highest:
+            highest, newest = int(m.group(1)), fn
+    path = (os.path.join(directory, newest) if newest is not None
+            else os.path.join(directory, "history.json"))
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            messages = json.load(f)
+        return messages if isinstance(messages, list) else None
+    except Exception as e:
+        print(f"{BOLD}{RED}Warning:{RESET} Failed to load history from {directory}: {e}")
+        return None
+
+
+def load_summary_from_dir(directory):
+    """Load a session's high-level recorder (``summary_history.json``).
+
+    Returns the list of records, or an empty list if there is none or it cannot
+    be read. Best-effort only: a missing or garbled recorder must never break a
+    restore.
+    """
+    if not directory or not os.path.isdir(directory):
+        return []
+    path = os.path.join(directory, "summary_history.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        return saved if isinstance(saved, list) else []
+    except Exception:
+        return []
 
 
 def accumulate_usage(token_stats, usage):
@@ -97,6 +180,61 @@ def _resolve_history_path(restore_session):
     return candidate
 
 
+def _restore_dir(restore_session):
+    """Resolve a --restore-session value to the directory its history lives in.
+
+    Accepts either the session directory itself or a direct path to a history
+    file inside it (``history.json`` or ``history_{n}.json``). A leading ~ is
+    expanded for convenience.
+    """
+    if not restore_session:
+        return None
+    candidate = os.path.expanduser(restore_session)
+    if os.path.isfile(candidate):
+        return os.path.dirname(candidate)
+    return candidate
+
+
+def find_last_session_dir(cache_dir):
+    """Return the path to the most recently *active* session directory under
+    ``cache_dir``, or None if there is none.
+
+    "Most recent" is decided by the newest modification time of any file inside
+    each session folder (a session rewrites its ``history_{n}.json`` every step),
+    so this reflects the last session the user actually worked in rather than the
+    one most recently *created*. Session folders with no files are ignored. Never
+    raises: a missing or unreadable cache dir simply yields None so
+    ``--load-last-session`` can fall back to a fresh session.
+    """
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return None
+    try:
+        entries = [
+            os.path.join(cache_dir, name)
+            for name in os.listdir(cache_dir)
+            if os.path.isdir(os.path.join(cache_dir, name))
+        ]
+    except OSError:
+        return None
+
+    best_dir, best_time = None, -1.0
+    for session in entries:
+        try:
+            files = [
+                os.path.join(session, f)
+                for f in os.listdir(session)
+                if os.path.isfile(os.path.join(session, f))
+            ]
+            if not files:
+                continue
+            mtime = max(os.path.getmtime(f) for f in files)
+        except OSError:
+            continue
+        if mtime > best_time:
+            best_time, best_dir = mtime, session
+    return best_dir
+
+
 def load_history(restore_session):
     """Load a previous session's message history from disk.
 
@@ -135,6 +273,7 @@ def parse_args():
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
     parser.add_argument("--restore-session", type=str, help=f"The location of the previous session. (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)")
+    parser.add_argument("--load-last-session", action="store_true", help="Load the most recent previous session from the cache dir and continue it (under a new session id), instead of starting fresh. --restore-session takes precedence if also given.")
 
     # Agent behaviour related
     parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
@@ -170,7 +309,13 @@ def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
         help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
     else:
         help_message = "Auto-mode: the agent keeps calling the LLM until no further tool calls are possible."
-    ui.console.note(help_message, "info")
+    ui.console.emit(ui.console.style(help_message, dim=True, fg="cyan"))
+    ui.console.emit(ui.console.style("History / navigation commands:", bold=True, fg="cyan"))
+    ui.console.emit("  /history         list the conversation (turn number, what happened, where)")
+    ui.console.emit("  /history <n>      show the full messages recorded for turn n")
+    ui.console.emit("  /reset [<n>]      rewind to the end of turn n (drops everything after it)")
+    ui.console.emit("  /help             show this help")
+    ui.console.emit("  /quit, /exit      save the session and exit")
     ui.console.rule(char="═", fg="cyan")
 
 def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_TOOL_TIMEOUT):
@@ -240,7 +385,7 @@ def tool_paths_are_allowed(name, tool_params, allowed_dir):
     return True
 
 
-def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, max_messages=DEFAULT_MAX_MESSAGES):
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES):
     """Compact the conversation history once it grows beyond `max_messages`.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
@@ -250,7 +395,11 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     cannot trigger further tool calls or recurse into compaction.
     """
     if len(messages) <= max_messages:
-        return messages
+        # No compaction: keep the same segment (history_index) and signal the
+        # caller with (messages, did_compact=False, unchanged_index). Returning
+        # the full triple here is required -- callers unpack all three, so a
+        # bare messages would crash them.
+        return messages, False, history_index
 
     try:
         print(f"{BOLD}{YELLOW}System:{RESET} Compacting conversation history ({len(messages)} messages -> summary)...")
@@ -275,11 +424,15 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
                 "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
             })
             print(f"{BOLD}{YELLOW}System:{RESET} History compacted to {len(compacted)} messages.")
-            return compacted
+            # A new segment (history_index + 1) is started on compaction: the
+            # compacted messages are its snapshot, and every later turn appends
+            # to it. The caller records a single high-level 'summary' turn for
+            # this index so the recorder stays flat across the rollover.
+            return compacted, True, history_index + 1
     except Exception as e:
         print(f"{BOLD}{RED}Warning:{RESET} Failed to compact history: {e}")
 
-    return messages
+    return messages, False, history_index
 
 
 def shell_forces_ask_permission(args):
@@ -353,15 +506,55 @@ class AgentSession:
 
         self.unique_id = generate_unique_id()
 
+        # High-level recorder + history segments. Instead of a single ever-growing
+        # history.json, a session keeps:
+        #   * ``history_{n}.json`` files -- one per conversation *segment*; a brand
+        #     new segment is started (n -> n+1) every time the history is compacted.
+        #   * ``summary_history.json`` -- a flat, high-level *recorder*: one record
+        #     per turn (the running turn number, *what* happened -- an assistant
+        #     reply, a tool call, or a compaction summary -- and which
+        #     ``history_{n}.json`` + message index the turn lives in).
+        # The recorder lets the user inspect and rewind the conversation (/history,
+        # /reset) without reading the full detailed histories, because every turn's
+        # recorded index marks a faithful end-of-turn snapshot of its segment.
+        self.history_index = 0
+        self.summary = []
+
         # Conversation state. When --restore-session is given we continue that
         # session's history instead of starting fresh -- still under the brand
         # new unique id above, so the original session file is never
         # overwritten. Falls back to a freshly built history if the restore
         # file is missing or unreadable.
-        restored = load_history(getattr(self.args, "restore_session", None))
+        # --load-last-session auto-detects the most recent previous session in the
+        # cache dir and continues it -- exactly like --restore-session, but without
+        # needing to know the folder name. An explicit --restore-session always wins
+        # and is used verbatim; otherwise the newest session is resolved here.
+        restore_session = getattr(self.args, "restore_session", None)
+        self.loaded_last_session_dir = None
+        if getattr(self.args, "load_last_session", False) and not restore_session:
+            detected = find_last_session_dir(self.cache_dir)
+            if detected:
+                restore_session = detected
+                self.loaded_last_session_dir = detected
+        restore_directory = _restore_dir(restore_session)
+        restored = load_history_from_dir(restore_directory) if restore_directory else None
         self.messages = restored if restored is not None else self._build_initial_messages()
         if restored is not None:
             self._restore_usage_if_available()
+            self._load_summary_if_restored(restore_directory)
+        else:
+            # --load-last-session asked for a session but nothing usable was found:
+            # don't advertise a load. The recorder starts empty and the first
+            # assistant / tool-call turn seeds turn 1 -- mirroring the restore
+            # path, which also has no leading system turn, so /history turn
+            # numbers stay consistent whether or not we restored.
+            self.loaded_last_session_dir = None
+
+        # Snapshot the initial (or restored) messages as the first history segment
+        # and persist the recorder, so a session starts with on-disk state to
+        # inspect and rewind to.
+        save_history(self.messages, self.args, self.unique_id, self.history_index)
+        save_summary(self.summary, self.args, self.unique_id)
 
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
@@ -409,6 +602,109 @@ class AgentSession:
         except Exception:
             pass
 
+    def _load_summary_if_restored(self, directory):
+        """Restore the high-level recorder and segment index for a restore.
+
+        Prefers the saved ``summary_history.json`` so the recorder stays flat and
+        contiguous across the restore, seeding ``self.summary`` and the next
+        ``history_index`` from its last record. If no recorder was saved (e.g. a
+        session created by older code, or only a classic ``history.json``), we
+        rebuild a minimal recorder by scanning the restored messages for
+        assistant turns, so navigation still works. Best-effort only.
+        """
+        saved = load_summary_from_dir(directory)
+        saved = [r for r in saved if isinstance(r, dict)]
+        if saved:
+            self.summary = saved
+            self.history_index = int(saved[-1].get("history_file", 0))
+            return
+        turn = 0
+        for i, m in enumerate(self.messages):
+            if m.get("role") == "assistant":
+                turn += 1
+                self.summary.append({"turn": turn, "what": "assistant",
+                                     "history_file": 0, "index": i})
+
+    def _record_turn(self, what, messages, history_index=None):
+        """Append one entry to the high-level recorder.
+
+        Each entry records the running turn number, a one-line *what* (assistant
+        reply, tool call(s), or a history compaction summary) and exactly where
+        the turn lives -- ``history_{history_index}.json`` at message ``index``.
+        ``index`` points at the last message appended this step, i.e. the
+        end-of-turn snapshot that replaying ``messages`` reconstructs, which is
+        what lets :meth:`_reset_history` rewind to that exact state.
+        """
+        if history_index is None:
+            history_index = self.history_index
+        self.summary.append({
+            "turn": len(self.summary) + 1,
+            "what": what,
+            "history_file": history_index,
+            "index": max(len(messages) - 1, 0),
+        })
+
+    def _show_history(self):
+        """Print the high-level recorder as a numbered list of turns."""
+        rows = [(str(r.get("turn", i + 1)),
+                 r.get("what", "?"),
+                 f"history_{r.get('history_file', 0)}.json#{r.get('index', 0)}")
+                for i, r in enumerate(self.summary)]
+        self.console.history_list(rows)
+
+    def _inspect_history(self, arg):
+        """Print the full messages recorded for a single turn."""
+        try:
+            record = self.summary[-1] if arg == "last" else self.summary[int(arg) - 1]
+        except (ValueError, IndexError):
+            self.console.note(f"No such turn {arg!r} (have 1..{len(self.summary)}).", "error")
+            return
+        messages = self._segment_upto(record)
+        if messages is None:
+            return
+        self.console.history_detail(record, messages)
+
+    def _segment_upto(self, record):
+        """Load a recorded turn's segment and truncate it at its index.
+
+        Returns the messages reproducing the conversation state at the end of
+        that turn, or None if the segment could not be loaded (never raises: a
+        missing or moved segment must not crash navigation).
+        """
+        directory = os.path.join(self.cache_dir, self.unique_id)
+        segment_path = os.path.join(directory, f"history_{record.get('history_file', 0)}.json")
+        try:
+            with open(segment_path, "r", encoding="utf-8") as f:
+                segment = json.load(f)
+        except Exception:
+            self.console.note("Could not load the history segment for that turn.", "error")
+            return None
+        idx = max(0, min(int(record.get("index", 0)), len(segment) - 1))
+        return segment[:idx + 1]
+
+    def _reset_history(self, keep, record):
+        """Rewind the conversation to the end of a recorded turn.
+
+        Rebuilds ``self.messages`` from the turn's recorded segment + index,
+        moves the session back onto that segment (``history_index``) and drops
+        everything after it -- both the extra messages and the later recorder
+        entries. New turns then continue from that state. Best-effort only: a
+        segment that cannot be loaded leaves the session unchanged.
+        """
+        messages = self._segment_upto(record)
+        if messages is None:
+            return
+        self.messages = messages
+        self.history_index = int(record.get("history_file", 0))
+        self.summary = self.summary[:keep]
+        save_history(self.messages, self.args, self.unique_id, self.history_index)
+        save_summary(self.summary, self.args, self.unique_id)
+        self.console.note(
+            f"Reset to turn {keep}: kept {len(self.messages)} messages "
+            f"(history_{self.history_index}.json up to index "
+            f"{int(record.get('index', 0))}).", "ok")
+        self.console.note("Continuing: new turns will append to this state.", "info")
+
     def _warn_sudo(self):
         """Print a prominent red warning about --sudo mode.
 
@@ -448,6 +744,27 @@ class AgentSession:
         print_welcome(self.allowed_dir, self.server_url, self.args,
                       self.unique_id, self.cache_dir, self.model)
 
+        # Report the outcome of --load-last-session up front, so the user sees
+        # whether we resumed an earlier conversation (under a brand-new id) or
+        # started fresh because no previous session was found.
+        if self.loaded_last_session_dir is not None:
+            self.console.note(
+                f"Loaded most recent session "
+                f"({os.path.basename(self.loaded_last_session_dir)}) and continuing "
+                f"it under a new session id.", "ok")
+        elif getattr(self.args, "load_last_session", False):
+            self.console.note(
+                "No previous session found to load; starting a fresh session.", "warn")
+
+        # Hint at startup so the high-level history feature is discoverable:
+        # /history browses the recorder, /history <n> inspects a turn, and
+        # /reset <n> rewinds the conversation to that turn's state.
+        self.console.emit(
+            self.console.style(
+                "Tip: /history to browse the conversation, /history <n> to inspect a "
+                "turn, /reset <n> to rewind. Type /help for all commands.",
+                dim=True, fg="cyan"))
+
         # The --prompt value is a one-shot initial turn: it is sent verbatim and
         # then cleared, so later turns come from the user (manual mode) or are
         # produced automatically by the loop (auto mode).
@@ -466,6 +783,12 @@ class AgentSession:
                     if user_input is None:  # quit / exit
                         self.shutdown()
                         break
+
+                    # Interactive slash commands are handled in place and never
+                    # reach the LLM. _handle_command returns True when the input
+                    # was such a command, so we just re-prompt (continue).
+                    if user_input.startswith("/") and self._handle_command(user_input):
+                        continue
 
                 # 2) Hand the user turn to the model and act on its tool calls.
                 self.messages.append({"role": "user", "content": user_input})
@@ -488,11 +811,21 @@ class AgentSession:
         """Run a single LLM turn: call the model, render its text, run its tool
         calls. Returns True if the LLM made tool calls and we're in auto-mode,
         signalling the loop to continue without asking the user."""
-        # Keep long sessions within the model's context window.
-        self.messages = maybe_compact(
+        # Keep long sessions within the model's context window. Compaction
+        # rolls the session over to a fresh history segment (history_index + 1)
+        # and returns that bump so the recorder can stay flat across it.
+        self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
-            self.args.llm_timeout, self.token_stats,
+            self.args.llm_timeout, self.token_stats, self.history_index,
         )
+        if did_compact:
+            self.history_index = new_index
+            # Snapshot the compacted messages into the new segment so its turns
+            # are preserved, and record the summary as the first turn of it.
+            save_history(self.messages, self.args, self.unique_id, self.history_index)
+            self._record_turn(
+                f"summary: history compacted to {len(self.messages)} messages",
+                self.messages)
 
         response_text, tool_calls, usage = utils.call_openai_server(
             self.messages,
@@ -535,6 +868,17 @@ class AgentSession:
         # turn above it -- which is what made the screen keep scrolling.
         self.console.usage_line(usage, transient=not self.console.verbose)
 
+        # Append this step's turn to the high-level recorder. On compaction the
+        # recorder was already seeded for the new segment above, so this becomes
+        # that segment's next turn (assistant / tool call), pointing at the
+        # freshly appended message -- the end-of-turn snapshot /reset targets.
+        if tool_calls:
+            self._record_turn(
+                f"tool call(s): {', '.join(tc.get('function', {}).get('name', '?') for tc in tool_calls)}",
+                self.messages)
+        elif response_text:
+            self._record_turn("assistant", self.messages)
+
         return made_tool_calls and self.args.auto_mode
 
     def _read_user_line(self):
@@ -554,6 +898,63 @@ class AgentSession:
             return self._read_user_line()
 
         return user_input
+
+    def _handle_command(self, user_input):
+        """Handle an interactive slash command before it reaches the LLM.
+
+        Supported:
+          /history           list the high-level recorder (turn number, what
+                             happened, and which history_{n}.json + index)
+          /history <n>       show the full messages recorded for turn <n>
+          /reset [<n>]       rewind the conversation to the end of turn <n>
+                             (no <n> rewinds to the most recent turn)
+          /help              show the command help
+
+        Returns True when the input was a recognised command and was fully
+        handled, so the caller re-prompts instead of sending it to the model.
+        Unknown slash commands print a note and are swallowed (also True).
+        """
+        stripped = user_input.strip()
+        if not stripped.startswith("/"):
+            return False
+        parts = stripped[1:].split(None, 1)
+        cmd, arg = parts[0].lower(), parts[1] if len(parts) > 1 else ""
+
+        if cmd == "history":
+            self._inspect_history(arg) if arg else self._show_history()
+            return True
+        if cmd in ("reset", "rewind"):
+            self._do_reset(arg)
+            return True
+        if cmd == "help":
+            print_help(self.allowed_dir, self.server_url, self.args,
+                       self.unique_id, self.cache_dir, self.model)
+            return True
+        self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
+        return True
+
+    def _do_reset(self, arg):
+        """Rewind the conversation to the end of a recorded turn.
+
+        No argument resets to the most recent turn (a no-op that just replays the
+        current state). With <n>, rewinds to that turn, dropping the messages and
+        recorder entries after it.
+        """
+        if not self.summary:
+            self.console.note("No history has been recorded yet.", "warn")
+            return
+        target = self.summary[-1]
+        if arg:
+            try:
+                idx = int(arg) - 1
+                if not (0 <= idx < len(self.summary)):
+                    raise ValueError
+                target = self.summary[idx]
+            except ValueError:
+                self.console.note(
+                    f"No such turn {arg!r} (have 1..{len(self.summary)}).", "error")
+                return
+        self._reset_history(target["turn"], target)
 
     def _run_tool_calls(self, tool_calls):
         self.console.note(f"LLM is trying to call {len(tool_calls)} tool(s).", "info")
@@ -638,15 +1039,18 @@ class AgentSession:
         self.console.turn("Assistant", text, accent="green")
 
     def _persist(self):
-        save_history(self.messages, self.args, self.unique_id)
+        save_history(self.messages, self.args, self.unique_id, self.history_index)
+        save_summary(self.summary, self.args, self.unique_id)
         usage_path = save_usage(self.token_stats, self.cache_dir, self.unique_id)
         self.console.note(f"Saved usage to: {usage_path}", "info")
         print_usage_summary(self.token_stats)
 
     def shutdown(self):
         """Persist and print a final summary (called on quit / exit)."""
-        self.console.note(f"Saving history to: {self.cache_dir}/history_{self.unique_id}.json", "info")
         self._persist()
+        self.console.note(
+            f"Saved session to {self.cache_dir}/{self.unique_id}/ "
+            f"(history_0..{self.history_index}.json + summary_history.json).", "ok")
 
 
 class _Abort(Exception):

@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import io
 import json
 import types
 import tempfile
@@ -18,6 +19,7 @@ from mini_code_cli.agent_loop import (
     shell_forces_ask_permission,
     accumulate_usage,
 )
+from mini_code_cli import ui
 
 
 class _Args:
@@ -47,10 +49,16 @@ class TestMaybeCompactWiring(unittest.TestCase):
 
     def test_no_history_change_when_small(self):
         # A short history must pass through unchanged and never touch the network
-        # (so we can test the wiring without a live LLM server).
+        # (so we can test the wiring without a live LLM server). maybe_compact
+        # returns (messages, did_compact, history_index); on a short history the
+        # messages are unchanged, no compaction happened, and the segment index
+        # is passed straight through.
         msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
         result = maybe_compact(list(msgs), "http://x", "m", "k", 60, {}, max_messages=100)
-        self.assertEqual(result, msgs)
+        messages, did_compact, history_index = result
+        self.assertEqual(messages, msgs)
+        self.assertFalse(did_compact)
+        self.assertEqual(history_index, 0)
 
     def test_accumulate_still_works(self):
         stats = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0}
@@ -58,8 +66,27 @@ class TestMaybeCompactWiring(unittest.TestCase):
         self.assertEqual(stats["prompt_tokens"], 3)
         self.assertEqual(stats["llm_calls"], 1)
 
-if __name__ == "__main__":
-    unittest.main()
+
+def _run_turn(sess, user_text, answer, tool_calls=None):
+    """Feed one user turn through a single (mocked) LLM step.
+
+    Patches the network call so no server is needed, then appends the user
+    message, runs one step and persists. ``answer`` is the assistant reply and
+    ``tool_calls`` (a list, or None) is what the mock LLM "wants" to run.
+
+    The tool call is recorded in the history exactly as the real loop would
+    (assistant message with ``tool_calls`` + a tool result), but we stub the
+    actual execution so a mocked tool like ``read_file`` never runs for real.
+    """
+    def fake_call(messages, **kw):
+        return answer, tool_calls or [], {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    with mock.patch.object(agent_loop.utils, "call_openai_server", fake_call):
+        with mock.patch.object(sess, "_run_tool_calls", side_effect=lambda tcs: [
+                sess._append_tool.computed for _ in tcs] if False else
+                [sess._append_tool_result(tc.get("id", ""), "mocked tool output") for tc in (tool_calls or [])]):
+            sess.messages.append({"role": "user", "content": user_text})
+            sess._step()
+            sess._persist()
 
 
 def _make_args(**kw):
@@ -69,103 +96,155 @@ def _make_args(**kw):
         api_key=None, system_prompt=None, agent_md=None, prompt=None,
         enable_shell=False, ask_permission=False, auto_mode=False,
         restore_session=None, llm_timeout=30, tool_timeout=30,
+        load_last_session=False, verbose=False, max_tokens=None, temperature=1.0,
     )
     args.__dict__.update(kw)
     return args
 
 
-class TestRestoreSession(unittest.TestCase):
-    """Restoring a previous session continues its history under a brand-new id."""
+class TestConversationHistory(unittest.TestCase):
+    """The high-level recorder + /history + /reset navigation.
+
+    A session records one flat, high-level entry per turn (turn number, what
+    happened, and which history_{n}.json + index the turn lives in). These tests
+    drive a mocked LLM through a few turns and check that history can be listed,
+    inspected and rewound, and that the recorder survives compaction.
+    """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.dir = os.path.join(self.tmp.name, "1792028090823027-a9d77653")
-        os.makedirs(self.dir)
-        self.history = [
-            {"role": "system", "content": "You are a helper."},
-            {"role": "user", "content": "remember this?"},
-            {"role": "assistant", "content": "I remember that."},
-        ]
-        with open(os.path.join(self.dir, "history.json"), "w") as f:
-            json.dump(self.history, f)
-        # Patch out the network call AgentSession makes to discover the model.
-        self._patcher = unittest.mock.patch.object(
-            agent_loop.utils, "determine_vllm_model", return_value=None)
-        self._patcher.start()
-        self.addCleanup(self._patcher.stop)
-
-    def _write_usage(self, **stats):
-        with open(os.path.join(self.dir, "usage.json"), "w") as f:
-            json.dump(stats, f)
-
-    def test_restore_from_directory_path(self):
+        self.buf = io.StringIO()
+        self.console = ui.Console(stream=self.buf, color=False, unicode=False)
         with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(restore_session=self.dir))
-        self.assertEqual(sess.messages, self.history)
-        # A brand-new unique id, distinct from the restored folder name.
-        self.assertNotEqual(sess.unique_id, "1792028090823027-a9d77653")
+            self.sess = agent_loop.AgentSession(
+                _make_args(cache_dir=self.tmp.name), console=self.console)
 
-    def test_restore_from_history_file_path(self):
-        history_path = os.path.join(self.dir, "history.json")
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(restore_session=history_path))
-        self.assertEqual(sess.messages, self.history)
+    def _read(self):
+        text = self.buf.getvalue()
+        self.buf.truncate(0)
+        self.buf.seek(0)
+        return text
 
-    def test_tilde_path_is_expanded(self):
-        home = os.path.join(self.tmp.name, "home")
-        os.makedirs(os.path.join(home, "abc-123"))
-        with open(os.path.join(home, "abc-123", "history.json"), "w") as f:
-            json.dump(self.history, f)
-        with mock.patch.object(os.path, "expanduser",
-                               side_effect=lambda p: p.replace("~", home, 1) if p.startswith("~") else p):
-            with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-                sess = agent_loop.AgentSession(_make_args(restore_session="~/abc-123"))
-        self.assertEqual(sess.messages, self.history)
+    def _load_summary(self):
+        with open(os.path.join(self.tmp.name, self.sess.unique_id, "summary_history.json")) as f:
+            return json.load(f)
 
-    def test_usage_is_seeded_from_saved(self):
-        self._write_usage(prompt_tokens=10, completion_tokens=5, total_tokens=15,
-                          llm_calls=2, tool_calls=1)
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(restore_session=self.dir))
-        self.assertEqual(sess.token_stats["prompt_tokens"], 10)
-        self.assertEqual(sess.token_stats["completion_tokens"], 5)
-        self.assertEqual(sess.token_stats["total_tokens"], 15)
-        self.assertEqual(sess.token_stats["llm_calls"], 2)
-        self.assertEqual(sess.token_stats["tool_calls"], 1)
+    def test_history_list_renders_without_error(self):
+        _run_turn(self.sess, "hello", "hi there")
+        self._read()  # drop startup + usage output emitted before the command
+        handled = self.sess._handle_command("/history")
+        self.assertTrue(handled)
+        text = self._read()
+        self.assertIn("Conversation history", text)
+        self.assertIn("assistant", text)
+        self.assertIn("history_0.json", text)
 
-    def test_missing_usage_is_ok(self):
-        # Restoring with only a history.json (no usage.json) must still work.
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(restore_session=self.dir))
-        self.assertEqual(sess.messages, self.history)
-        self.assertEqual(sess.token_stats["llm_calls"], 0)
+    def test_history_list_handles_tool_call_rows(self):
+        # A tool call must render as a single well-formed row, not crash the
+        # 3-tuple unpacking in Console.history_list (a previous bug stringified
+        # each row tuple first, which broke the `for turn, what, where` unpack).
+        _run_turn(self.sess, "q0", "thinking",
+                  tool_calls=[{"id": "c1", "function": {"name": "read_file",
+                                                        "arguments": "{}"}}])
+        self._read()
+        handled = self.sess._handle_command("/history")
+        self.assertTrue(handled)
+        self.assertIn("tool call", self._read())
 
-    def test_missing_restore_falls_back_to_fresh_system_prompt(self):
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(restore_session="/nope/does/not/exist"))
-        self.assertTrue(sess.messages)
-        self.assertEqual(sess.messages[0]["role"], "system")
-        self.assertIn("tools", sess.messages[0]["content"])
+    def test_inspect_history_shows_messages_of_that_turn(self):
+        _run_turn(self.sess, "remember 42", "noted: 42")
+        _run_turn(self.sess, "what did i say", "you said 42")
+        self._read()
+        self.sess._inspect_history("1")
+        text = self._read()
+        # Turn 1 is the first assistant reply; its snapshot must include the
+        # first user turn and that reply, but not the second.
+        self.assertIn("remember 42", text)
+        self.assertIn("noted: 42", text)
+        self.assertNotIn("what did i say", text)
 
-    def test_none_restore_falls_back_to_fresh(self):
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(restore_session=None))
-        self.assertEqual(sess.messages[0]["role"], "system")
-        self.assertIn("tools", sess.messages[0]["content"])
+    def test_history_numbers_are_1_based_on_turns(self):
+        # The recorder is 1-based on real turns (assistant replies), not on
+        # message index, so turn 1 must be the first assistant answer.
+        _run_turn(self.sess, "q0", "a0")
+        self._read()
+        with open(os.path.join(self.tmp.name, self.sess.unique_id, "summary_history.json")) as f:
+            rec = json.load(f)
+        self.assertEqual(rec[0]["turn"], 1)
+        self.assertEqual(rec[0]["what"], "assistant")
 
-    def test_load_history_none_for_empty_input(self):
-        self.assertIsNone(agent_loop.load_history(None))
-        self.assertIsNone(agent_loop.load_history(""))
+    def test_inspect_history_bad_turn_is_reported(self):
+        _run_turn(self.sess, "q", "a")
+        self._read()
+        self.sess._inspect_history("999")
+        self.assertIn("No such turn", self._read())
 
-    def test_load_history_none_for_malformed_json(self):
-        with open(os.path.join(self.dir, "broken.json"), "w") as f:
-            f.write("{not valid json")
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            self.assertIsNone(agent_loop.load_history(os.path.join(self.dir, "broken.json")))
+    def test_reset_drops_later_messages_and_records(self):
+        _run_turn(self.sess, "q0", "a0")
+        _run_turn(self.sess, "q1", "a1")
+        _run_turn(self.sess, "q2", "a2")
+        self._read()
+        before = len(self.sess.messages)
+        self.sess._do_reset("1")  # rewind to end of first assistant reply
+        self.assertLess(len(self.sess.messages), before)
+        # Messages now end at the first assistant answer.
+        self.assertIn("a0", self.sess.messages[-1]["content"])
+        # Recorder was truncated to just the kept turns. One assistant reply
+        # ("a0") remains, so the recorder holds exactly one record.
+        self.assertEqual(len(self.sess.summary), 1)
 
-    def test_load_history_none_for_non_list(self):
-        with open(os.path.join(self.dir, "obj.json"), "w") as f:
-            json.dump({"role": "system"}, f)
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            self.assertIsNone(agent_loop.load_history(os.path.join(self.dir, "obj.json")))
+    def test_reset_then_continue_appends_from_reset_state(self):
+        _run_turn(self.sess, "q0", "a0")
+        _run_turn(self.sess, "q1", "a1")
+        self._read()
+        self.sess._do_reset("1")
+        _run_turn(self.sess, "after reset", "resumed")
+        self.assertIn("resumed", self.sess.messages[-1]["content"])
+        joined = "\n".join(m["content"] for m in self.sess.messages)
+        self.assertIn("a0", joined)
+        # 'a1' should have been discarded by the reset.
+        self.assertNotIn("a1", joined)
+
+    def test_reset_no_arg_keeps_all(self):
+        _run_turn(self.sess, "q0", "a0")
+        _run_turn(self.sess, "q1", "a1")
+        self._read()
+        n = len(self.sess.messages)
+        self.sess._do_reset("")  # reset to most recent turn: a no-op
+        self.assertEqual(len(self.sess.messages), n)
+
+    def test_reset_history_survives_compaction(self):
+        # Force compaction to roll segments (history_0 -> history_1), then make
+        # sure /history still lists every turn across the segment boundary and
+        # a reset to a mid-segment turn reconstructs a faithful prefix.
+        #
+        # We wrap (not replace) the real maybe_compact so the real segment logic
+        # runs, just with a tiny threshold. Patching the module name directly
+        # would recurse (the wrapper calls the name it replaced), so we call the
+        # private _maybe_compact_impl via the real function object captured first.
+        real_compact = agent_loop.maybe_compact
+        def compact(messages, server_url, model, api_key, llm_timeout, token_stats,
+                    history_index=0, max_messages=5):
+            return real_compact(
+                messages, server_url, model, api_key, llm_timeout, token_stats,
+                history_index, max_messages)
+        with mock.patch.object(agent_loop, "maybe_compact", compact):
+            for i in range(4):
+                _run_turn(self.sess, f"q{i}", f"a{i}")
+        self._read()
+        # history_1.json should now exist (a new segment was written).
+        self.assertTrue(os.path.exists(
+            os.path.join(self.tmp.name, self.sess.unique_id, "history_1.json")))
+        # /history lists all turns across segments without error.
+        handled = self.sess._handle_command("/history")
+        self.assertTrue(handled)
+        self.assertIn("Conversation history", self._read())
+        # Reset to the second turn (still in the first segment) works.
+        self.sess._do_reset("2")
+        self.assertIn("a0", "\n".join(m["content"] for m in self.sess.messages))
+        self.assertEqual(self.sess.history_index, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

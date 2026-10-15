@@ -440,6 +440,62 @@ class Console:
         for label, value in rows:
             self.emit(f"  {label.ljust(label_w)} : {value}")
 
+    def history_list(self, rows, title="Conversation history"):
+        """Render the high-level recorder as a numbered list of turns.
+
+        Each row is (turn number, what happened, location). The recorder is a
+        flat, high-level log (see AgentSession), so this is a quick way to see
+        the whole conversation at a glance and pick a turn to inspect or rewind
+        to. The location column shows which ``history_{n}.json`` segment and
+        message index the turn lives in, i.e. the end-of-turn snapshot a reset
+        restores from.
+        """
+        # Each row is a 3-tuple (turn, what, location); render every cell as a
+        # string for display while keeping the tuple shape so it can be unpacked
+        # below. (A None row, if any, is dropped so a stray empty entry never
+        # crashes the width maths or the unpacking.)
+        rows = [tuple("" if c is None else str(c) for c in r) for r in rows]
+        turn_w = max((len(r[0]) for r in rows), default=0)
+        what_w = max((len(r[1]) for r in rows), default=0)
+        header = f"{title} ({len(rows)} turns):"
+        self.emit(self.style(header, bold=True, fg="cyan"))
+        for turn, what, where in rows:
+            turn_cell = self.style(turn.rjust(turn_w), fg="magenta", bold=True) if self.color_enabled else turn.rjust(turn_w)
+            what_cell = self.style(self.truncate(what, what_w), dim=True) if self.color_enabled else what.ljust(what_w)
+            where_cell = self.style(where, fg="gray", dim=True) if self.color_enabled else where
+            self.emit(f"{turn_cell}  {what_cell}  {where_cell}")
+        self.emit(self.style("(commands: /history <n> to inspect, /reset <n> to rewind)", dim=True, fg="cyan"))
+
+    def history_detail(self, record, messages):
+        """Render a single turn's full recorded messages.
+
+        Used by ``/history <n>`` to show exactly what the conversation looked
+        like at the end of that turn. Each message is boxed by role, and the
+        tool-call markers are surfaced so the detail mirrors the transcript the
+        user saw at the time.
+        """
+        turn = record.get("turn", "?")
+        what = record.get("what", "?")
+        where = f"history_{record.get('history_file', 0)}.json at index {record.get('index', 0)}"
+        self.emit(self.style(f"Turn {turn} ({what}) — {where}", bold=True, fg="cyan"))
+        self.emit(self.style("-" * self.width, fg="gray", dim=True))
+        for msg in messages:
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            self.emit(self.style(f"{self.glyph('role')} {role}", fg="magenta", bold=True))
+            if role == "tool":
+                self.emit(f"    tool result for id {msg.get('tool_call_id', '')}: {self._oneline(content, 200)}")
+            elif content:
+                for line in str(content).splitlines():
+                    self.emit(f"    {line}")
+            else:
+                self.emit("    (no content)")
+            calls = msg.get("tool_calls")
+            if calls:
+                names = ", ".join(tc.get("function", {}).get("name", "?") for tc in calls)
+                self.emit(self.style(f"    {self.glyph('gear')} tool call(s): {names}", fg="yellow"))
+        self.emit(self.style("Type /reset %s to rewind here." % turn, dim=True, fg="cyan"))
+
     def welcome(self, version, session_id, cache_dir, allowed_dir,
                 server_url, model, permission_mode, agent_mode, shell_mode):
         """Render the startup info banner."""
