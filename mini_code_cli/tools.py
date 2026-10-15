@@ -1,4 +1,3 @@
-import os
 import glob as glob_module
 import subprocess
 import urllib.parse

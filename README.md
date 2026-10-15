@@ -57,6 +57,43 @@ The agent can call a small set of tools, all of which live in `mini_code_cli/too
 - **`read_website`** — fetch the raw text/HTML of a URL (bounded by `--tool-timeout`).
 - **`run_shell_command`** — run a shell command (only when `--enable-shell` is set). Every command is passed through the shell-safety classifier described above.
 
+### Sub-agents
+
+Passing `--enable-subagents` lets the main agent **delegate a focused task to a sub-agent**, which is exposed to the model as an extra tool. A sub-agent is a self-contained, narrowed agent: it runs on its own in auto-mode (unattended), in its own isolated session folder, and hands a short text result (plus an optional `report.md`) back to the main agent. It reuses all the existing machinery -- tools, the shell-safety classifier, the `--allowed-dir` sandbox, history compaction and `--plan` mode -- and cannot recursively spawn further sub-agents.
+
+Enable it and the available sub-agents appear in the help (`/help`):
+
+```bash
+mini-code --enable-subagents
+```
+
+Two worked examples ship out of the box:
+
+- **`research`** -- read-only web research. Given a topic it searches the web, reads a few sources and returns a concise, sourced summary. It can only use `web_search` / `read_website` -- never the filesystem or shell -- so it is safe even without a sandbox. Accepts an optional `sources` hint (e.g. `"wikipedia.org only"`).
+- **`planner`** -- drafts/refines a clear step-by-step plan for a goal and returns it. Always runs in plan mode.
+
+The `tools`, `enable_shell` and `max_steps` knobs are always intersected with the parent's own permissions, so a sub-agent can never do anything the main agent could not. Sub-agents also compose with `--plan` mode: each sub-agent keeps its own `CURRENT_PLAN.md` / `CURRENT_GOAL.md` in its own session folder.
+
+#### Adding your own sub-agent
+
+A sub-agent is just a small class. Subclass `SubAgent` and register it:
+
+```python
+# my_subagents.py
+from mini_code_cli.subagents import SubAgent, register
+
+class SummarizeSubAgent(SubAgent):
+    name = "summarize"
+    description = "Summarize a piece of text the main agent provides."
+    tools = ["read_file", "write_file"]   # restrict the nested agent's tools
+    enable_shell = False
+    max_steps = 5
+
+register(SummarizeSubAgent())
+```
+
+Then make sure it is imported (e.g. add `import my_subagents`), and it will be discovered and exposed to the model automatically when `--enable-subagents` is set. See `mini_code_cli/subagents/builtin.py` for the full list of knobs and `ARCHITECTURE.md` (sections 2-3) for the design and every available option.
+
 3. Try a prompt:
 ```txt
 Write an agent.md file for me that helps an LLM write efficient triton kernels, given a reference implementation.
@@ -79,24 +116,33 @@ options:
   --model MODEL         Model name, default=None
   --api-key API_KEY     API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.
   --cache-dir CACHE_DIR
-                        The cache dir for the session histories.
+                        The cache dir for the session histories. default=~/.cache/mini_code/sessions/
   --restore-session RESTORE_SESSION
-                        The location of a previous session to continue.
-                        (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)
+                        The location of a previous session to continue. (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)
+  --load-last-session   Load the most recent previous session from the cache dir and continue it (under a new session id), instead of starting fresh. --restore-session takes precedence if also given.
   --system-prompt SYSTEM_PROMPT
                         Replace system prompt, with a custom system prompt.
   -a, --auto-mode       Whether to run the agent in `auto-mode'. Or default: `manual-mode'.
   --agent-md AGENT_MD   If the agent should use an agent-md file... (it will added after system message.)
   --prompt PROMPT       An initial prompt from the user...
   --ask-permission      Ask for permission before any tool call. (Shell ALLOW-tier commands skip the prompt; DENY is blocked.)
+  --sudo                DANGEROUS: never ask for permission. Every non-destructive tool call and shell command runs automatically without confirmation. Destructive (DENY-tier) commands are still refused.
   --allowed-dir ALLOWED_DIR
-                        Allowed directory for file operations
-  -s, --enable-shell    Allow shell execution. Default: False
+                        Allowed directory for file operations, default='./'
+  -s, --enable-shell    Allow shell execution. default= False
+  --enable-subagents    Allow the agent to delegate work to sub-agents (exposed as extra tools). default= False
   --llm-timeout LLM_TIMEOUT
-                        HTTP timeout in seconds for LLM requests (reasoning models can be slow). default=300
+                        HTTP timeout in seconds for LLM requests (reasoning models can be slow). default=500
   --tool-timeout TOOL_TIMEOUT
                         Timeout in seconds for a single tool call. default=120
-  --verbose             Print the full, detailed output (every tool call + usage box).
+  --plan                Enable plan mode: the agent keeps a CURRENT_PLAN.md
+                        (its step-by-step plan, marked finished when the goal
+                        is done) and CURRENT_GOAL.md (the user's latest
+                        instruction) in the session directory. Also changes
+                        how history compaction works.
+  --verbose             Print the full, detailed output. Without it (default),
+                        only user/assistant turns, token usage and tool calls
+                        are shown.
   ```
 
 ### In-session commands

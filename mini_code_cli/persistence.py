@@ -1,0 +1,262 @@
+"""mini_code_cli.persistence — everything about session histories on disk.
+
+A session owns a directory under ``cache_dir/{session_name}/`` and keeps:
+
+  * ``history_{n}.json`` — one file per conversation *segment*. A brand-new
+    segment is started (``n -> n+1``) every time the history is compacted; a
+    segment is overwritten every step with the latest messages. Because messages
+    only ever *append* within a segment, any earlier message index still marks a
+    faithful prefix -- so a recorded turn's ``index`` lets you rebuild the exact
+    state at the end of that turn.
+
+  * ``summary_history.json`` — a flat, high-level *recorder*: one record per
+    turn (the running turn number, *what* happened -- an assistant reply, a
+    tool call, or a compaction summary -- and which ``history_{n}.json`` +
+    message index the turn lives in). It lets the user navigate and rewind the
+    conversation without reading the full detailed histories.
+
+  * ``usage.json`` — the accumulated token usage for the session.
+
+Every loader here is *best-effort*: a missing/garbled file must never break a
+restore, so each function returns a safe default (or ``None``) instead of
+raising.
+"""
+import json
+import os
+import re
+
+from . import ui
+from .config import DEFAULT_CACHE_LOCATION
+
+
+# ---------------------------------------------------------------------------
+# directory / path helpers
+# ---------------------------------------------------------------------------
+
+def history_dir(cache_dir, session_name=""):
+    """Return (creating it if needed) this session's on-disk history folder."""
+    cache_dir = cache_dir or DEFAULT_CACHE_LOCATION
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(os.path.join(cache_dir, session_name), exist_ok=True)
+    return os.path.join(cache_dir, session_name)
+
+
+def _resolve_history_path(restore_session):
+    """Resolve a ``--restore-session`` path to the ``history.json`` file it holds.
+
+    Accepts either the session directory itself or a direct path to a
+    ``history.json`` file. A leading ``~`` is expanded for convenience.
+    """
+    candidate = os.path.expanduser(restore_session)
+    if os.path.isdir(candidate):
+        candidate = os.path.join(candidate, "history.json")
+    return candidate
+
+
+def _restore_dir(restore_session):
+    """Resolve a ``--restore-session`` value to the directory its history lives in.
+
+    Accepts either the session directory itself or a direct path to a history
+    file inside it (``history.json`` or ``history_{n}.json``). A leading ``~`` is
+    expanded for convenience.
+    """
+    if not restore_session:
+        return None
+    candidate = os.path.expanduser(restore_session)
+    if os.path.isfile(candidate):
+        return os.path.dirname(candidate)
+    return candidate
+
+
+def generate_unique_id():
+    """Generate a unique id based on the current time and a random component."""
+    import time
+    import uuid
+    timestamp = int(time.time() * 1_000_000)  # microseconds
+    return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def find_last_session_dir(cache_dir):
+    """Return the path to the most recently *active* session dir under ``cache_dir``.
+
+    "Most recent" is decided by the newest modification time of any file inside
+    each session folder (a session rewrites its ``history_{n}.json`` every step),
+    so this reflects the last session the user actually worked in rather than the
+    one most recently *created*. Session folders with no files are ignored.
+    Never raises: a missing/unreadable cache dir simply yields ``None``.
+    """
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return None
+    try:
+        entries = [
+            os.path.join(cache_dir, name)
+            for name in os.listdir(cache_dir)
+            if os.path.isdir(os.path.join(cache_dir, name))
+        ]
+    except OSError:
+        return None
+
+    best_dir, best_time = None, -1.0
+    for session in entries:
+        try:
+            files = [
+                os.path.join(session, f)
+                for f in os.listdir(session)
+                if os.path.isfile(os.path.join(session, f))
+            ]
+            if not files:
+                continue
+            mtime = max(os.path.getmtime(f) for f in files)
+        except OSError:
+            continue
+        if mtime > best_time:
+            best_time, best_dir = mtime, session
+    return best_dir
+
+
+# ---------------------------------------------------------------------------
+# history segments (history_{n}.json)
+# ---------------------------------------------------------------------------
+
+def save_history(messages, cache_dir, session_name="", history_index=0):
+    """Persist a detailed conversation-history *segment* to disk."""
+    d = history_dir(cache_dir, session_name)
+    history_path = os.path.join(d, f"history_{history_index}.json")
+    with open(history_path, "w", encoding="utf-8") as f:
+        json.dump(messages, f, indent=2)
+    return history_path
+
+
+def load_history_from_dir(directory):
+    """Load the most complete history for a session directory.
+
+    Prefers the newest ``history_{n}.json`` segment and falls back to the
+    classic ``history.json``. Returns the messages list, or ``None`` if nothing
+    could be loaded (never raises: a failed restore falls back to a fresh
+    session).
+    """
+    if not directory or not os.path.isdir(directory):
+        return None
+    newest, highest = None, -1
+    for fn in os.listdir(directory):
+        m = re.fullmatch(r"history_(\d+)\.json", fn)
+        if m and int(m.group(1)) > highest:
+            highest, newest = int(m.group(1)), fn
+    path = (os.path.join(directory, newest) if newest is not None
+            else os.path.join(directory, "history.json"))
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            messages = json.load(f)
+        return messages if isinstance(messages, list) else None
+    except Exception as e:
+        ui.console.note(f"Failed to load history from {directory}: {e}", "error")
+        return None
+
+
+def load_history(restore_session):
+    """Load a previous session's message history from disk (single-file path).
+
+    Returns the messages list, or ``None`` if nothing could be loaded (missing
+    file, wrong shape, or unreadable JSON). Never raises.
+    """
+    if not restore_session:
+        return None
+    history_path = _resolve_history_path(restore_session)
+    if not os.path.isfile(history_path):
+        ui.console.note(f"No history found to restore from: {restore_session}", "warn")
+        return None
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
+            messages = json.load(f)
+        if not isinstance(messages, list):
+            raise ValueError("history file did not contain a message list")
+    except Exception as e:
+        ui.console.note(f"Failed to load history from {restore_session}: {e}", "error")
+        return None
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# high-level recorder (summary_history.json)
+# ---------------------------------------------------------------------------
+
+def save_summary(summary, cache_dir, session_name=""):
+    """Persist the high-level recorder to ``summary_history.json``."""
+    d = history_dir(cache_dir, session_name)
+    summary_path = os.path.join(d, "summary_history.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    return summary_path
+
+
+def load_summary_from_dir(directory):
+    """Load a session's high-level recorder (``summary_history.json``).
+
+    Returns the list of records, or an empty list if there is none or it cannot
+    be read. Best-effort only.
+    """
+    if not directory or not os.path.isdir(directory):
+        return []
+    path = os.path.join(directory, "summary_history.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        return saved if isinstance(saved, list) else []
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# token usage (usage.json)
+# ---------------------------------------------------------------------------
+
+def accumulate_usage(token_stats, usage):
+    """Add a single LLM call's token usage into the running session totals."""
+    if not usage:
+        return
+    token_stats["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
+    token_stats["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+    token_stats["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+    token_stats["llm_calls"] += 1
+
+
+def save_usage(token_stats, cache_dir, session_name=""):
+    """Persist the accumulated token usage to the session folder."""
+    cache_dir = cache_dir or DEFAULT_CACHE_LOCATION
+    d = history_dir(cache_dir, session_name)
+    usage_path = os.path.join(d, "usage.json")
+    with open(usage_path, "w", encoding="utf-8") as f:
+        json.dump(token_stats, f, indent=2)
+    return usage_path
+
+
+def load_usage_from_dir(directory):
+    """Load a session's accumulated token usage (``usage.json``), if present.
+
+    Best-effort: returns an empty-stats dict on any problem so a missing or
+    malformed usage file never breaks a restore.
+    """
+    stats = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "llm_calls": 0,
+        "tool_calls": 0,
+    }
+    if not directory or not os.path.isdir(directory):
+        return stats
+    path = os.path.join(directory, "usage.json")
+    if not os.path.isfile(path):
+        return stats
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        if isinstance(saved, dict):
+            for key in stats:
+                if key in saved:
+                    stats[key] += int(saved[key] or 0)
+    except Exception:
+        pass
+    return stats

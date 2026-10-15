@@ -19,8 +19,8 @@ urls = {"Homepage" = "https://github.com/ai-nikolai/mini-code-cli"}
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["mini_code_cli"]
+[tool.setuptools.packages.find]
+include = ["mini_code_cli*"]
 
 [project.scripts]
 mini-code = "mini_code_cli.agent_loop:main"

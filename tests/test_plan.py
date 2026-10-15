@@ -224,9 +224,12 @@ class TestSandboxExemptsPlanFiles(unittest.TestCase):
         call = {"id": "c1", "function": {"name": "write_file",
                 "arguments": '{"file_path": "%s/%s", "content": "plan"}' %
                              (sdir, plan_utils.PLAN_FILENAME)}}
-        with mock.patch.object(sess, "_run_one_tool_call", wraps=sess._run_one_tool_call) as spy:
+        with mock.patch.object(sess, "_run_one_tool_call",
+                               wraps=sess._run_one_tool_call) as spy:
             sess._run_one_tool_call(call)
-        # The tool actually ran (file written) instead of being blocked by the sandbox.
+            # The tool actually ran (not blocked by the sandbox), so it reached
+            # the real write_file rather than returning a refusal up front.
+            spy.assert_called_once_with(call)
         self.assertTrue(os.path.exists(os.path.join(sdir, plan_utils.PLAN_FILENAME)))
 
     def test_non_plan_file_write_still_blocked(self):
