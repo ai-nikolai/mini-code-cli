@@ -73,6 +73,11 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
+    # Bound up front so that a failure *during* the request itself (a timeout,
+    # a refused connection, DNS failure, ...) does not leave ``response``
+    # unassigned -- otherwise the error handler below crashes with
+    # "local variable 'response' where it is not associated with a value".
+    response = None
     try:
         response = requests.post(
             url,
@@ -100,19 +105,23 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
 
     except requests.exceptions.RequestException as e:
         print(f"HTTP Error: {e}")
-        try:
-            print(f"Status Code: {response.status_code}")
-            # Print the raw response body to see the detailed validation error.
-            print(f"Response Body: {response.text}")
-            # If the response is JSON, parse and pretty-print it.
+        # Only probe the response further if we actually got one back. A
+        # request-level failure (timeout, connection refused, DNS) leaves
+        # ``response`` as None, and there is nothing to inspect then.
+        if response is not None:
             try:
-                error_details = response.json()
-                print("Parsed Error Details:")
-                print(json.dumps(error_details, indent=2))
-            except json.JSONDecodeError:
-                print("Response body is not valid JSON.")
-        except Exception as e:
-            print(f"Problem with (error) response: {e}")
+                # Print the status code / raw body to see the detailed error.
+                print(f"Status Code: {response.status_code}")
+                print(f"Response Body: {response.text}")
+                # If the response is JSON, parse and pretty-print it.
+                try:
+                    error_details = response.json()
+                    print("Parsed Error Details:")
+                    print(json.dumps(error_details, indent=2))
+                except json.JSONDecodeError:
+                    print("Response body is not valid JSON.")
+            except Exception as e:
+                print(f"Problem with (error) response: {e}")
         return None, None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")

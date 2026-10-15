@@ -113,7 +113,7 @@ def load_history_from_dir(directory):
             messages = json.load(f)
         return messages if isinstance(messages, list) else None
     except Exception as e:
-        print(f"{BOLD}{RED}Warning:{RESET} Failed to load history from {directory}: {e}")
+        ui.console.note(f"Failed to load history from {directory}: {e}", "error")
         return None
 
 
@@ -247,7 +247,7 @@ def load_history(restore_session):
 
     history_path = _resolve_history_path(restore_session)
     if not os.path.isfile(history_path):
-        print(f"{BOLD}{YELLOW}Warning:{RESET} No history found to restore from: {restore_session}")
+        ui.console.note(f"No history found to restore from: {restore_session}", "warn")
         return None
 
     try:
@@ -256,7 +256,7 @@ def load_history(restore_session):
         if not isinstance(messages, list):
             raise ValueError("history file did not contain a message list")
     except Exception as e:
-        print(f"{BOLD}{RED}Warning:{RESET} Failed to load history from {restore_session}: {e}")
+        ui.console.note(f"Failed to load history from {restore_session}: {e}", "error")
         return None
 
     return messages
@@ -314,6 +314,7 @@ def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
     ui.console.emit("  /history         list the conversation (turn number, what happened, where)")
     ui.console.emit("  /history <n>      show the full messages recorded for turn n")
     ui.console.emit("  /reset [<n>]      rewind to the end of turn n (drops everything after it)")
+    ui.console.emit("  /clear            clear the screen (keeps the conversation history)")
     ui.console.emit("  /help             show this help")
     ui.console.emit("  /quit, /exit      save the session and exit")
     ui.console.rule(char="═", fg="cyan")
@@ -402,7 +403,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         return messages, False, history_index
 
     try:
-        print(f"{BOLD}{YELLOW}System:{RESET} Compacting conversation history ({len(messages)} messages -> summary)...")
+        ui.console.note(f"Compacting conversation history ({len(messages)} messages -> summary)...", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
         summary, _, compact_usage = utils.call_openai_server(
             [{"role": "user", "content": summary_prompt}],
@@ -423,14 +424,14 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
                 "role": "user",
                 "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
             })
-            print(f"{BOLD}{YELLOW}System:{RESET} History compacted to {len(compacted)} messages.")
+            ui.console.note(f"History compacted to {len(compacted)} messages.", "warn")
             # A new segment (history_index + 1) is started on compaction: the
             # compacted messages are its snapshot, and every later turn appends
             # to it. The caller records a single high-level 'summary' turn for
             # this index so the recorder stays flat across the rollover.
             return compacted, True, history_index + 1
     except Exception as e:
-        print(f"{BOLD}{RED}Warning:{RESET} Failed to compact history: {e}")
+        ui.console.note(f"Failed to compact history: {e}", "error")
 
     return messages, False, history_index
 
@@ -469,6 +470,7 @@ class AgentSession:
     """
 
     EXIT_COMMANDS = {"quit", "exit", "/quit", "/exit"}
+    CLEAR_COMMANDS = {"clear", "/clear"}
 
     def __init__(self, args, console=None):
         self.args = args
@@ -662,7 +664,7 @@ class AgentSession:
         messages = self._segment_upto(record)
         if messages is None:
             return
-        self.console.history_detail(record, messages)
+        self.console.history_detail(record, messages, total=len(self.summary))
 
     def _segment_upto(self, record):
         """Load a recorded turn's segment and truncate it at its index.
@@ -774,8 +776,8 @@ class AgentSession:
             try:
                 # 1) Get the user's turn: the one-shot preset, or a fresh line.
                 if pending is not None:
-                    print("=" * 30)
-                    print(f"{BOLD}{CYAN}You (preset): {RESET}{pending}")
+                    self.console.rule(title="Preset prompt", char="=", fg="cyan")
+                    self.console.turn("You", pending, accent="cyan")
                     user_input = pending
                     pending = None
                 else:
@@ -827,6 +829,9 @@ class AgentSession:
                 f"summary: history compacted to {len(self.messages)} messages",
                 self.messages)
 
+        # Show a "… thinking" spinner while the LLM works (in-place, non-scrolling;
+        # a no-op on non-TTY / ASCII output). Stopped right after the call returns.
+        self.console.start_thinking()
         response_text, tool_calls, usage = utils.call_openai_server(
             self.messages,
             max_tokens=self.args.max_tokens,
@@ -837,6 +842,17 @@ class AgentSession:
             api_key=self.api_key,
             timeout=self.args.llm_timeout,
         )
+        # A failed LLM call returns (None, None, None): treat it as "nothing
+        # happened this step" so the loop degrades gracefully (records a note
+        # and re-prompts) instead of crashing.
+        if usage is None:
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                     "tool_calls": self.token_stats["tool_calls"]}
+            # This shouldn't be set to None, as usage could be None, but there is still a response.
+            # tool_calls = None
+            # response_text = None
+        # The LLM has answered (or failed); clear the spinner before rendering.
+        self.console.stop_thinking()
         accumulate_usage(self.token_stats, usage)
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
@@ -885,7 +901,7 @@ class AgentSession:
         """Read one turn from the user. Returns the text to send, or None to quit."""
         user_input = self.console.read_line(style_line_prompt("You:"))
         if user_input is None:  # EOF / Ctrl-C at the prompt
-            print("\nThank you. Goodbye! Saving history...")
+            self.console.note("Thank you. Goodbye! Saving history...", "info")
             return None
 
         if user_input.lower() in self.EXIT_COMMANDS:
@@ -908,6 +924,7 @@ class AgentSession:
           /history <n>       show the full messages recorded for turn <n>
           /reset [<n>]       rewind the conversation to the end of turn <n>
                              (no <n> rewinds to the most recent turn)
+          /clear             clear the screen (keeps the conversation)
           /help              show the command help
 
         Returns True when the input was a recognised command and was fully
@@ -929,6 +946,9 @@ class AgentSession:
         if cmd == "help":
             print_help(self.allowed_dir, self.server_url, self.args,
                        self.unique_id, self.cache_dir, self.model)
+            return True
+        if cmd in self.CLEAR_COMMANDS:
+            self.console.clear_screen()
             return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
@@ -1028,7 +1048,7 @@ class AgentSession:
         try:
             return self.console.ask_permission(name, params_str, shell_cmd, tier, reason)
         except (EOFError, KeyboardInterrupt):
-            print("\nThank you. Goodbye! Saving history...")
+            self.console.note("Thank you. Goodbye! Saving history...", "info")
             self.shutdown()
             raise _Abort
 
@@ -1036,6 +1056,10 @@ class AgentSession:
         self.messages.append({"role": "tool", "tool_call_id": call_id, "content": str(content)})
 
     def _print_assistant(self, text):
+        # A delimiter line before every agent turn keeps consecutive turns
+        # visually separated (the assistant may reply several times in a row
+        # in auto-mode, or right after a tool-call summary).
+        self.console.divider()
         self.console.turn("Assistant", text, accent="green")
 
     def _persist(self):

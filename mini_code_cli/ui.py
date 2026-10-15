@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 
 # --- ANSI SGR codes ---------------------------------------------------------
 _RESET = "\033[0m"
@@ -95,6 +96,9 @@ class Console:
         # When False, only user/assistant/tool turns and warn/error notes are
         # shown. Defaults to True so existing callers keep the full output.
         self.verbose = verbose
+        # "… thinking" spinner state (see start_thinking / stop_thinking).
+        self._thinking_thread = None
+        self._thinking_stop = None
         # Live "transient" region (non-verbose mode) renders the tool-call area
         # and the usage line without scrolling the screen. We keep a single
         # invariant: whenever ``_transient_lines`` is > 0 a block of that many
@@ -352,6 +356,82 @@ class Console:
             if self.color_enabled else f"{icon} "
         self.emit(prefix + str(msg))
 
+    # -- conversation flow --------------------------------------------------
+    def divider(self):
+        """Render a thin horizontal delimiter line.
+
+        Used to separate consecutive conversation turns so each agent reply is
+        visually boxed off from the next one.
+        """
+        self.emit(self.style("-" * self.width, fg="gray", dim=True))
+
+    def clear_screen(self):
+        """Clear the terminal and move the cursor to the top-left.
+
+        Implements the /clear command: it wipes the current view but keeps the
+        session history intact, so subsequent turns continue from where the
+        conversation is now.
+        """
+        self.clear_transient()
+        self.stream.write("\033[2J\033[H")
+        self.stream.flush()
+
+    def start_thinking(self, message="Thinking"):
+        """Start a background "… thinking" spinner (non-scrolling).
+
+        Runs a short animation in a daemon thread that rewrites a single live
+        line in place via the transient region, so the agent appears to be
+        working while the LLM is being called. On a real colour/utf-8 TTY it
+        animates in place (no scrolling); on piped / ASCII output it simply
+        prints one static "… thinking" line and starts no thread. Stop it with
+        :meth:`stop_thinking` before drawing the next real turn.
+        """
+        self.stop_thinking()  # be defensive: never leak more than one spinner
+        if not self._can_clear_cursor():
+            self.emit(self.style(f"… {message}", fg="cyan", dim=True))
+            return
+        self._thinking_stop = threading.Event()
+        self._thinking_thread = threading.Thread(
+            target=self._spin, args=(message,), daemon=True)
+        self._thinking_thread.start()
+
+    def _spin(self, message):
+        """Animation loop: rewrite the single transient line every frame.
+
+        Reuses the transient-region machinery (:meth:`emit_transient`) so the
+        cursor math (move up, overwrite, no scroll) is handled for us and stays
+        consistent with how tool-call / usage transient output is cleared. The
+        leading ellipsis dots grow with the frame counter to make the wait feel
+        dynamic (… then … … then … … …, and back to …).
+        """
+        stop = self._thinking_stop
+        i = 0
+        while not stop.is_set():
+            # Grow the leading dots: 1, 2, then 3, and hold.
+            dots = "… " * min((i % 3) + 1, 3)
+            i += 1
+            self.emit_transient(self.style(f"{dots}{message}", fg="cyan", dim=True))
+            stop.wait(0.3)
+        # Replace the spinner line with a blank so the following real output
+        # lands cleanly. The blank stays tracked as the transient block and is
+        # cleared by the next :meth:`emit` (e.g. the assistant turn's divider).
+        self.emit_transient(None)
+
+    def stop_thinking(self):
+        """Stop the "… thinking" spinner started by :meth:`start_thinking`.
+
+        Signals the animation thread to finish its current frame and exit, then
+        joins it, so no writes race with the main thread's subsequent output.
+        Safe to call when no spinner is running (a no-op)."""
+        stop = self._thinking_stop
+        thread = self._thinking_thread
+        self._thinking_stop = None
+        self._thinking_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
     def tool_group(self, name, params=None, result=None, status="ran"):
         """Render one attempted tool call: its name, parameters and result."""
         self.emit(self.style(f"{self.glyph('gear')} {name}", fg="magenta", bold=True))
@@ -377,28 +457,19 @@ class Console:
     def tool_call_display(self, name, params=None, result=None, transient=True):
         """Render one attempted tool call.
 
-        In verbose mode (``transient=False``) it is printed permanently via
-        :meth:`tool_group`. Otherwise it is drawn in the live region that gets
-        overwritten by the next tool call, so the transcript stays clean.
+        In verbose mode (``transient=False``) the full detail (name, parameters
+        and result) is printed permanently via :meth:`tool_group`. In the quiet,
+        default (non-verbose) mode we instead leave a small *persistent* summary
+        in the transcript -- the yellow "tool" label with the tool name on the
+        line below -- rather than flashing the call in the live region and then
+        clearing it away completely.
         """
         if not transient:
             self.tool_group(name, params, result)
             return
-        lines = [f"{self.glyph('gear')} {name}"]
-        for key, value in (params or {}).items():
-            snippet = self.truncate(self._oneline(str(value), 100), 100)
-            key_str = self.style(f"    {key}:", fg="gray", dim=True) if self.color_enabled \
-                else f"    {key}:"
-            lines.append(f"{key_str} {snippet}")
-        if result is not None:
-            text = str(result)
-            ok = not text.startswith("Error")
-            color = "green" if ok else "red"
-            first = text.splitlines()[0] if text.strip() else "(no output)"
-            arrow = self.style(self.glyph("arrow"), fg=color) if self.color_enabled \
-                else self.glyph("arrow")
-            lines.append(f"    {arrow} {self.truncate(first, 300)}")
-        self.emit_transient("\n".join(lines))
+        label = self.style("tool", fg="yellow", bold=True) if self.color_enabled else "tool"
+        self.emit(label)
+        self.emit(f"    {name}")
 
     def usage_inline(self, usage):
         """A compact one-liner describing a single LLM call's token usage."""
@@ -440,7 +511,7 @@ class Console:
         for label, value in rows:
             self.emit(f"  {label.ljust(label_w)} : {value}")
 
-    def history_list(self, rows, title="Conversation history"):
+    def history_list(self, rows, title="Conversation history", current=None):
         """Render the high-level recorder as a numbered list of turns.
 
         Each row is (turn number, what happened, location). The recorder is a
@@ -457,7 +528,11 @@ class Console:
         rows = [tuple("" if c is None else str(c) for c in r) for r in rows]
         turn_w = max((len(r[0]) for r in rows), default=0)
         what_w = max((len(r[1]) for r in rows), default=0)
-        header = f"{title} ({len(rows)} turns):"
+        total = len(rows)
+        header = f"{title} ({total} turns)"
+        if current:
+            header += f" — on turn {current} of {total}"
+        header += ":"
         self.emit(self.style(header, bold=True, fg="cyan"))
         for turn, what, where in rows:
             turn_cell = self.style(turn.rjust(turn_w), fg="magenta", bold=True) if self.color_enabled else turn.rjust(turn_w)
@@ -466,7 +541,7 @@ class Console:
             self.emit(f"{turn_cell}  {what_cell}  {where_cell}")
         self.emit(self.style("(commands: /history <n> to inspect, /reset <n> to rewind)", dim=True, fg="cyan"))
 
-    def history_detail(self, record, messages):
+    def history_detail(self, record, messages, total=None):
         """Render a single turn's full recorded messages.
 
         Used by ``/history <n>`` to show exactly what the conversation looked
@@ -477,7 +552,11 @@ class Console:
         turn = record.get("turn", "?")
         what = record.get("what", "?")
         where = f"history_{record.get('history_file', 0)}.json at index {record.get('index', 0)}"
-        self.emit(self.style(f"Turn {turn} ({what}) — {where}", bold=True, fg="cyan"))
+        heading = f"Turn {turn}"
+        if total:
+            heading += f" of {total}"
+        heading += f" ({what}) — {where}"
+        self.emit(self.style(heading, bold=True, fg="cyan"))
         self.emit(self.style("-" * self.width, fg="gray", dim=True))
         for msg in messages:
             role = msg.get("role", "?")

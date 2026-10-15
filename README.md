@@ -95,7 +95,19 @@ options:
                         HTTP timeout in seconds for LLM requests (reasoning models can be slow). default=300
   --tool-timeout TOOL_TIMEOUT
                         Timeout in seconds for a single tool call. default=120
+  --verbose             Print the full, detailed output (every tool call + usage box).
   ```
+
+### In-session commands
+
+```
+/history            list the conversation (turn number, what happened, where)
+/history <n>        show the full messages recorded for turn n
+/reset [<n>]        rewind to the end of turn n (drops everything after it)
+/clear              clear the screen (keeps the conversation history)
+/help               show this help
+/quit, /exit        save the session and exit
+```
 
 ## Testing
 
