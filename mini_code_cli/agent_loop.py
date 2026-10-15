@@ -41,7 +41,7 @@ DEFAULT_CACHE_LOCATION=os.path.expanduser("~/.cache/mini_code/sessions/")
 DEFAULT_MODEL_URL="http://0.0.0.0:30000"
 DEFAULT_TEMPERATURE=1.0
 DEFAULT_TOOL_TIMEOUT=120  # seconds before a single tool call is aborted
-DEFAULT_HTTP_TIMEOUT=300  # seconds before an LLM HTTP request is aborted
+DEFAULT_HTTP_TIMEOUT=500  # seconds before an LLM HTTP request is aborted
 DEFAULT_MAX_MESSAGES=150  # messages in history before it is compacted to a summary
 
 def save_history(messages, args, session_name=""):
@@ -169,6 +169,11 @@ def parse_args():
 
     args = parser.parse_args()
     return args
+
+
+def style_line_prompt(text):
+    """A short, styled inline prompt (used for the "You:" line)."""
+    return f"{BOLD}{CYAN}{text}{RESET} "
 
 
 def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
@@ -311,7 +316,7 @@ class AgentSession:
 
     EXIT_COMMANDS = {"quit", "exit", "/quit", "/exit"}
 
-    def __init__(self, args):
+    def __init__(self, args, console=None):
         self.args = args
         self.allowed_dir = os.path.abspath(args.allowed_dir)
         self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
@@ -319,10 +324,10 @@ class AgentSession:
         # The console that renders everything the agent prints. Unit tests /
         # other callers can swap it out (e.g. AgentSession(args, console=...) with
         # a color=False console) but it defaults to the shared ui.console.
-        self.console = ui.console
+        self.console = console if console is not None else ui.console
         # --verbose toggles the amount of detail printed. Defaults to True so
         # existing behaviour / callers are unchanged when the flag is omitted.
-        self.console.verbose = getattr(args, "verbose", True)
+        self.console.verbose = getattr(args, "verbose", False)
 
         # LLM / server configuration.
         self.server_url = f"{args.url}"
@@ -476,7 +481,7 @@ class AgentSession:
             timeout=self.args.llm_timeout,
         )
         accumulate_usage(self.token_stats, usage)
-        self.console.emit(self.console.usage_inline(usage))
+        self.console.usage_line(usage, transient=not self.console.verbose)
 
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
@@ -502,10 +507,8 @@ class AgentSession:
 
     def _read_user_line(self):
         """Read one turn from the user. Returns the text to send, or None to quit."""
-        try:
-            print("=" * 30)
-            user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
-        except KeyboardInterrupt:
+        user_input = self.console.read_line(style_line_prompt("You:"))
+        if user_input is None:  # EOF / Ctrl-C at the prompt
             print("\nThank you. Goodbye! Saving history...")
             return None
 
@@ -566,55 +569,35 @@ class AgentSession:
         # 3) Permission prompt. Either the user asked for prompts on every call,
         #    or the shell-safety classifier flagged this command as risky (ASK).
         if needs_permission(self.args, shell_cmd, tier):
-            if self.args.ask_permission:
-                ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
-            else:
-                ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
+            ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
             if not ok:
                 self._append_tool_result(call_id,
                     f"User denied permission for tool {name} and params {params_str}.")
                 return
 
-        # 4) Execute the tool. Announce the pending tool call with a clear,
-        #    separated banner so the user can see exactly what is about to run.
-        _rule = (BOLD + YELLOW + "\u2501" * 78 + RESET)
-        print("")
-        print(_rule)
-        print(f"{BOLD}{YELLOW}Tool Call:{RESET} {BOLD}{name}{RESET}")
-        # Show the parameters, one per line, so they are easy to read.
-        try:
-            _params = json.loads(params_str)
-        except json.JSONDecodeError:
-            _params = params_str
-        if isinstance(_params, dict) and _params:
-            print(f"{BOLD}{CYAN}Parameters:{RESET}")
-            for key, value in _params.items():
-                print(f"  {BOLD}{key}:{RESET} {value}")
-        print(_rule)
+        # 4) Execute the tool. In non-verbose mode the tool call (and the usage
+        #    line above) lives in the transient region: it flashes while the
+        #    agent works and is cleared in place, keeping the transcript down to
+        #    just the turns. In verbose mode everything is printed permanently.
+        transient = not self.console.verbose
         func = self.tools_dict[name]["function"]
         result = call_function_with_timeout(func, tool_params, name, timeout_seconds=self.args.tool_timeout)
 
-        self.console.tool_group(name, tool_params, result)
+        self.console.tool_call_display(name, tool_params, result, transient=transient)
         self._append_tool_result(call_id, str(result))
 
     def _ask_permission(self, name, params_str, shell_cmd, tier, reason):
-        """Prompt the user to confirm a tool call (ask-permission mode)."""
-        self.console.emit("")
-        if shell_cmd is not None and shell_safety_utils.is_ask(tier):
-            self.console.note(f"This command is flagged as risky: {shell_cmd!r} ({reason})", "warn")
+        """Prompt the user to confirm a tool call (ask-permission mode).
+
+        Delegates the actual prompting -- a styled box plus the answer input --
+        to the console so all interactive input lives in one place. Returns True
+        to proceed."""
         try:
-            permission_input = input(
-                f"{BOLD}{YELLOW}Tool permission needed:{RESET}\n"
-                f"  Tool       : {BOLD}{name}{RESET}\n"
-                f"  Parameters : {params_str}\n"
-                f"{BOLD}{CYAN}Proceed?{RESET} Type 'y' or 'yes' and press Enter: "
-            )
-        except KeyboardInterrupt:
+            return self.console.ask_permission(name, params_str, shell_cmd, tier, reason)
+        except (EOFError, KeyboardInterrupt):
             print("\nThank you. Goodbye! Saving history...")
             self.shutdown()
             raise _Abort
-
-        return permission_input.lower() in ["y", "yes"]
 
     def _append_tool_result(self, call_id, content):
         self.messages.append({"role": "tool", "tool_call_id": call_id, "content": str(content)})

@@ -1,8 +1,9 @@
 """mini_code_cli.ui — a tiny, dependency-free terminal UI.
 
 This module is responsible for everything the agent prints to the user: the
-welcome banner, the user / assistant / system / tool turns and the token-usage
-readouts. It uses *only* the Python standard library.
+welcome banner, the user / assistant / system / tool turns, the token-usage
+readouts and the interactive prompts (permission boxes, the "You:" line, ...).
+It uses *only* the Python standard library.
 
 Graceful degradation is a first-class goal:
 
@@ -94,6 +95,11 @@ class Console:
         # When False, only user/assistant/tool turns and warn/error notes are
         # shown. Defaults to True so existing callers keep the full output.
         self.verbose = verbose
+        # Live "transient" region used for the tool-call area in non-verbose
+        # mode: content drawn here is overwritten in place (via cursor moves)
+        # instead of scrolling, so the screen only keeps the final turns.
+        # ``_transient_lines`` is how many screen lines the current block holds.
+        self._transient_lines = 0
 
     # -- capability detection ----------------------------------------------
     @property
@@ -173,6 +179,51 @@ class Console:
             left = fill // 2
             line = (rule_char * left) + seg + (rule_char * (fill - left))
         self.emit(self.style(line, fg=fg) if self.color_enabled else line)
+
+    # -- transient (live, overwritten-in-place) region ----------------------
+    def _can_clear_cursor(self):
+        """Whether we can move/erase the cursor (a real colour, utf-8 TTY)."""
+        return self.color_enabled and self.unicode_enabled
+
+    def _clear_transient_locked(self):
+        """Erase the previously emitted transient block.
+
+        The cursor is assumed to be resting on the line just below the block
+        (the normal state after :meth:`emit`). When we can move the cursor we
+        walk up over the block, wipe each line and return below it, ready to
+        print again. Otherwise (piped / ASCII output) we just push the block up
+        with blank lines — there is no screen to clean anyway.
+        """
+        n = self._transient_lines
+        self._transient_lines = 0
+        if n <= 0:
+            return
+        if self._can_clear_cursor():
+            self.stream.write(f"\033[{n}A")  # up to the first line of the block
+            for _ in range(n):
+                self.stream.write("\033[2K")  # clear the whole line
+                self.stream.write("\033[1B")  # step down (ends below block)
+            self.stream.flush()
+        else:
+            self.stream.write("\n" * n)
+            self.stream.flush()
+
+    def clear_transient(self):
+        """Clear any pending transient output, leaving a clean screen."""
+        self._clear_transient_locked()
+
+    def emit_transient(self, text=""):
+        """Emit *text* into the live region, replacing any previous transient
+        content. Used for the tool-call area in non-verbose mode so those lines
+        flash while the agent works instead of scrolling the whole transcript.
+        """
+        self._clear_transient_locked()
+        lines = ("" if text is None else str(text)).split("\n")
+        # Pad each line to the full width so a shorter follow-up fully overwrites
+        # any leftover characters from a longer previous render.
+        padded = [line + " " * max(0, self.width - _visual_len(line)) for line in lines]
+        self.emit("\n".join(padded))
+        self._transient_lines = len(lines)
 
     # -- building blocks ----------------------------------------------------
     def box(self, lines, title=None, fg="cyan"):
@@ -278,6 +329,32 @@ class Console:
                     else self.glyph("arrow")
                 self.emit(f"    {arrow} {self.truncate(first, 300)}")
 
+    def tool_call_display(self, name, params=None, result=None, transient=True):
+        """Render one attempted tool call.
+
+        In verbose mode (``transient=False``) it is printed permanently via
+        :meth:`tool_group`. Otherwise it is drawn in the live region that gets
+        overwritten by the next tool call, so the transcript stays clean.
+        """
+        if not transient:
+            self.tool_group(name, params, result)
+            return
+        lines = [f"{self.glyph('gear')} {name}"]
+        for key, value in (params or {}).items():
+            snippet = self.truncate(self._oneline(str(value), 100), 100)
+            key_str = self.style(f"    {key}:", fg="gray", dim=True) if self.color_enabled \
+                else f"    {key}:"
+            lines.append(f"{key_str} {snippet}")
+        if result is not None:
+            text = str(result)
+            ok = not text.startswith("Error")
+            color = "green" if ok else "red"
+            first = text.splitlines()[0] if text.strip() else "(no output)"
+            arrow = self.style(self.glyph("arrow"), fg=color) if self.color_enabled \
+                else self.glyph("arrow")
+            lines.append(f"    {arrow} {self.truncate(first, 300)}")
+        self.emit_transient("\n".join(lines))
+
     def usage_inline(self, usage):
         """A compact one-liner describing a single LLM call's token usage."""
         if not usage:
@@ -285,12 +362,27 @@ class Console:
         else:
             text = (f"input={usage.get('prompt_tokens', 0)} "
                     f"output={usage.get('completion_tokens', 0)} "
+                    f"toolcalls={usage.get('tool_calls', 0)} "
                     f"total={usage.get('total_tokens', 0)}")
         label = self.style("tokens", fg="cyan", dim=True) if self.color_enabled else "tokens"
         return f"{label}: {text}"
 
+    def usage_line(self, usage, transient=None):
+        """Emit the one-line usage readout.
+
+        Printed permanently in verbose mode; in non-verbose mode (or when
+        ``transient`` is True) it goes into the live region that is cleared on
+        the next transient emit, so per-call usage does not accumulate.
+        """
+        if transient is None:
+            transient = not self.verbose
+        self.emit_transient(self.usage_inline(usage)) if transient else self.emit(self.usage_inline(usage))
+
     def usage_summary(self, stats):
-        """Render the accumulated token usage for the session so far."""
+        """Render the accumulated token usage for the session so far (box).
+
+        Only shown in verbose mode; call it via the console's ``verbose`` flag.
+        """
         rows = [
             ("LLM calls", stats.get("llm_calls", 0)),
             ("Input tokens", stats.get("prompt_tokens", 0)),
@@ -331,6 +423,41 @@ class Console:
         self.note("Shell execution is ENABLED. Every command is checked by the safety "
                   "classifier: destructive commands are blocked, risky ones ask for confirmation.",
                   "warn")
+
+    # -- interactive input --------------------------------------------------
+    def read_line(self, prompt_text=""):
+        """Print an (already-styled) prompt and read one line from stdin.
+
+        Returns the typed text, or ``None`` on EOF / Ctrl-C. Routing every
+        interactive prompt (the "You:" line, permission answers, ...) through
+        the console keeps all input handling in one place.
+        """
+        try:
+            return input(prompt_text)
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    def ask_permission(self, name, params_str, shell_cmd=None, tier=None, reason=None):
+        """Draw a permission-prompt box and read the user's answer (y / yes).
+
+        The box *and* the input both go through the console. Any previous
+        transient tool output is cleared first so the box renders cleanly.
+        Returns True to proceed.
+        """
+        self.clear_transient()
+        lines = [f"Tool       : {name}", f"Parameters : {params_str}"]
+        if shell_cmd is not None:
+            snippet = self._oneline(shell_cmd, 120)
+            if tier == "ask":
+                lines.append(f"Command    : {snippet}")
+                lines.append(f"           : risky - needs your confirmation ({reason})")
+            else:
+                lines.append(f"Command    : {snippet}")
+        self.print_box(lines, title="Permission needed", fg="yellow")
+        prompt = self.style("Proceed? Type 'y' or 'yes' and press Enter: ",
+                            fg="yellow", bold=True)
+        answer = self.read_line(prompt)
+        return (answer or "").strip().lower() in ("y", "yes")
 
 
 # One shared default console used throughout the package.
