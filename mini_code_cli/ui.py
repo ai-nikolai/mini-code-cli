@@ -461,4 +461,4 @@ class Console:
 
 
 # One shared default console used throughout the package.
-console = Console()
+console = Console(color=True, unicode=True)
