@@ -96,6 +96,46 @@ def generate_unique_id():
     timestamp = int(time.time() * 1000000)  # microseconds
     return f"{timestamp}-{uuid.uuid4().hex[:8]}"
 
+
+def _resolve_history_path(restore_session):
+    """Resolve the --restore-session path to the history.json file it holds.
+
+    Accepts either the session directory itself (e.g.
+    ~/.cache/mini_code/sessions/1792028090823027-a9d77653/) or a direct path to
+    a history.json file. A leading ~ is expanded for convenience.
+    """
+    candidate = os.path.expanduser(restore_session)
+    if os.path.isdir(candidate):
+        candidate = os.path.join(candidate, "history.json")
+    return candidate
+
+
+def load_history(restore_session):
+    """Load a previous session's message history from disk.
+
+    Returns the list of messages, or None if nothing could be loaded (missing
+    file, wrong shape, or unreadable JSON). Never raises: a failed restore
+    should let the caller fall back to a fresh session rather than crash.
+    """
+    if not restore_session:
+        return None
+
+    history_path = _resolve_history_path(restore_session)
+    if not os.path.isfile(history_path):
+        print(f"{BOLD}{YELLOW}Warning:{RESET} No history found to restore from: {restore_session}")
+        return None
+
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
+            messages = json.load(f)
+        if not isinstance(messages, list):
+            raise ValueError("history file did not contain a message list")
+    except Exception as e:
+        print(f"{BOLD}{RED}Warning:{RESET} Failed to load history from {restore_session}: {e}")
+        return None
+
+    return messages
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
     # MODEL / LLM related
@@ -107,17 +147,18 @@ def parse_args():
 
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
+    parser.add_argument("--restore-session", type=str, help=f"The location of the previous session. (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)")
 
     # Agent behaviour related
     parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
-    parser.add_argument("--auto-mode", action="store_true", help="Whether to run the agent in `auto-mode'. Or default: `manual-mode'.")
+    parser.add_argument("-a", "--auto-mode", action="store_true", help="Whether to run the agent in `auto-mode'. Or default: `manual-mode'.")
     parser.add_argument("--agent-md", type=str, help="If the agent should use an agent-md file... (it will added after system message.)")
     parser.add_argument("--prompt", type=str, help="An initial prompt from the user...")
 
     # Agent permissions related
     parser.add_argument("--ask-permission", action="store_true", help="Ask for permission before any tool call.")
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations, default='./'")
-    parser.add_argument("--enable-shell", action="store_true", help="Allow shell execution. default= False") 
+    parser.add_argument("-s", "--enable-shell", action="store_true", help="Allow shell execution. default= False") 
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
 
@@ -299,8 +340,15 @@ class AgentSession:
 
         self.unique_id = generate_unique_id()
 
-        # Conversation state. Starts with the system message (+ optional Agent.md).
-        self.messages = self._build_initial_messages()
+        # Conversation state. When --restore-session is given we continue that
+        # session's history instead of starting fresh -- still under the brand
+        # new unique id above, so the original session file is never
+        # overwritten. Falls back to a freshly built history if the restore
+        # file is missing or unreadable.
+        restored = load_history(getattr(self.args, "restore_session", None))
+        self.messages = restored if restored is not None else self._build_initial_messages()
+        if restored is not None:
+            self._restore_usage_if_available()
 
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
@@ -323,6 +371,30 @@ class AgentSession:
                 messages.insert(1, {"role": "user", "content": agent_md_content})
 
         return messages
+
+    def _restore_usage_if_available(self):
+        """Seed this session's token totals from a sibling usage.json, if the
+        restored session had one, so the running summary stays continuous.
+
+        Best-effort only: token accounting is loaded on top of (never in place
+        of) the in-memory totals, and any problem here is ignored silently so a
+        missing or malformed usage file can never break a restore.
+        """
+        restore_session = getattr(self.args, "restore_session", None)
+        if not restore_session:
+            return
+        history_path = _resolve_history_path(restore_session)
+        usage_path = os.path.join(os.path.dirname(history_path), "usage.json")
+        if not os.path.isfile(usage_path):
+            return
+        try:
+            with open(usage_path, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            for key in self.token_stats:
+                if key in saved:
+                    self.token_stats[key] += int(saved[key] or 0)
+        except Exception:
+            pass
 
     def print_announcements(self):
         """Print the info / warning banners that depend on the CLI flags."""
