@@ -295,315 +295,331 @@ def shell_forces_ask_permission(args):
     return bool(getattr(args, "enable_shell", False))
 
 
-def main():
-    args = parse_args()
+class AgentSession:
+    """A single interactive agent session.
 
-    # Get session unique ID:
-    unique_id = generate_unique_id()
-    cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
+    The whole loop used to live in one ~300 line ``main()``. Splitting it into
+    small, named methods keeps each step (read input -> call the LLM -> run tool
+    calls -> persist) easy to follow and gives the interesting bits somewhere to
+    be unit-tested.
+    """
 
-    # LLM Related
-    server_url = f"{args.url}"
-    new_model_name = utils.determine_vllm_model(server_url)
+    EXIT_COMMANDS = {"quit", "exit", "/quit", "/exit"}
 
-    if new_model_name:
-        actual_model = new_model_name
-    else:
-        actual_model = args.model
+    def __init__(self, args):
+        self.args = args
+        self.allowed_dir = os.path.abspath(args.allowed_dir)
+        self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
-    api_key = None
-    if args.api_key:
-        api_key = args.api_key
-    else:
-        api_key = os.environ.get("MINI_CODE_API_KEY", "")
-        if api_key:
+        # LLM / server configuration.
+        self.server_url = f"{args.url}"
+        model_name = utils.determine_vllm_model(self.server_url)
+        self.model = model_name if model_name else args.model
+        self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
+
+        # Which tools the LLM may call. The shell tool is only available when
+        # --enable-shell was passed.
+        forbidden = None if args.enable_shell else tools.shell_tools
+        self.tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden)
+        self.llm_tools = tools.util_get_tools(forbidden_tools=forbidden)
+
+        # Token accounting for the whole session.
+        self.token_stats = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "llm_calls": 0,
+        }
+
+        self.unique_id = generate_unique_id()
+
+        # Conversation state. Starts with the system message (+ optional Agent.md).
+        self.messages = self._build_initial_messages()
+
+    def _build_initial_messages(self):
+        """Assemble the system prompt and optional Agent.md into the first turns."""
+        if self.args.system_prompt:
+            system_prompt = self.args.system_prompt
+        else:
+            system_prompt = prompts.system_prompt(tools_dict=self.tools_dict, allowed_dir=self.allowed_dir)
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        if self.args.agent_md:
+            print(f"{YELLOW}AGENT.md '{self.args.agent_md}' specified.{RESET}")
+            if not os.path.isfile(self.args.agent_md):
+                print(f"{RED}Error: The AGENT.md '{self.args.agent_md}' does not exist.{RESET}")
+            else:
+                with open(self.args.agent_md, "r", encoding="utf-8") as f:
+                    agent_md_content = f.read()
+                print(f"{YELLOW}AGENT.md '{self.args.agent_md}' loaded.{RESET}")
+                # Append Agent.md as a user turn, right after the system prompt.
+                messages.insert(1, {"role": "user", "content": agent_md_content})
+
+        return messages
+
+    def print_announcements(self):
+        """Print the info / warning banners that depend on the CLI flags."""
+        if self.api_key:
             print(f"{YELLOW}API Key found at MINI_CODE_API_KEY{RESET}")
         else:
             print(f"{YELLOW}NO API Key found at MINI_CODE_API_KEY. Set it with export MINI_CODE_API_KEY='sk-api-key'{RESET}")
 
-    
-    # Permissions related
-    allowed_dir = os.path.abspath(args.allowed_dir)
+        if shell_forces_ask_permission(self.args):
+            print(f"{BOLD}{YELLOW}NOTE:{RESET} Shell execution is ENABLED. Every command is "
+                  f"checked by the shell-safety classifier: destructive commands are blocked, "
+                  f"others require your confirmation.")
 
-    if not args.enable_shell:
-        forbidden_tools = tools.shell_tools
-    else:
-        forbidden_tools = None
+    def run(self, initial_prompt=None):
+        """Drive the agent loop until the user quits."""
+        self.print_announcements()
+        print_welcome(self.allowed_dir, self.server_url, self.args,
+                      self.unique_id, self.cache_dir, self.model)
 
-    # if args.enable_shell and not args.ask_permission:
-    #     print(f"{BOLD}{RED}WARNING:{RESET} Shell execution is ENABLED and will run WITHOUT any permission "
-    #           f"checks. The agent can execute ANY command on this system and can escape --allowed-dir. "
-    #           f"Use with extreme caution.")
+        # The --prompt value is a one-shot initial turn: it is sent verbatim and
+        # then cleared, so later turns come from the user (manual mode) or are
+        # produced automatically by the loop (auto mode).
+        pending = initial_prompt
 
-    # Safety: when the shell is enabled we use the shell-safety classifier
-    # (shell_safety_utils) to gate every command into DENY / ASK / ALLOW tiers.
-    # DENY commands are blocked outright, ASK commands still require a manual
-    # confirmation, and only clearly-safe commands run without prompting. This
-    # keeps the shell usable without constant prompting while still stopping
-    # the obvious foot-guns (e.g. `rm -rf /`).
-    if shell_forces_ask_permission(args):
-        print(f"{BOLD}{YELLOW}NOTE:{RESET} Shell execution is ENABLED. Every command is "
-              f"checked by the shell-safety classifier: destructive commands are blocked, "
-              f"others require your confirmation.")
-
-    # TOOLs
-    tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden_tools)
-    llm_tools_dict = tools.util_get_tools(forbidden_tools=forbidden_tools)
-
-
-    # System Message and Agent.md
-    if args.system_prompt:
-        system_prompt = args.system_prompt
-    else:
-        system_prompt = prompts.system_prompt(tools_dict=tools_dict, allowed_dir=allowed_dir)
-
-    messages = [{"role": "system", "content": system_prompt}]
-
-    if args.agent_md:
-        print(f"{YELLOW}AGENT.md '{args.agent_md}' specified.{RESET}")
-
-        # Check if the file exists
-        if not os.path.isfile(args.agent_md):
-            print(f"{RED}Error: The AGENT.md '{args.agent_md}' does not exist.{RESET}")
-        else:
-            # Load the content of agent-md file and add it after system message
-            with open(args.agent_md, 'r', encoding='utf-8') as f:
-                agent_md_content = f.read()
-            print(f"{YELLOW}AGENT.md '{args.agent_md}' loaded.{RESET}")
-
-        # Append the content as a user message after the system prompt
-        messages.append({"role": "user", "content": agent_md_content})
-
-    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, actual_model)
-
-    # Token accounting
-    token_stats = {
-        "prompt_tokens": 0,      # input tokens
-        "completion_tokens": 0,  # output tokens
-        "total_tokens": 0,
-        "llm_calls": 0,
-    }
-
-    # Agent Logic Flags
-    llm_response_flag = False
-    llm_tool_response_flag = False
-    llm_repeat_flag = False
-    tool_count = 0
-    
-    user_input = args.prompt
-
-    while True:
-        try:
-
-            if llm_tool_response_flag and args.auto_mode: #skip user input and try to call the model again until there no more tool calls.
-                print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. Continuing with LLM calls until no more tool calls. [Tool count={tool_count}]")
-                llm_repeat_flag = True
-            else:
-            # get user input
-                if llm_repeat_flag:
-                    print(f"{BOLD}{YELLOW}System:{RESET} Called {tool_count} tools in total. Exiting tool loop.")
-
-                tool_count = 0
-                if not user_input:
-                    try:
-                        print("="*30)
-                        user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
-                        if user_input.lower() in ["quit", "exit", "/quit", "/exit"]:
-                            print("\nThank you. Goodbye!")
-                            print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
-                            save_history(messages, args, unique_id)
-                            usage_path = save_usage(token_stats, cache_dir, unique_id)
-                            print_usage_summary(token_stats)
-                            print(f"Saving usage to: {usage_path}")
-                            break
-                    except KeyboardInterrupt:
-                        print("\nThank you. Goodbye!")
-                        print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
-                        save_history(messages, args, unique_id)
-                        usage_path = save_usage(token_stats, cache_dir, unique_id)
-                        print_usage_summary(token_stats)
-                        print(f"Saving usage to: {usage_path}")
-                        break
+        while True:
+            try:
+                # 1) Get the user's turn: the one-shot preset, or a fresh line.
+                if pending is not None:
+                    print("=" * 30)
+                    print(f"{BOLD}{CYAN}You (preset): {RESET}{pending}")
+                    user_input = pending
+                    pending = None
                 else:
-                    print("="*30)
-                    print(f"{BOLD}{CYAN}You (preset): {RESET}{user_input}")
-                
-                if user_input == "/help":
-                    print_help(allowed_dir, server_url, args, unique_id, cache_dir, actual_model)
-                    user_input = ""
-                    continue
+                    user_input = self._read_user_line()
+                    if user_input is None:  # quit / exit
+                        self.shutdown()
+                        break
 
-                messages.append({"role": "user", "content": user_input})
-                user_input = ""
+                # 2) Hand the user turn to the model and act on its tool calls.
+                self.messages.append({"role": "user", "content": user_input})
+                while True:
+                    should_continue = self._step()
+                    self._persist()
+                    if not should_continue:
+                        break
+                    print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. "
+                          f"Continuing with LLM calls until no more tool calls.")
+            except _Abort:
+                # Ctrl-C during a permission prompt already shut the session
+                # down; just unwind the loop quietly.
+                break
+            except KeyboardInterrupt:
+                print(f"{BOLD}{RED}INTERRUPTING:{RESET} Mini Code Exiting...")
+                # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
+                self._persist()
 
-            llm_response_flag = False
-            llm_tool_response_flag = False
+    def _step(self):
+        """Run a single LLM turn: call the model, render its text, run its tool
+        calls. Returns True if the LLM made tool calls and we're in auto-mode,
+        signalling the loop to continue without asking the user."""
+        # Keep long sessions within the model's context window.
+        self.messages = maybe_compact(
+            self.messages, self.server_url, self.model, self.api_key,
+            self.args.llm_timeout, self.token_stats,
+        )
 
-            # Compact the history if it's getting long, to avoid overflowing the context window.
-            messages = maybe_compact(messages, server_url, actual_model, api_key, args.llm_timeout, token_stats)
+        response_text, tool_calls, usage = utils.call_openai_server(
+            self.messages,
+            max_tokens=self.args.max_tokens,
+            temperature=self.args.temperature,
+            model=self.model,
+            server_url=self.server_url,
+            tools=self.llm_tools,
+            api_key=self.api_key,
+            timeout=self.args.llm_timeout,
+        )
+        accumulate_usage(self.token_stats, usage)
+        print(f"{BOLD}{CYAN}[{format_usage(usage)}]{RESET}")
 
-            response_text, tool_calls, usage = utils.call_openai_server(
-                messages, 
-                max_tokens=args.max_tokens, 
-                temperature=args.temperature, 
-                model=actual_model, 
-                server_url=server_url, 
-                tools=llm_tools_dict,
-                api_key=api_key,
-                timeout=args.llm_timeout,
-            )
+        made_tool_calls = bool(tool_calls)
 
-            # Record and show the token usage for this LLM call.
-            accumulate_usage(token_stats, usage)
-            print(f"{BOLD}{CYAN}[{format_usage(usage)}]{RESET}")
+        if response_text:
+            self._print_assistant(response_text)
 
-            if response_text:
-                llm_response_flag = True
-                # response_lines=[]
-                # response_lines.extend(response_text.split('\n'))
-                # print_lines_with_border(response_lines)
-                print("-"*20)
-                print(f"{BOLD}{GREEN}Assistant:{RESET}")
-                print("-"*20)
-                print(response_text)
-                print("="*30)
+        if tool_calls:
+            self.messages.append({
+                "role": "assistant",
+                "content": response_text,
+                "tool_calls": tool_calls,
+            })
+            self._run_tool_calls(tool_calls)
+        else:
+            self.messages.append({"role": "assistant", "content": response_text})
 
+        if not response_text and not made_tool_calls:
+            print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
 
-            if tool_calls:
-                llm_tool_response_flag = True
-                
-                messages.append({
-                        "role": "assistant",
-                        "content": response_text,
-                        "tool_calls": tool_calls
-                })
-                # Tool call parsing and execution
-                print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
+        return made_tool_calls and self.args.auto_mode
 
-                for call in tool_calls:
-                    tool_count += 1
-
-                    call_id = call.get("id", "")
-                    name = call.get("function", {}).get("name", "")
-                    params_str = call.get("function", {}).get("arguments", "{}")
-                    try:
-                        tool_params = json.loads(params_str)
-                    except json.JSONDecodeError:
-                        print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
-                        continue
-
-                    if name in tools_dict:
-                        # Check allowed directory for file operations. Applies to
-                        # every filesystem tool (read/write/grep/glob) so the agent
-                        # cannot read or write anything outside --allowed-dir.
-                        if not tool_paths_are_allowed(name, tool_params, allowed_dir):
-                            print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
-                            continue
-
-                        func = tools_dict[name]["function"]
-                        # Shell-safety gate. Classify shell commands into DENY / ASK /
-                        # ALLOW tiers. This is always enforced for the shell tool
-                        # (independent of --ask-permission) so the agent can never run
-                        # obviously destructive commands unattended.
-                        shell_cmd = None
-                        shell_tier = None
-                        shell_reason = None
-                        if name == "run_shell_command":
-                            shell_cmd = str(tool_params.get("command", ""))
-                            shell_tier, shell_reason = shell_safety_utils.classify_command(shell_cmd)
-                            if shell_safety_utils.is_deny(shell_tier):
-                                print(f"{BOLD}{RED}Tool safety:{RESET} Refusing to run dangerous command: {shell_cmd!r}")
-                                messages.append({
-                                    "role": "user",
-                                    "content": f"Command refused for safety reasons ({shell_reason}): {shell_cmd!r}. Please choose a safer command."
-                                })
-                                continue
-                        # asking permissions
-                        if args.ask_permission:
-                            # Shell commands already vetted as ALLOW still ask for manual prompt!
-                            # if shell_tier is not None and shell_safety_utils.is_allow(shell_tier):
-                            #     print(f"{BOLD}{GREEN}Tool Call:{RESET} LLM is calling: {name} with {tool_params}.")
-                            # else:
-                            print(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool?")
-                            print(f"name: {name}, parameters: {params_str}")
-                            if shell_cmd is not None and shell_safety_utils.is_ask(shell_tier):
-                                print(f"{BOLD}{YELLOW}Tool safety:{RESET} This command is flagged as risky: {shell_cmd!r} ({shell_reason})")
-                            try:
-                                permission_input = input("Type: 'y' or 'yes'\n")
-                            except KeyboardInterrupt:
-                                print("\nThank you. Goodbye! Saving history...")
-                                save_history(messages, args, unique_id)
-                                sys.exit(0)
-
-                            if not permission_input in ['y', 'yes']:
-                                print(f"{BOLD}{YELLOW}Tool permission denied:{RESET}.")
-                                messages.append({
-                                    "role": "user",
-                                    "content": f"User denied permission for tool {name} and params {params_str}."
-                                })
-                                continue
-                        elif shell_cmd is not None and shell_safety_utils.is_ask(shell_tier):
-                            # --ask-permission is off, but the ASK tier is still enforced:
-                            # prompt the user for this one risky command before running it.
-                            print(f"{BOLD}{YELLOW}Tool safety:{RESET} This shell command is flagged as risky: {shell_cmd!r} ({shell_reason})")
-                            try:
-                                permission_input = input("Type: 'y' or 'yes' to run this command\n")
-                            except KeyboardInterrupt:
-                                print("\nThank you. Goodbye! Saving history...")
-                                save_history(messages, args, unique_id)
-                                sys.exit(0)
-                            if not permission_input in ['y', 'yes']:
-                                print(f"{BOLD}{YELLOW}Tool safety:{RESET} Command not run.")
-                                messages.append({
-                                    "role": "user",
-                                    "content": f"User declined to run risky command: {shell_cmd!r}."
-                                })
-                                continue
-
-                        print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call: {name} with {tool_params}.")
-                        result = call_function_with_timeout(func, tool_params, name, timeout_seconds=args.tool_timeout)
-                        # Limiting output to 300 characters for readability
-                        result_str = str(result)
-                        if len(result_str) > 300:
-                            result_str = result_str[:300] + "... (truncated to 300 chars)"
-                        print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {result_str}")
-
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": str(result)
-                        })
-                    else:
-                        print(f"{BOLD}{RED}Error:{RESET} Unknown tool: {name}, params {params_str}")
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": f"Error: Unknown tool: {name}, params {params_str}"
-                        })
-            else:
-                messages.append({
-                        "role": "assistant",
-                        "content": response_text,
-                        # "tool_calls": tool_calls
-                })
-            
-            if not llm_response_flag and not llm_tool_response_flag:
-                print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
-
-            save_history(messages, args, unique_id)
-
+    def _read_user_line(self):
+        """Read one turn from the user. Returns the text to send, or None to quit."""
+        try:
+            print("=" * 30)
+            user_input = input(f"{BOLD}{CYAN}You:{RESET} ")
         except KeyboardInterrupt:
-            print(f"{BOLD}{RED}INTERRUPTING:{RESET} Mini Code Exiting...")
+            print("\nThank you. Goodbye! Saving history...")
+            return None
 
-        except Exception as e:
-            print(f"{BOLD}{RED}FATAL ERROR:{RESET} Mini Code Crashed...:\n{e}")
-        
-        finally:
-            print(f"Saving history to: {cache_dir}/history_{unique_id}.json")
-            save_history(messages, args, unique_id)
-            usage_path = save_usage(token_stats, cache_dir, unique_id)
-            print(f"Saving usage to: {usage_path}")
-            print_usage_summary(token_stats)
+        if user_input.lower() in self.EXIT_COMMANDS:
+            return None
+
+        if user_input == "/help":
+            print_help(self.allowed_dir, self.server_url, self.args,
+                       self.unique_id, self.cache_dir, self.model)
+            # Nothing to send to the model; ask again.
+            return self._read_user_line()
+
+        return user_input
+
+    def _run_tool_calls(self, tool_calls):
+        print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
+        for call in tool_calls:
+            self._run_one_tool_call(call)
+
+    def _run_one_tool_call(self, call):
+        call_id = call.get("id", "")
+        name = call.get("function", {}).get("name", "")
+        params_str = call.get("function", {}).get("arguments", "{}")
+
+        try:
+            tool_params = json.loads(params_str)
+        except json.JSONDecodeError:
+            print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
+            return
+
+        if name not in self.tools_dict:
+            print(f"{BOLD}{RED}Error:{RESET} Unknown tool: {name}, params {params_str}")
+            self._append_tool_result(call_id,
+                f"Error: Unknown tool: {name}, params {params_str}")
+            return
+
+        # 1) Sandbox: keep every filesystem tool inside --allowed-dir.
+        if not tool_paths_are_allowed(name, tool_params, self.allowed_dir):
+            print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside "
+                  f"allowed directory: {self.allowed_dir}")
+            self._append_tool_result(call_id,
+                f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
+            return
+
+        # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
+        shell_cmd = None
+        if name == "run_shell_command":
+            shell_cmd = str(tool_params.get("command", ""))
+            tier, reason = shell_safety_utils.classify_command(shell_cmd)
+            if shell_safety_utils.is_deny(tier):
+                print(f"{BOLD}{RED}Tool safety:{RESET} Refusing to run dangerous command: {shell_cmd!r}")
+                self._append_tool_result(call_id,
+                    f"Command refused for safety reasons ({reason}): {shell_cmd!r}. Please choose a safer command.")
+                return
+        else:
+            tier = reason = None
+
+        # 3) Permission prompt. Either the user asked for prompts on every call,
+        #    or the shell-safety classifier flagged this command as risky (ASK).
+        if needs_permission(self.args, shell_cmd, tier):
+            if self.args.ask_permission:
+                ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
+            else:
+                ok = self._ask_risky_command(shell_cmd, reason)
+            if not ok:
+                self._append_tool_result(call_id,
+                    f"User denied permission for tool {name} and params {params_str}.")
+                return
+
+        # 4) Execute the tool.
+        print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call: {name} with {tool_params}.")
+        func = self.tools_dict[name]["function"]
+        result = call_function_with_timeout(func, tool_params, name, timeout_seconds=self.args.tool_timeout)
+
+        print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {_truncate(str(result), 300)}")
+        self._append_tool_result(call_id, str(result))
+
+    def _ask_permission(self, name, params_str, shell_cmd, tier, reason):
+        """Prompt the user to confirm a tool call (ask-permission mode)."""
+        print(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool?")
+        print(f"name: {name}, parameters: {params_str}")
+        if shell_cmd is not None and shell_safety_utils.is_ask(tier):
+            print(f"{BOLD}{YELLOW}Tool safety:{RESET} This command is flagged as risky: "
+                  f"{shell_cmd!r} ({reason})")
+        try:
+            permission_input = input("Type: 'y' or 'yes'\n")
+        except KeyboardInterrupt:
+            print("\nThank you. Goodbye! Saving history...")
+            self.shutdown()
+            raise _Abort
+
+        return permission_input.lower() in ["y", "yes"]
+
+    def _ask_risky_command(self, shell_cmd, reason):
+        """Prompt only for a shell command the classifier flagged as risky
+        (used when --ask-permission is off). Returns True to proceed."""
+        print(f"{BOLD}{YELLOW}Tool safety:{RESET} This shell command is flagged as risky: "
+              f"{shell_cmd!r} ({reason})")
+        try:
+            permission_input = input("Type: 'y' or 'yes' to run this command\n")
+        except KeyboardInterrupt:
+            print("\nThank you. Goodbye! Saving history...")
+            self.shutdown()
+            raise _Abort
+
+        if permission_input.lower() not in ["y", "yes"]:
+            print(f"{BOLD}{YELLOW}Tool safety:{RESET} Command not run.")
+            self._append_tool_result(None, f"User declined to run risky command: {shell_cmd!r}.")
+            return False
+        return True
+
+    def _append_tool_result(self, call_id, content):
+        self.messages.append({"role": "tool", "tool_call_id": call_id, "content": str(content)})
+
+    def _print_assistant(self, text):
+        print("-" * 20)
+        print(f"{BOLD}{GREEN}Assistant:{RESET}")
+        print("-" * 20)
+        print(text)
+        print("=" * 30)
+
+    def _persist(self):
+        save_history(self.messages, self.args, self.unique_id)
+        usage_path = save_usage(self.token_stats, self.cache_dir, self.unique_id)
+        print(f"Saving usage to: {usage_path}")
+        print_usage_summary(self.token_stats)
+
+    def shutdown(self):
+        """Persist and print a final summary (called on quit / exit)."""
+        print(f"Saving history to: {self.cache_dir}/history_{self.unique_id}.json")
+        self._persist()
+
+
+class _Abort(Exception):
+    """Raised to unwind the permission prompt after a Ctrl-C / shutdown."""
+
+
+def needs_permission(args, shell_cmd, shell_tier):
+    """Whether a tool call needs a manual confirmation.
+
+    True when either --ask-permission was passed, or the shell-safety classifier
+    marked the command as risky (ASK tier) and we still need to confirm it.
+    """
+    if getattr(args, "ask_permission", False):
+        return True
+    return shell_cmd is not None and shell_safety_utils.is_ask(shell_tier)
+
+
+def _truncate(text, limit):
+    if len(text) > limit:
+        return text[:limit] + "... (truncated to 300 chars)"
+    return text
+
+
+def main():
+    args = parse_args()
+    session = AgentSession(args)
+    session.run(initial_prompt=args.prompt)
 
 if __name__ == "__main__":
     main()
