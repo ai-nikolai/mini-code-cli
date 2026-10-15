@@ -22,9 +22,12 @@ from . import prompts
 from . import shell_safety_utils
 from . import tools
 from . import utils
+from . import ui
 
 
-# ANSI escape codes for colors and bold
+# ANSI escape codes for colors and bold (kept for the couple of ad-hoc spots
+# that still build their own strings; the rest of the package renders through
+# the ui.Console in ui.py).
 BOLD = '\033[1m'
 RED = '\033[91m'
 GREEN = '\033[92m'
@@ -85,14 +88,8 @@ def save_usage(token_stats, cache_dir, session_name=""):
 
 def print_usage_summary(token_stats):
     """Print the accumulated token usage for the session so far."""
-    print("-"*20)
-    print(f"{BOLD}{CYAN}Token usage (this session):{RESET}")
-    print(f"  LLM calls      : {token_stats['llm_calls']}")
-    print(f"  Input tokens   : {token_stats['prompt_tokens']}")
-    print(f"  Output tokens  : {token_stats['completion_tokens']}")
-    print(f"  Total tokens   : {token_stats['total_tokens']}")
-    print(f"  Tool calls     : {token_stats['tool_calls']}")
-    print("-"*20)
+    ui.console.usage_summary(token_stats)
+
 
 def generate_unique_id():
     """Generate a unique ID based on current time and a random component."""
@@ -129,52 +126,14 @@ def parse_args():
     return args
 
 
-def print_lines_with_border(lines):
-    """Prints any list of strings with a border."""
-    max_len = max(len(line) for line in lines)
-    margin = 2  # Space on each side inside the box
-    inner_width = max_len + 2 * margin
-    # Build the box
-    top_bottom = "╔" + "═" * inner_width + "╗"
-    print(top_bottom)
-    for line in lines:
-        # Pad the line to inner_width characters
-        padded = line.ljust(inner_width)
-        print(f"║{padded}║")
-    bottom = "╚" + "═" * inner_width + "╝"
-    print(bottom)
-
-
-def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None):
-    # Calculate the length of the longest line inside the box
-    version = __import__('mini_code_cli').__version__
-    
-    permission_mode = "All tool calls require permission." if args.ask_permission else "Tool calls will execute without asking for permission."
-    agent_mode = "Agent is in manual-mode." if not args.auto_mode else "Agent is in auto-mode."
-    shell_mode = "Shell disabled." if not args.enable_shell else "Shell enabled."
-
-    lines = [
-        f"  MiniCodeCLI (v{version})",
-        f"  The session-id is: {unique_id}" ,
-        f"  It will be saved under: `{cache_dir}`",
-         "  Type 'quit' or 'exit' to exit the loop.",
-        f"  Allowed dir: {allowed_dir}",
-        f"  Server URL: {server_url}",
-        f"  Model Name: {model_name}",
-        f"  {permission_mode}",
-        f"  {agent_mode}",
-        f"  {shell_mode}"
-    ]
-
-    print_lines_with_border(lines)
-
 def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
-    print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name)
-    
-    help_message = ""
-    help_message += "Manual-mode means the agent will ask for user input after each LLM prediction." if not args.auto_mode else "Auto-mode means the agent will keep calling the LLM until no further LLM calls are possible."
-
-    print(f"{BOLD}{GREEN}HELP:{RESET} {help_message}")
+    ui.console.rule("help", fg="cyan")
+    if not args.auto_mode:
+        help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
+    else:
+        help_message = "Auto-mode: the agent keeps calling the LLM until no further tool calls are possible."
+    ui.console.note(help_message, "info")
+    ui.console.rule(char="═", fg="cyan")
 
 def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_TOOL_TIMEOUT):
     """calls function with params, aborting after `timeout_seconds`."""
@@ -189,8 +148,8 @@ def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_
     try:
         result = func(**tool_params)
     except TimeoutError:
-        print(f"{BOLD}{RED}Error:{RESET} Function {name} timed out after {timeout_seconds} seconds.")
-        result = "Error:Function {name} timed out after {timeout_seconds} seconds."
+        ui.console.note(f"Function {name} timed out after {timeout_seconds} seconds.", "error")
+        result = f"Error: Function {name} timed out after {timeout_seconds} seconds."
     finally:
         signal.alarm(0)  # Disable the alarm
     
@@ -229,7 +188,7 @@ def tool_paths_are_allowed(name, tool_params, allowed_dir):
     """Return True if every filesystem path argument of `name` stays inside
     `allowed_dir`.
 
-    Tools not listed in `_FILE_TOOL_PATH_ARGS` have no path to check and pass
+    Tools not listed in _FILE_TOOL_PATH_ARGS have no path to check and pass
     through (return True). A single path argument may itself be a list (e.g. a
     batch of files), so each entry is validated.
     """
@@ -312,6 +271,11 @@ class AgentSession:
         self.allowed_dir = os.path.abspath(args.allowed_dir)
         self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
+        # The console that renders everything the agent prints. Unit tests /
+        # other callers can swap it out (e.g. AgentSession(args, console=...) with
+        # a color=False console) but it defaults to the shared ui.console.
+        self.console = ui.console
+
         # LLM / server configuration.
         self.server_url = f"{args.url}"
         model_name = utils.determine_vllm_model(self.server_url)
@@ -348,13 +312,13 @@ class AgentSession:
         messages = [{"role": "system", "content": system_prompt}]
 
         if self.args.agent_md:
-            print(f"{YELLOW}AGENT.md '{self.args.agent_md}' specified.{RESET}")
+            self.console.note(f"AGENT.md '{self.args.agent_md}' specified.", "warn")
             if not os.path.isfile(self.args.agent_md):
-                print(f"{RED}Error: The AGENT.md '{self.args.agent_md}' does not exist.{RESET}")
+                self.console.note(f"Error: The AGENT.md '{self.args.agent_md}' does not exist.", "error")
             else:
                 with open(self.args.agent_md, "r", encoding="utf-8") as f:
                     agent_md_content = f.read()
-                print(f"{YELLOW}AGENT.md '{self.args.agent_md}' loaded.{RESET}")
+                self.console.note(f"AGENT.md '{self.args.agent_md}' loaded.", "ok")
                 # Append Agent.md as a user turn, right after the system prompt.
                 messages.insert(1, {"role": "user", "content": agent_md_content})
 
@@ -363,14 +327,12 @@ class AgentSession:
     def print_announcements(self):
         """Print the info / warning banners that depend on the CLI flags."""
         if self.api_key:
-            print(f"{YELLOW}API Key found at MINI_CODE_API_KEY{RESET}")
+            self.console.announce_api_key(present=True)
         else:
-            print(f"{YELLOW}NO API Key found at MINI_CODE_API_KEY. Set it with export MINI_CODE_API_KEY='sk-api-key'{RESET}")
+            self.console.announce_api_key(present=False)
 
         if shell_forces_ask_permission(self.args):
-            print(f"{BOLD}{YELLOW}NOTE:{RESET} Shell execution is ENABLED. Every command is "
-                  f"checked by the shell-safety classifier: destructive commands are blocked, "
-                  f"others require your confirmation.")
+            self.console.announce_shell()
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
@@ -404,14 +366,13 @@ class AgentSession:
                     self._persist()
                     if not should_continue:
                         break
-                    print(f"{BOLD}{YELLOW}System:{RESET} Skipping user input. "
-                          f"Continuing with LLM calls until no more tool calls.")
+                    self.console.note("Continuing with LLM calls until no more tool calls.", "info")
             except _Abort:
                 # Ctrl-C during a permission prompt already shut the session
                 # down; just unwind the loop quietly.
                 break
             except KeyboardInterrupt:
-                print(f"{BOLD}{RED}INTERRUPTING:{RESET} Mini Code Exiting...")
+                self.console.note("Interrupting: Mini Code Exiting...", "error")
                 # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
                 self._persist()
 
@@ -436,7 +397,7 @@ class AgentSession:
             timeout=self.args.llm_timeout,
         )
         accumulate_usage(self.token_stats, usage)
-        print(f"{BOLD}{CYAN}[{format_usage(usage)}]{RESET}")
+        self.console.emit(self.console.usage_inline(usage))
 
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
@@ -456,7 +417,7 @@ class AgentSession:
             self.messages.append({"role": "assistant", "content": response_text})
 
         if not response_text and not made_tool_calls:
-            print(f"{BOLD}{RED}Warning:{RESET} No response was given by the LLM.")
+            self.console.note("Warning: no response was given by the LLM.", "error")
 
         return made_tool_calls and self.args.auto_mode
 
@@ -481,7 +442,7 @@ class AgentSession:
         return user_input
 
     def _run_tool_calls(self, tool_calls):
-        print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call {len(tool_calls)} tools.")
+        self.console.note(f"LLM is trying to call {len(tool_calls)} tool(s).", "info")
         for call in tool_calls:
             self._run_one_tool_call(call)
 
@@ -493,19 +454,19 @@ class AgentSession:
         try:
             tool_params = json.loads(params_str)
         except json.JSONDecodeError:
-            print(f"{BOLD}{RED}Warning:{RESET} Error parsing arguments for tool {name}")
+            self.console.note(f"Error parsing arguments for tool {name}", "error")
             return
 
         if name not in self.tools_dict:
-            print(f"{BOLD}{RED}Error:{RESET} Unknown tool: {name}, params {params_str}")
+            self.console.note(f"Unknown tool: {name}, params {params_str}", "error")
             self._append_tool_result(call_id,
                 f"Error: Unknown tool: {name}, params {params_str}")
             return
 
         # 1) Sandbox: keep every filesystem tool inside --allowed-dir.
         if not tool_paths_are_allowed(name, tool_params, self.allowed_dir):
-            print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside "
-                  f"allowed directory: {self.allowed_dir}")
+            self.console.note(
+                f"File operation not allowed outside allowed directory: {self.allowed_dir}", "error")
             self._append_tool_result(call_id,
                 f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
             return
@@ -516,7 +477,7 @@ class AgentSession:
             shell_cmd = str(tool_params.get("command", ""))
             tier, reason = shell_safety_utils.classify_command(shell_cmd)
             if shell_safety_utils.is_deny(tier):
-                print(f"{BOLD}{RED}Tool safety:{RESET} Refusing to run dangerous command: {shell_cmd!r}")
+                self.console.note(f"Refusing to run dangerous command: {shell_cmd!r} ({reason})", "error")
                 self._append_tool_result(call_id,
                     f"Command refused for safety reasons ({reason}): {shell_cmd!r}. Please choose a safer command.")
                 return
@@ -540,18 +501,16 @@ class AgentSession:
         func = self.tools_dict[name]["function"]
         result = call_function_with_timeout(func, tool_params, name, timeout_seconds=self.args.tool_timeout)
 
-        print(f"{BOLD}{MAGENTA}Tool '{name}' returned:{RESET} {_truncate(str(result), 300)}")
+        self.console.tool_group(name, tool_params, result)
         self._append_tool_result(call_id, str(result))
 
     def _ask_permission(self, name, params_str, shell_cmd, tier, reason):
         """Prompt the user to confirm a tool call (ask-permission mode)."""
-        print(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool?")
-        print(f"name: {name}, parameters: {params_str}")
+        self.console.emit("")
         if shell_cmd is not None and shell_safety_utils.is_ask(tier):
-            print(f"{BOLD}{YELLOW}Tool safety:{RESET} This command is flagged as risky: "
-                  f"{shell_cmd!r} ({reason})")
+            self.console.note(f"This command is flagged as risky: {shell_cmd!r} ({reason})", "warn")
         try:
-            permission_input = input("Type: 'y' or 'yes'\n")
+            permission_input = input(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool? name: {name}, parameters: {params_str}\nType: 'y' or 'yes' ")
         except KeyboardInterrupt:
             print("\nThank you. Goodbye! Saving history...")
             self.shutdown()
@@ -562,17 +521,16 @@ class AgentSession:
     def _ask_risky_command(self, shell_cmd, reason):
         """Prompt only for a shell command the classifier flagged as risky
         (used when --ask-permission is off). Returns True to proceed."""
-        print(f"{BOLD}{YELLOW}Tool safety:{RESET} This shell command is flagged as risky: "
-              f"{shell_cmd!r} ({reason})")
+        self.console.note(f"This shell command is flagged as risky: {shell_cmd!r} ({reason})", "warn")
         try:
-            permission_input = input("Type: 'y' or 'yes' to run this command\n")
+            permission_input = input(f"Type: 'y' or 'yes' to run this command: ")
         except KeyboardInterrupt:
             print("\nThank you. Goodbye! Saving history...")
             self.shutdown()
             raise _Abort
 
         if permission_input.lower() not in ["y", "yes"]:
-            print(f"{BOLD}{YELLOW}Tool safety:{RESET} Command not run.")
+            self.console.note("Command not run.", "warn")
             self._append_tool_result(None, f"User declined to run risky command: {shell_cmd!r}.")
             return False
         return True
@@ -581,21 +539,17 @@ class AgentSession:
         self.messages.append({"role": "tool", "tool_call_id": call_id, "content": str(content)})
 
     def _print_assistant(self, text):
-        print("-" * 20)
-        print(f"{BOLD}{GREEN}Assistant:{RESET}")
-        print("-" * 20)
-        print(text)
-        print("=" * 30)
+        self.console.turn("Assistant", text, accent="green")
 
     def _persist(self):
         save_history(self.messages, self.args, self.unique_id)
         usage_path = save_usage(self.token_stats, self.cache_dir, self.unique_id)
-        print(f"Saving usage to: {usage_path}")
+        self.console.note(f"Saved usage to: {usage_path}", "info")
         print_usage_summary(self.token_stats)
 
     def shutdown(self):
         """Persist and print a final summary (called on quit / exit)."""
-        print(f"Saving history to: {self.cache_dir}/history_{self.unique_id}.json")
+        self.console.note(f"Saving history to: {self.cache_dir}/history_{self.unique_id}.json", "info")
         self._persist()
 
 
@@ -614,10 +568,16 @@ def needs_permission(args, shell_cmd, shell_tier):
     return shell_cmd is not None and shell_safety_utils.is_ask(shell_tier)
 
 
-def _truncate(text, limit):
-    if len(text) > limit:
-        return text[:limit] + "... (truncated to 300 chars)"
-    return text
+def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None):
+    """Render the startup info banner through the UI."""
+    version = __import__('mini_code_cli').__version__
+
+    permission_mode = "All tool calls require permission." if args.ask_permission else "Tool calls execute without asking."
+    agent_mode = "Agent is in manual-mode." if not args.auto_mode else "Agent is in auto-mode."
+    shell_mode = "Shell disabled." if not args.enable_shell else "Shell enabled."
+
+    ui.console.welcome(version, unique_id, cache_dir, allowed_dir,
+                       server_url, model_name, permission_mode, agent_mode, shell_mode)
 
 
 def main():
