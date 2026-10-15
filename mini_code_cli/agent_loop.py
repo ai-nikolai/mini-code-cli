@@ -900,7 +900,7 @@ class AgentSession:
         # bottom of the screen. That way the next step can clear it in place
         # (cursor up + wipe + reprint) instead of jumping up past the assistant
         # turn above it -- which is what made the screen keep scrolling.
-        self.console.usage_line(usage, transient=not self.console.verbose)
+        self.console.usage_line(usage, transient=False)
 
         # Append this step's turn to the high-level recorder. On compaction the
         # recorder was already seeded for the new segment above, so this becomes
@@ -1177,7 +1177,6 @@ class AgentSession:
         save_summary(self.summary, self.args, self.unique_id)
         usage_path = save_usage(self.token_stats, self.cache_dir, self.unique_id)
         self.console.note(f"Saved usage to: {usage_path}", "info")
-        print_usage_summary(self.token_stats)
 
     def shutdown(self):
         """Persist and print a final summary (called on quit / exit)."""
@@ -1185,7 +1184,7 @@ class AgentSession:
         self.console.note(
             f"Saved session to {self.cache_dir}/{self.unique_id}/ "
             f"(history_0..{self.history_index}.json + summary_history.json).", "ok")
-
+        print_usage_summary(self.token_stats)
 
 class _Abort(Exception):
     """Raised to unwind the permission prompt after a Ctrl-C / shutdown."""
