@@ -9,6 +9,20 @@ import json
 # --tool-timeout default so a tool that is slow/hangs gets aborted.
 DEFAULT_TOOL_TIMEOUT = 120
 
+# A browser-like User-Agent. Many sites (e.g. Wikipedia's API) reject the
+# default "Python-urllib/..." client, so we identify as a normal browser.
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+)
+
+
+def _fetch(url, timeout=DEFAULT_TOOL_TIMEOUT):
+    """GET `url` and return its decoded body, sending a browser User-Agent."""
+    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode('utf-8')
+
 
 def read_file(file_path, *args, **kwargs):
     """Read the contents of a file and return as a string. Param: file_path"""
@@ -47,30 +61,74 @@ def glob(pattern, *args, **kwargs):
 
 
 def web_search(query, *args, **kwargs):
-    """Perform a simple web search using DuckDuckGo's API and return top results. Param: query"""
-    query_encoded = urllib.parse.quote(query)
-    url = f"https://api.duckduckgo.com/?q={query_encoded}&format=json&no_html=1"
+    """Search the web for `query` and return a plain-text summary of results.
+
+    Param: query
+
+    This is a best-effort, dependency-free lookup. It tries, in order:
+
+    1. DuckDuckGo's autocomplete API, which returns popular related queries and
+       the top related website for the term.
+    2. The Wikipedia search API, which returns matching article titles plus a
+       short plain-text extract of the best match.
+
+    Every source is wrapped in its own try/except so one failing endpoint can't
+    mask the others, and the function always returns a string (results joined by
+    newlines, or an "Error: ..." message).
+    """
+    results = []
+
+    # 1) DuckDuckGo autocomplete: fast, no-keyword related queries.
     try:
-        with urllib.request.urlopen(url) as response:
-            data = json.loads(response.read().decode())
-        # Extract relevant text from the response
-        results = []
-        if 'AbstractText' in data and data['AbstractText']:
-            results.append(data['AbstractText'])
-        if 'RelatedTopics' in data:
-            for topic in data['RelatedTopics']:
-                if 'Text' in topic:
-                    results.append(topic['Text'])
-        return '\n'.join(results) if results else "No results found."
+        ddg_url = f"https://duckduckgo.com/ac/?q={urllib.parse.quote(query)}&type=list"
+        data = json.loads(_fetch(ddg_url))
+        suggestions = data[1] if (isinstance(data, list) and len(data) > 1) else []
+        if suggestions:
+            results.append("Related queries: " + ", ".join(suggestions[:10]))
     except Exception as e:
-        return f"Error: {e}"
+        results.append(f"(DuckDuckGo suggestion lookup failed: {e})")
+
+    # 2) Wikipedia: matching article titles + a short extract of the best match.
+    try:
+        search_url = (
+            "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch="
+            f"{urllib.parse.quote(query)}&format=json&srlimit=5"
+        )
+        data = json.loads(_fetch(search_url))
+        hits = data.get("query", {}).get("search", [])
+        if hits:
+            best = hits[0]
+            results.append(f"Wikipedia: {best.get('title')}")
+            extract_url = (
+                "https://en.wikipedia.org/w/api.php?action=query&pageids="
+                f"{best.get('pageid')}&prop=extracts&exintro&explaintext&format=json"
+            )
+            extract = json.loads(_fetch(extract_url))
+            pages = extract.get("query", {}).get("pages", {})
+            for page in pages.values():
+                snippet = page.get("extract", "")
+                if snippet:
+                    snippet = "\n".join(line.strip() for line in snippet.splitlines() if line.strip())
+                    results.append("  " + snippet[:500])
+                    break
+    except Exception as e:
+        results.append(f"(Wikipedia lookup failed: {e})")
+
+    return '\n'.join(results) if results else "No results found."
 
 
 def read_website(url, *args, **kwargs):
-    """Fetch and return the text content of a given URL (simplified, returns raw HTML). Param: url"""
+    """Fetch and return the text content of a given URL.
+
+    Param: url
+
+    `timeout` (seconds) bounds how long the fetch may run before it is aborted,
+    mirroring the CLI's --tool-timeout so a slow or unresponsive site cannot
+    hang the agent loop.
+    """
+    timeout = kwargs.get("timeout", DEFAULT_TOOL_TIMEOUT)
     try:
-        with urllib.request.urlopen(url) as response:
-            return response.read().decode('utf-8')
+        return _fetch(url, timeout=timeout)
     except Exception as e:
         return f"Error: {e}"
 
@@ -102,7 +160,13 @@ def util_get_tools(allowed_tools=None, forbidden_tools=None):
         func = globals()[name]
         sig = inspect.signature(func)
         parameters = {}
+        required = []
         for param_name, param in sig.parameters.items():
+            # Skip *args and **kwargs: they are catch-alls, not real inputs the
+            # LLM should (or can) supply, so they must not appear in the schema.
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL,
+                              inspect.Parameter.VAR_KEYWORD):
+                continue
             param_type = str(param.annotation) if param.annotation != inspect.Parameter.empty else "string"
             # Simplify common types
             if 'int' in param_type.lower() or 'integer' in param_type.lower():
@@ -116,6 +180,8 @@ def util_get_tools(allowed_tools=None, forbidden_tools=None):
             else:
                 param_type = "string"
             parameters[param_name] = {"type": param_type}
+            if param.default == inspect.Parameter.empty:
+                required.append(param_name)
         tool = {
             "type": "function",
             "function": {
@@ -124,7 +190,7 @@ def util_get_tools(allowed_tools=None, forbidden_tools=None):
                 "parameters": {
                     "type": "object",
                     "properties": parameters,
-                    "required": [p for p in sig.parameters if sig.parameters[p].default == inspect.Parameter.empty]
+                    "required": required
                 }
             }
         }

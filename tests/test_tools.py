@@ -57,6 +57,29 @@ class TestToolsReturnValues(unittest.TestCase):
         rc = next(t for t in schema if t["function"]["name"] == "run_shell_command")
         self.assertIn("timeout", rc["function"]["parameters"]["properties"])
 
+    def test_schema_excludes_varargs_and_kwargs(self):
+        # web_search / read_website accept *args, **kwargs as catch-alls; those
+        # must not leak into the LLM-facing schema (the model can't supply them).
+        schema = tools.util_get_tools()
+        for name in ("web_search", "read_website"):
+            fn = next(t for t in schema if t["function"]["name"] == name)
+            props = fn["function"]["parameters"]["properties"]
+            self.assertNotIn("args", props)
+            self.assertNotIn("kwargs", props)
+            self.assertIn("query" if name == "web_search" else "url", props)
+
+    def test_web_search_returns_string(self):
+        # Best-effort network lookup: it should never raise, always return a str,
+        # and surface real content (related queries or a Wikipedia extract).
+        r = tools.web_search("python programming language")
+        self.assertIsInstance(r, str)
+        self.assertNotIn("Traceback", r)
+
+    def test_read_website_error_returned(self):
+        r = tools.read_website("https://this-domain-does-not-exist-xyz123.invalid/")
+        self.assertIsInstance(r, str)
+        self.assertTrue(r.startswith("Error"), r)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,18 @@ mini-code --enable-shell --auto-mode --agent-md "./skill.md" --allowed-dir "./" 
   This protection is **always enforced** for the shell tool, even in auto-mode / without `--ask-permission`, so the agent can never run dangerous commands unattended. (The classifier is a heuristic, not a sandbox — use with care.)
 - allowed-dir: this specifies which dirs the agent can read and write from, that does not stop the shell comands! (though dangerous shell commands are still blocked by the classifier above).
 - ask-permission: asks user permission before every tool call. For shell commands, commands in the ALLOW tier skip the prompt, DENY is blocked, and ASK always prompts.
-- system-prompt: you can override the default prompt by using a string. (Not Agent.md is always appended after the system prompt.)
+- system-prompt: you can override the default prompt by using a string. (Note: Agent.md is always appended after the system prompt.)
+
+### Available tools
+
+The agent can call a small set of tools, all of which live in `mini_code_cli/tools.py`:
+
+- **`read_file` / `write_file`** — read a file or write/overwrite one.
+- **`grep`** — search a file for a pattern.
+- **`glob`** — list files matching a glob pattern.
+- **`web_search`** — best-effort web lookup: returns popular related queries (DuckDuckGo autocomplete) plus a short extract from the top Wikipedia match. Never raises; always returns a string.
+- **`read_website`** — fetch the raw text/HTML of a URL (bounded by `--tool-timeout`).
+- **`run_shell_command`** — run a shell command (only when `--enable-shell` is set). Every command is passed through the shell-safety classifier described above.
 
 3. Try a prompt:
 ```txt
@@ -57,24 +68,31 @@ Agent loop for interacting with a language model
 
 options:
   -h, --help            show this help message and exit
-  --url URL             API host
+  --url URL             API host, default=http://0.0.0.0:30000
   --max-tokens MAX_TOKENS
-                        Maximum tokens for LLM response
+                        Maximum tokens for LLM response, default=None
   --temperature TEMPERATURE
-                        Temperature for LLM
-  --model MODEL         Model name
+                        Temperature for LLM, default=1.0
+  --model MODEL         Model name, default=None
   --api-key API_KEY     API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.
   --cache-dir CACHE_DIR
                         The cache dir for the session histories.
+  --restore-session RESTORE_SESSION
+                        The location of a previous session to continue.
+                        (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)
   --system-prompt SYSTEM_PROMPT
                         Replace system prompt, with a custom system prompt.
-  --auto-mode           Whether to run the agent in `auto-mode'. Or default: `manual-mode'.
+  -a, --auto-mode       Whether to run the agent in `auto-mode'. Or default: `manual-mode'.
   --agent-md AGENT_MD   If the agent should use an agent-md file... (it will added after system message.)
   --prompt PROMPT       An initial prompt from the user...
   --ask-permission      Ask for permission before any tool call. (Shell ALLOW-tier commands skip the prompt; DENY is blocked.)
   --allowed-dir ALLOWED_DIR
                         Allowed directory for file operations
-  --enable-shell        Allow shell execution. Default: False
+  -s, --enable-shell    Allow shell execution. Default: False
+  --llm-timeout LLM_TIMEOUT
+                        HTTP timeout in seconds for LLM requests (reasoning models can be slow). default=300
+  --tool-timeout TOOL_TIMEOUT
+                        Timeout in seconds for a single tool call. default=120
   ```
 
 ## Testing
