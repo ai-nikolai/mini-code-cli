@@ -212,6 +212,36 @@ def is_within_allowed_dir(file_path, allowed_dir):
         return False
 
 
+# Maps each filesystem tool to the names of its path-bearing arguments, so the
+# --allowed-dir sandbox can be enforced uniformly. Keeping this in one place
+# means a future tool cannot silently bypass the sandbox by using a different
+# argument name (e.g. glob's `pattern` instead of `file_path`).
+_FILE_TOOL_PATH_ARGS = {
+    "read_file": ["file_path"],
+    "write_file": ["file_path"],
+    "grep": ["file_path"],
+    "glob": ["pattern"],
+}
+
+
+def tool_paths_are_allowed(name, tool_params, allowed_dir):
+    """Return True if every filesystem path argument of `name` stays inside
+    `allowed_dir`.
+
+    Tools not listed in `_FILE_TOOL_PATH_ARGS` have no path to check and pass
+    through (return True). A single path argument may itself be a list (e.g. a
+    batch of files), so each entry is validated.
+    """
+    path_args = _FILE_TOOL_PATH_ARGS.get(name, [])
+    for arg_name in path_args:
+        value = tool_params.get(arg_name, "")
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for path in values:
+            if path and not is_within_allowed_dir(path, allowed_dir):
+                return False
+    return True
+
+
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, max_messages=DEFAULT_MAX_MESSAGES):
     """Compact the conversation history once it grows beyond `max_messages`.
 
@@ -463,14 +493,12 @@ def main():
                         continue
 
                     if name in tools_dict:
-                        # Check allowed directory for file operations.
-                        # Applies to every filesystem tool (read/write/grep/glob) so the agent
+                        # Check allowed directory for file operations. Applies to
+                        # every filesystem tool (read/write/grep/glob) so the agent
                         # cannot read or write anything outside --allowed-dir.
-                        file_path = tool_params.get("file_path", "")
-                        if name in ["read_file", "write_file", "grep", "glob"]:
-                            if file_path and not is_within_allowed_dir(file_path, allowed_dir):
-                                print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
-                                continue
+                        if not tool_paths_are_allowed(name, tool_params, allowed_dir):
+                            print(f"{BOLD}{RED}Warning:{RESET} File operation not allowed outside allowed directory: {allowed_dir}")
+                            continue
 
                         func = tools_dict[name]["function"]
                         # Shell-safety gate. Classify shell commands into DENY / ASK /
