@@ -44,6 +44,7 @@ mini-code --enable-shell --auto-mode --agent-md "./skill.md" --allowed-dir "./" 
 - ask-permission: asks user permission before every tool call. For shell commands, commands in the ALLOW tier skip the prompt, DENY is blocked, and ASK always prompts.
 - system-prompt: you can override the default prompt by using a string. (Note: Agent.md is always appended after the system prompt.)
 - load-last-session: instead of starting a fresh conversation, automatically continue your most recently active session (the one whose history was last modified) from the default cache dir. It resumes under a brand-new session id, so the original session is never overwritten. An explicit `--restore-session` (a specific path) takes precedence if both are given.
+- plan: `--plan` enables **plan mode**. The agent now keeps two tracking files in the session directory: `CURRENT_GOAL.md` (the user's latest instruction) and `CURRENT_PLAN.md` (its own step-by-step plan, which it must update as it works and mark finished once the goal is done). The system message gets an extra instruction telling the agent to do this. Plan mode also changes how history compaction works: after the history is compacted to a summary, the current `CURRENT_PLAN.md` and the user's last instruction (`CURRENT_GOAL.md`) are re-injected into the messages so the agent keeps working against the same goal. When the session ends, the active goal is marked finished in `CURRENT_PLAN.md`.
 
 ### Available tools
 

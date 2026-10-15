@@ -23,6 +23,7 @@ from . import shell_safety_utils
 from . import tools
 from . import utils
 from . import ui
+from . import plan as plan_utils
 
 
 # ANSI escape codes for colors and bold (kept for the couple of ad-hoc spots
@@ -288,6 +289,7 @@ def parse_args():
     parser.add_argument("-s", "--enable-shell", action="store_true", help="Allow shell execution. default= False") 
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
+    parser.add_argument("--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
 
 
 
@@ -508,6 +510,12 @@ class AgentSession:
 
         self.unique_id = generate_unique_id()
 
+        # Plan-mode tracking (see plan.py). Always instantiated so the loop can
+        # call it unconditionally; every method no-ops when --plan is disabled.
+        self.plan_mode = bool(getattr(self.args, "plan", False))
+        self.plan_manager = plan_utils.PlanManager(
+            os.path.join(self.cache_dir, self.unique_id), enabled=self.plan_mode)
+
         # High-level recorder + history segments. Instead of a single ever-growing
         # history.json, a session keeps:
         #   * ``history_{n}.json`` files -- one per conversation *segment*; a brand
@@ -563,7 +571,7 @@ class AgentSession:
         if self.args.system_prompt:
             system_prompt = self.args.system_prompt
         else:
-            system_prompt = prompts.system_prompt(tools_dict=self.tools_dict, allowed_dir=self.allowed_dir)
+            system_prompt = prompts.system_prompt(tools_dict=self.tools_dict, allowed_dir=self.allowed_dir, plan_mode=self.plan_mode)
 
         messages = [{"role": "system", "content": system_prompt}]
 
@@ -783,7 +791,7 @@ class AgentSession:
                 else:
                     user_input = self._read_user_line()
                     if user_input is None:  # quit / exit
-                        self.shutdown()
+                        self._finish_goal_and_shutdown()
                         break
 
                     # Interactive slash commands are handled in place and never
@@ -791,6 +799,11 @@ class AgentSession:
                     # was such a command, so we just re-prompt (continue).
                     if user_input.startswith("/") and self._handle_command(user_input):
                         continue
+
+                # In plan mode, remember the user's latest instruction as the
+                # active goal so the loop (and plan-mode compaction) can track it
+                # even if the agent never writes it to disk itself.
+                self._capture_goal(user_input)
 
                 # 2) Hand the user turn to the model and act on its tool calls.
                 self.messages.append({"role": "user", "content": user_input})
@@ -822,6 +835,11 @@ class AgentSession:
         )
         if did_compact:
             self.history_index = new_index
+            # In plan mode, re-inject the running plan + current goal so a
+            # compaction (which would otherwise drop them) keeps the model
+            # working against the goal it is still trying to finish.
+            if self.plan_mode:
+                self.messages = self._apply_plan_to_compacted(self.messages)
             # Snapshot the compacted messages into the new segment so its turns
             # are preserved, and record the summary as the first turn of it.
             save_history(self.messages, self.args, self.unique_id, self.history_index)
@@ -896,6 +914,92 @@ class AgentSession:
             self._record_turn("assistant", self.messages)
 
         return made_tool_calls and self.args.auto_mode
+
+    def _capture_goal(self, user_input):
+        """Seed CURRENT_GOAL.md with the user's latest instruction (plan mode).
+
+        The loop owns the goal (the user's last instruction); the agent owns the
+        plan (CURRENT_PLAN.md). Overwriting on every turn keeps the goal current.
+        Slash commands and the empty input are not real instructions, so they are
+        ignored. No-op when --plan is off.
+        """
+        if not self.plan_mode or user_input is None:
+            return
+        stripped = user_input.strip()
+        if not stripped or stripped.startswith("/"):
+            return
+        self.plan_manager.write_goal(user_input)
+
+    def _finish_goal_and_shutdown(self):
+        """Mark the active goal finished in CURRENT_PLAN.md, then quit/save."""
+        self._mark_current_goal_finished()
+        self.shutdown()
+
+    def _mark_current_goal_finished(self):
+        """Append a \"goal finished\" entry to the plan document (plan mode).
+
+        Uses the goal the loop last recorded (self.plan_manager.goal); a no-op
+        when --plan is off, so it is safe to call unconditionally.
+        """
+        self.plan_manager.mark_finished(self.plan_manager.goal)
+
+    def _apply_plan_to_compacted(self, messages):
+        """Re-inject the running plan + current goal after a history compaction.
+
+        Compaction replaces the transcript with a summary, which would otherwise
+        drop the agent's plan and the goal the loop seeded. We read them back off
+        disk and append them as fresh user turns so the model keeps working
+        against the goal it is still trying to finish. The goal is appended last
+        so it reads as the most recent instruction the model should act on.
+        """
+        plan_text = self.plan_manager.read_plan()
+        goal_text = self.plan_manager.read_goal()
+
+        # Recover the user's latest instruction from the pre-compaction tail, in
+        # case the loop had not seeded a goal file yet (e.g. the agent finished
+        # everything before ever writing CURRENT_GOAL.md).
+        current_input = None
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                current_input = m.get("content")
+                break
+        if current_input and not goal_text:
+            self.plan_manager.write_goal(current_input)
+            goal_text = self.plan_manager.read_goal()
+
+        rebuilt = list(messages)
+        if plan_text and plan_text.strip():
+            rebuilt.append({"role": "user",
+                            "content": f"Here is the current plan for the active goal (from CURRENT_PLAN.md):\n{plan_text}"})
+        if goal_text and goal_text.strip():
+            rebuilt.append({"role": "user",
+                            "content": f"The current goal / latest user instruction (from CURRENT_GOAL.md):\n{goal_text}"})
+        elif current_input:
+            rebuilt.append({"role": "user", "content": current_input})
+        return rebuilt
+
+    def _is_plan_file(self, name, tool_params):
+        """Whether a read/write targets a plan-mode file in the session dir.
+
+        Lets the agent maintain CURRENT_PLAN.md / CURRENT_GOAL.md even though the
+        session directory is usually outside --allowed-dir. Scoped tightly: plan
+        mode only, only read_file / write_file, only when the resolved path is a
+        plan file living directly in this session's directory.
+        """
+        if not self.plan_mode or name not in ("read_file", "write_file"):
+            return False
+        path = tool_params.get("file_path", "")
+        if not path:
+            return False
+        try:
+            resolved = os.path.realpath(path)
+        except (ValueError, TypeError):
+            return False
+        session = os.path.realpath(os.path.join(self.cache_dir, self.unique_id))
+        if os.path.dirname(resolved) != session:
+            return False
+        return os.path.basename(resolved) in (
+            plan_utils.PLAN_FILENAME, plan_utils.GOAL_FILENAME)
 
     def _read_user_line(self):
         """Read one turn from the user. Returns the text to send, or None to quit."""
@@ -998,13 +1102,19 @@ class AgentSession:
                 f"Error: Unknown tool: {name}, params {params_str}")
             return
 
-        # 1) Sandbox: keep every filesystem tool inside --allowed-dir.
+        # 1) Sandbox: keep every filesystem tool inside --allowed-dir (plan mode
+        #    additionally lets the agent maintain CURRENT_PLAN.md /
+        #    CURRENT_GOAL.md in the session directory, which normally sits
+        #    outside --allowed-dir, so those writes are exempted).
         if not tool_paths_are_allowed(name, tool_params, self.allowed_dir):
-            self.console.note(
-                f"File operation not allowed outside allowed directory: {self.allowed_dir}", "error")
-            self._append_tool_result(call_id,
-                f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
-            return
+            if self._is_plan_file(name, tool_params):
+                pass  # allow the plan/goal files into the session directory
+            else:
+                self.console.note(
+                    f"File operation not allowed outside allowed directory: {self.allowed_dir}", "error")
+                self._append_tool_result(call_id,
+                    f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
+                return
 
         # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
         shell_cmd = None
