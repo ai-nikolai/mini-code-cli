@@ -91,6 +91,7 @@ def print_usage_summary(token_stats):
     print(f"  Input tokens   : {token_stats['prompt_tokens']}")
     print(f"  Output tokens  : {token_stats['completion_tokens']}")
     print(f"  Total tokens   : {token_stats['total_tokens']}")
+    print(f"  Tool calls     : {token_stats['tool_calls']}")
     print("-"*20)
 
 def generate_unique_id():
@@ -329,6 +330,7 @@ class AgentSession:
             "completion_tokens": 0,
             "total_tokens": 0,
             "llm_calls": 0,
+            "tool_calls": 0,
         }
 
         self.unique_id = generate_unique_id()
@@ -437,6 +439,8 @@ class AgentSession:
         print(f"{BOLD}{CYAN}[{format_usage(usage)}]{RESET}")
 
         made_tool_calls = bool(tool_calls)
+        if made_tool_calls:
+            self.token_stats["tool_calls"] += len(tool_calls)
 
         if response_text:
             self._print_assistant(response_text)
