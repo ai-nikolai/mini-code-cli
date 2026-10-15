@@ -157,6 +157,7 @@ def parse_args():
 
     # Agent permissions related
     parser.add_argument("--ask-permission", action="store_true", help="Ask for permission before any tool call.")
+    parser.add_argument("--sudo", action="store_true", help="DANGEROUS: never ask for permission. Every non-destructive tool call and shell command runs automatically without confirmation. Destructive (DENY-tier) commands are still refused.")
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations, default='./'")
     parser.add_argument("-s", "--enable-shell", action="store_true", help="Allow shell execution. default= False") 
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
@@ -305,6 +306,19 @@ def shell_forces_ask_permission(args):
     return bool(getattr(args, "enable_shell", False))
 
 
+def sudo_disables_prompts(args):
+    """Whether --sudo was passed.
+
+    In sudo mode the agent never stops to ask for confirmation: both the
+    shell-safety ASK tier and --ask-permission are bypassed, so any
+    non-destructive tool call / shell command runs unattended. Destructive
+    DENY-tier commands are still refused outright -- this flag only removes the
+    *prompts*, not the hard safety refusals. Pure function so it can be
+    unit-tested independently of argparse / stdin.
+    """
+    return bool(getattr(args, "sudo", False))
+
+
 class AgentSession:
     """A single interactive agent session.
 
@@ -408,6 +422,25 @@ class AgentSession:
         except Exception:
             pass
 
+    def _warn_sudo(self):
+        """Print a prominent red warning about --sudo mode.
+
+        --sudo means the agent will never stop to ask before acting, so the user
+        is effectively handing over unattended control of their machine (within
+        the DENY-tier limits). We render it as a red box so it stands out on any
+        real terminal (it degrades to a plain ASCII box when colour is off).
+        """
+        self.console.print_box(
+            [
+                "SUDO MODE: the agent will NEVER ask for permission.",
+                "All tool calls and shell commands run automatically and unattended.",
+                "Only clearly-destructive (DENY-tier) commands are still refused.",
+                "You are responsible for everything it does on this machine.",
+            ],
+            title="DANGER",
+            fg="red",
+        )
+
     def print_announcements(self):
         """Print the info / warning banners that depend on the CLI flags."""
         if self.api_key:
@@ -417,6 +450,10 @@ class AgentSession:
 
         if shell_forces_ask_permission(self.args):
             self.console.announce_shell()
+
+        # --sudo hands the agent unattended control, so make that impossible to miss.
+        if sudo_disables_prompts(self.args):
+            self._warn_sudo()
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
@@ -626,7 +663,13 @@ def needs_permission(args, shell_cmd, shell_tier):
 
     True when either --ask-permission was passed, or the shell-safety classifier
     marked the command as risky (ASK tier) and we still need to confirm it.
+
+    --sudo bypasses every prompt (both --ask-permission and the ASK tier), so it
+    wins outright and this returns False. Destructive DENY-tier commands are
+    refused earlier, independently of this function.
     """
+    if getattr(args, "sudo", False):
+        return False
     if getattr(args, "ask_permission", False):
         return True
     return shell_cmd is not None and shell_safety_utils.is_ask(shell_tier)
@@ -636,7 +679,12 @@ def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_nam
     """Render the startup info banner through the UI."""
     version = __import__('mini_code_cli').__version__
 
-    permission_mode = "All tool calls require permission." if args.ask_permission else "Tool calls execute without asking."
+    if getattr(args, "sudo", False):
+        permission_mode = "SUDO MODE: no permission prompts (DENY commands still blocked)."
+    elif args.ask_permission:
+        permission_mode = "All tool calls require permission."
+    else:
+        permission_mode = "Tool calls execute without asking."
     agent_mode = "Agent is in manual-mode." if not args.auto_mode else "Agent is in auto-mode."
     shell_mode = "Shell disabled." if not args.enable_shell else "Shell enabled."
 
