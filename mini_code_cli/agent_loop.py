@@ -163,6 +163,10 @@ def parse_args():
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
 
 
+
+    # Output verbosity
+    parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
+
     args = parser.parse_args()
     return args
 
@@ -316,6 +320,9 @@ class AgentSession:
         # other callers can swap it out (e.g. AgentSession(args, console=...) with
         # a color=False console) but it defaults to the shared ui.console.
         self.console = ui.console
+        # --verbose toggles the amount of detail printed. Defaults to True so
+        # existing behaviour / callers are unchanged when the flag is omitted.
+        self.console.verbose = getattr(args, "verbose", True)
 
         # LLM / server configuration.
         self.server_url = f"{args.url}"
@@ -568,8 +575,22 @@ class AgentSession:
                     f"User denied permission for tool {name} and params {params_str}.")
                 return
 
-        # 4) Execute the tool.
-        print(f"{BOLD}{YELLOW}Tool Call:{RESET} LLM is trying to call: {name} with {tool_params}.")
+        # 4) Execute the tool. Announce the pending tool call with a clear,
+        #    separated banner so the user can see exactly what is about to run.
+        _rule = (BOLD + YELLOW + "\u2501" * 78 + RESET)
+        print("")
+        print(_rule)
+        print(f"{BOLD}{YELLOW}Tool Call:{RESET} {BOLD}{name}{RESET}")
+        # Show the parameters, one per line, so they are easy to read.
+        try:
+            _params = json.loads(params_str)
+        except json.JSONDecodeError:
+            _params = params_str
+        if isinstance(_params, dict) and _params:
+            print(f"{BOLD}{CYAN}Parameters:{RESET}")
+            for key, value in _params.items():
+                print(f"  {BOLD}{key}:{RESET} {value}")
+        print(_rule)
         func = self.tools_dict[name]["function"]
         result = call_function_with_timeout(func, tool_params, name, timeout_seconds=self.args.tool_timeout)
 
@@ -582,7 +603,12 @@ class AgentSession:
         if shell_cmd is not None and shell_safety_utils.is_ask(tier):
             self.console.note(f"This command is flagged as risky: {shell_cmd!r} ({reason})", "warn")
         try:
-            permission_input = input(f"{BOLD}{YELLOW}Tool permission:{RESET} Are you sure you want to call the tool? name: {name}, parameters: {params_str}\nType: 'y' or 'yes' ")
+            permission_input = input(
+                f"{BOLD}{YELLOW}Tool permission needed:{RESET}\n"
+                f"  Tool       : {BOLD}{name}{RESET}\n"
+                f"  Parameters : {params_str}\n"
+                f"{BOLD}{CYAN}Proceed?{RESET} Type 'y' or 'yes' and press Enter: "
+            )
         except KeyboardInterrupt:
             print("\nThank you. Goodbye! Saving history...")
             self.shutdown()

@@ -85,11 +85,15 @@ class Console:
         Force a terminal width. ``None`` auto-detects (falling back to 80).
     """
 
-    def __init__(self, stream=None, color=None, unicode=None, width=None):
+    def __init__(self, stream=None, color=None, unicode=None, width=None, verbose=True):
         self.stream = stream if stream is not None else sys.stdout
         self._color = color
         self._unicode = unicode
         self._width = width
+        # verbose controls whether informational ("info") notes are printed.
+        # When False, only user/assistant/tool turns and warn/error notes are
+        # shown. Defaults to True so existing callers keep the full output.
+        self.verbose = verbose
 
     # -- capability detection ----------------------------------------------
     @property
@@ -238,7 +242,14 @@ class Console:
             self.emit("   " + line)
 
     def note(self, msg, level="info"):
-        """Render a one-line status message (info / ok / warn / error)."""
+        """Render a one-line status message (info / ok / warn / error).
+
+        Informational notes (the default level) are only printed in verbose
+        mode; warn / error / ok notes are always shown so the user never misses
+        something important in the quiet, default view.
+        """
+        if level == "info" and not self.verbose:
+            return
         colors = {"info": "cyan", "ok": "green", "warn": "yellow", "error": "red"}
         icon = self.glyph(level)
         prefix = self.style(f"{icon} ", fg=colors.get(level, "cyan"), bold=True) \
