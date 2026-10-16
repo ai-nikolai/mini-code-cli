@@ -374,12 +374,14 @@ class AgentSession:
         # overwritten); an idle start keeps the freshly built initial messages.
         self.messages = restored if restored is not None else self._build_initial_messages()
         self._restore_from(restore_directory, restored)
-        if restored is not None:
-            # --load-last-session asked for a session but nothing usable was
-            # found: don't advertise a load. The recorder starts empty and the
-            # first assistant / tool-call turn seeds turn 1 -- mirroring the
-            # restore path, which also has no leading system turn, so /history
-            # turn numbers stay consistent whether or not we restored.
+        # --load-last-session asked for a session but nothing usable was found:
+        # clear the flag so run() reports "no previous session to load" instead
+        # of pretending it resumed one. When the restore succeeded the flag set
+        # above (loaded_last_session_dir = detected) is kept so run() prints the
+        # "Loaded most recent session ... and continuing it" note. Best-effort:
+        # a missing/empty/corrupt history falls back to a fresh session rather
+        # than crashing.
+        if restored is None:
             self.loaded_last_session_dir = None
 
         # Snapshot the initial (or restored) messages as the first history segment
