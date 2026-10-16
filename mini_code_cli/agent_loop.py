@@ -16,6 +16,7 @@ smaller, focused modules so each concern is easy to read and test:
   * :mod:`mini_code_cli.runner`      -- running a tool with a wall-clock timeout.
   * :mod:`mini_code_cli.config`      -- shared default settings.
   * :mod:`mini_code_cli.subagents`   -- delegating a task to a sub-agent.
+  * :mod:`mini_code_cli.skills`      -- the ``.mini`` skills feature.
 
 For backward compatibility (and the test-suite) the most commonly imported
 helpers are re-exported from here, so ``from mini_code_cli.agent_loop import ...``
@@ -32,6 +33,7 @@ from . import tools
 from . import utils
 from . import ui
 from . import subagents
+from . import skills
 from . import plan as plan_utils
 from .config import (
     DEFAULT_CACHE_LOCATION,
@@ -116,6 +118,7 @@ def parse_args():
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations, default='./'")
     parser.add_argument("-s", "--enable-shell", action="store_true", help="Allow shell execution. default= False")
     parser.add_argument("-g","--enable-subagents", action="store_true", help="Allow the agent to delegate work to sub-agents (exposed as extra tools). default= False")
+    parser.add_argument("--skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
@@ -127,6 +130,17 @@ def parse_args():
     parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
 
     args = parser.parse_args()
+
+    if args.all or args.all_last:
+        args.plan = True
+        args.enable_subagents = True
+        args.enable_shell = True
+        args.sudo = True
+        args.auto_mode = True
+    
+    if args.all_last:
+        args.load_last_session = True
+
     return args
 
 
@@ -157,6 +171,10 @@ def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
         ui.console.emit(ui.console.style("Sub-agents:", bold=True, fg="cyan"))
         for sa in subagents.get_registry().values():
             ui.console.emit(f"  {sa.name:16} {sa.description}")
+    if args.enable_skills or args.verbose:
+        ui.console.emit(ui.console.style("Skills:", bold=True, fg="cyan"))
+        for name in skills.SKILL_TOOL_NAMES:
+            ui.console.emit(f"  {name:16} (from the local .mini directory)")
     ui.console.rule(char="═", fg="cyan")
 
 
@@ -288,6 +306,19 @@ class AgentSession:
             # real function.
             self.tools_dict[sa.name] = {"function": None, "description": sa.description, "subagent": True}
 
+        # Skills (opt-in via --skills). Each registered skill tool is exposed to
+        # the model as a normal tool, but they are all sandbox-safe: the .mini
+        # directory lives *inside* --allowed-dir and the tools never accept a
+        # path from the model -- skill / script names are validated as single
+        # path segments and resolved under the .mini root. So skills are exposed
+        # even in sessions without --enable-shell (run_skill only executes a
+        # named Python file, never a free-form shell command).
+        self.enable_skills = bool(getattr(args, "enable_skills", False))
+        if self.enable_skills:
+            self.skills_tools_dict = skills.get_skills_tools_dict(self.allowed_dir)
+            self.llm_tools.extend(skills.get_skills_tools(self.allowed_dir))
+            self.tools_dict.update(self.skills_tools_dict)
+
         # Token accounting for the whole session.
         self.token_stats = {
             "prompt_tokens": 0,
@@ -366,7 +397,11 @@ class AgentSession:
         if self.args.system_prompt:
             system_prompt = self.args.system_prompt
         else:
-            system_prompt = prompts.system_prompt(tools_dict=self.tools_dict, allowed_dir=self.allowed_dir, plan_mode=self.plan_mode)
+            system_prompt = prompts.system_prompt(
+                tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
+                plan_mode=self.plan_mode,
+                skills_dir=self.allowed_dir if self.enable_skills else None,
+            )
 
         messages = [{"role": "system", "content": system_prompt}]
 

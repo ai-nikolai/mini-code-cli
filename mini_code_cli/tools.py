@@ -1,8 +1,18 @@
+"""mini_code_cli.tools -- the tool functions the agent loop can expose to the LLM.
+
+The plain functions in this module (``read_file``, ``grep``, ...) are the
+default tools. They can be discovered automatically (see
+:func:`util_get_tools` / :func:`util_get_tools_dict`). A caller may also pass an
+explicit ``functions`` mapping so another feature (e.g. :mod:`mini_code_cli.skills`,
+whose tools already have ``allowed_dir`` bound) can reuse the schema/formatting.
+"""
 import glob as glob_module
 import subprocess
 import urllib.parse
 import urllib.request
 import json
+import inspect
+import functools
 
 # Default timeout (seconds) for a single tool invocation. Mirrors the CLI's
 # --tool-timeout default so a tool that is slow/hangs gets aborted.
@@ -144,43 +154,96 @@ def run_shell_command(command, timeout=DEFAULT_TOOL_TIMEOUT, *args, **kwargs):
         return f"Error: {e}"
 
 
-def util_get_tools(allowed_tools=None, forbidden_tools=None):
-    """Return a JSON string describing all tool functions in this file for LLM usage."""
-    import inspect
-    tools = []
-    func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_")]
-    
-    if allowed_tools:
-        func_names = [name for name in func_names if name in allowed_tools]
-    if forbidden_tools:
-        func_names = [name for name in func_names if name not in forbidden_tools]
+def _local_function_names():
+    """Names of the real tool functions defined in this module (not util_/_)."""
+    return [name for name, obj in globals().items()
+            if callable(obj) and obj.__module__ == __name__
+            and not name.startswith('util_') and not name.startswith("_")]
 
-    for name in func_names:
-        func = globals()[name]
-        sig = inspect.signature(func)
-        parameters = {}
-        required = []
-        for param_name, param in sig.parameters.items():
-            # Skip *args and **kwargs: they are catch-alls, not real inputs the
-            # LLM should (or can) supply, so they must not appear in the schema.
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL,
-                              inspect.Parameter.VAR_KEYWORD):
-                continue
-            param_type = str(param.annotation) if param.annotation != inspect.Parameter.empty else "string"
-            # Simplify common types
-            if 'int' in param_type.lower() or 'integer' in param_type.lower():
-                param_type = "integer"
-            elif 'float' in param_type.lower() or 'number' in param_type.lower():
-                param_type = "number"
-            elif 'bool' in param_type.lower():
-                param_type = "boolean"
-            elif 'list' in param_type.lower() or 'array' in param_type.lower():
-                param_type = "array"
-            else:
-                param_type = "string"
-            parameters[param_name] = {"type": param_type}
-            if param.default == inspect.Parameter.empty:
-                required.append(param_name)
+
+def _param_type(annotation):
+    """Map a type annotation to an OpenAI-schema type string."""
+    param_type = str(annotation) if annotation != inspect.Parameter.empty else "string"
+    if 'int' in param_type.lower() or 'integer' in param_type.lower():
+        return "integer"
+    if 'float' in param_type.lower() or 'number' in param_type.lower():
+        return "number"
+    if 'bool' in param_type.lower():
+        return "boolean"
+    if 'list' in param_type.lower() or 'array' in param_type.lower():
+        return "array"
+    return "string"
+
+
+def _schema_params(func):
+    """Return ``(properties, required)`` for a tool callable's signature.
+
+    Handles both plain module functions and :func:`functools.partial` objects
+    (used by skills, which bind ``allowed_dir`` up front): parameters that are
+    already bound on a partial are omitted from the schema, and remaining
+    non-default parameters are marked required. ``*args`` / ``**kwargs``
+    catch-alls are always skipped.
+    """
+    if isinstance(func, functools.partial):
+        underlying = func.func
+        bound_kwargs = dict(func.keywords or {})
+        bound_positional = list(func.args)
+    else:
+        underlying = func
+        bound_kwargs = {}
+        bound_positional = []
+
+    sig = inspect.signature(underlying)
+    # Bind leading positional args (in signature order) to the partial's
+    # positional args, so a positional bound arg hides the right parameter.
+    positional_names = [
+        pn for pn, p in sig.parameters.items()
+        if p.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                          inspect.Parameter.VAR_KEYWORD)
+    ]
+    positional_bound = {}
+    for i, pname in enumerate(positional_names):
+        if i < len(bound_positional):
+            positional_bound[pname] = bound_positional[i]
+
+    properties = {}
+    required = []
+    for param_name, param in sig.parameters.items():
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL,
+                          inspect.Parameter.VAR_KEYWORD):
+            continue
+        if param_name in bound_kwargs or param_name in positional_bound:
+            # Already bound on the partial -- the LLM must not supply it.
+            continue
+        param_type = _param_type(param.annotation)
+        properties[param_name] = {"type": param_type}
+        if param.default == inspect.Parameter.empty:
+            required.append(param_name)
+    return properties, required
+
+
+def util_get_tools(allowed_tools=None, forbidden_tools=None, functions=None):
+    """Return a JSON string describing tool functions for LLM usage.
+
+    By default scans this module's own tool functions. When ``functions`` is a
+    {name: callable} mapping, those are described instead (in ``functions``
+    order) -- letting other features (e.g. skills, with ``allowed_dir`` already
+    bound) contribute their own tools while reusing this formatting.
+    """
+    tools = []
+
+    if functions:
+        items = list(functions.items())
+    else:
+        items = [(name, globals()[name]) for name in _local_function_names()]
+
+    if allowed_tools:
+        items = [(n, f) for n, f in items if n in allowed_tools]
+    if forbidden_tools:
+        items = [(n, f) for n, f in items if n not in forbidden_tools]
+
+    for name, func in items:
+        properties, required = _schema_params(func)
         tool = {
             "type": "function",
             "function": {
@@ -188,7 +251,7 @@ def util_get_tools(allowed_tools=None, forbidden_tools=None):
                 "description": func.__doc__ if func.__doc__ else f"Function {name}",
                 "parameters": {
                     "type": "object",
-                    "properties": parameters,
+                    "properties": properties,
                     "required": required
                 }
             }
@@ -197,25 +260,33 @@ def util_get_tools(allowed_tools=None, forbidden_tools=None):
     return tools
 
 
-def util_get_tools_dict(allowed_tools=None, forbidden_tools=None):
-    """Return a dictionary mapping tool names to their function objects."""
-    result = {}
-    func_names = [name for name, obj in globals().items() if callable(obj) and obj.__module__ == __name__ and not name.startswith('util_') and not name.startswith("_")]
-    if allowed_tools:
-        func_names = [name for name in func_names if name in allowed_tools]
-    if forbidden_tools:
-        func_names = [name for name in func_names if name not in forbidden_tools]
+def util_get_tools_dict(allowed_tools=None, forbidden_tools=None, functions=None):
+    """Return a dictionary mapping tool names to their function objects.
 
-    for name in func_names:
-        func = globals()[name]
+    ``functions`` is an optional {name: callable} mapping used in place of this
+    module's own functions (see :func:`util_get_tools`)."""
+    result = {}
+
+    if functions:
+        items = list(functions.items())
+    else:
+        items = [(name, globals()[name]) for name in _local_function_names()]
+
+    if allowed_tools:
+        items = [(n, f) for n, f in items if n in allowed_tools]
+    if forbidden_tools:
+        items = [(n, f) for n, f in items if n not in forbidden_tools]
+
+    for name, func in items:
         desc = func.__doc__ if func.__doc__ else f"Function {name}"
         result[name] = {"function": func, "description": desc}
     return result
+
 
 shell_tools = [
     "run_shell_command"
 ]
 
-if __name__=="__main__":
+if __name__ == "__main__":
     print(util_get_tools())
     # print(json.dumps(tools_dict, indent=4))

@@ -1,5 +1,5 @@
 # System prompt defining available tools and compaction behavior
-def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False):
+def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir=None):
     """
     Takes a list of tool names and returns a system prompt string.
 
@@ -26,6 +26,10 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False):
     if allowed_dir:
         allowed_dir_prompt = f"\nThe path you are allowed to operate in is called: {allowed_dir}"
 
+    skills_prompt = ""
+    if skills_dir is not None:
+        skills_prompt = "\n" + skills_instructions(skills_dir)
+
     plan_mode_prompt = ""
     if plan_mode:
         plan_mode_prompt = "\n" + plan_instructions()
@@ -33,7 +37,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False):
     
     prompt = f"""
 {base_prompt}
-{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}
+{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{skills_prompt}
 Important: Follow the user instruction. Do not create additional .md files (unless asked to do so). Do not create unit tests (unless asked to do so), etc.
 """
     return prompt.strip()
@@ -61,6 +65,36 @@ def plan_instructions():
         "These files must always be kept in the session directory so the work is "
         "easy to track and resume."
     )
+
+def skills_instructions(skills_dir):
+    """The extra system-prompt block when the skills feature is enabled.
+
+    Tells the agent it has a local ``.mini`` directory of reusable skills and
+    explains the four skill tools (see :mod:`mini_code_cli.skills`). ``skills_dir``
+    is the actual ``.mini`` path so the prompt can point at it concretely.
+    """
+    from . import skills as skills_mod
+    return (
+        "SKILLS MODE: You can work with reusable skills kept in the local "
+        f"`.mini` directory at: {skills_mod.skills_dir(skills_dir)}.\n"
+        "Each skill is a sub-directory containing a `skill.md` (what the skill is "
+        "/ how to use it) and optional executable Python helper scripts. There is "
+        "also a high-level `SKILLS.md` summary of all skills.\n"
+        "Use these tools to work with skills:\n"
+        "  * `list_skills`  - see which skills exist (name + one-line summary).\n"
+        "  * `read_skill`   - read a skill's `skill.md` by name, to learn how to "
+        "use it or which scripts it provides.\n"
+        "  * `create_skill` - create a new skill (its sub-directory and `skill.md`) "
+        "when you build a reusable capability. Give a clear, single-segment name "
+        "and a short summary. It is normal to then add Python helper scripts into "
+        "the skill's directory.\n"
+        "  * `run_skill`    - run one of a skill's Python scripts, passing any "
+        "command-line arguments via its `args`. Read the skill first to know "
+        "which script to run and what arguments it expects.\n"
+        "Prefer turning reusable helpers into skills (with a `skill.md` plus "
+        "scripts) so they can be reused later, rather than repeating one-off work.\n"
+    )
+
 
 def compaction_prompt(messages):
     """
