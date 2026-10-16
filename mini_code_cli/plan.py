@@ -179,9 +179,9 @@ class PlanManager:
 # stray files are created in the session directory.
 # ---------------------------------------------------------------------------
 
-def _plan_file_name(file_path, default, session_dir):
-    """Return ``(resolved_path, name)`` for ``file_path`` inside ``session_dir``,
-    or ``(None, None)`` when not allowed.
+def _plan_file_path(file_path, default, session_dir):
+    """Return the resolved path for ``file_path`` inside ``session_dir``, or
+    ``None`` when not allowed.
 
     Relative ``file_path`` values (e.g. ``CURRENT_PLAN.md``, which the prompt
     instructs the agent to use) are joined onto ``session_dir``; absolute values
@@ -195,11 +195,10 @@ def _plan_file_name(file_path, default, session_dir):
     else:
         resolved = os.path.realpath(os.path.join(session_dir, default or PLAN_FILENAME))
     if not sandbox.path_within(resolved, session_dir):
-        return None, None
-    name = os.path.basename(resolved)
-    if name not in PLAN_ALLOWED_NAMES:
-        return None, None
-    return resolved, name
+        return None
+    if os.path.basename(resolved) not in PLAN_ALLOWED_NAMES:
+        return None
+    return resolved
 
 
 def _session_dir_ok(session_dir):
@@ -214,7 +213,7 @@ def read_plan(file_path=None, session_dir=None):
     """
     if not _session_dir_ok(session_dir):
         return "Error: plan mode is not available in this context."
-    resolved, name = _plan_file_name(file_path, PLAN_FILENAME, session_dir)
+    resolved = _plan_file_path(file_path, PLAN_FILENAME, session_dir)
     if resolved is None:
         return (f"Error: only {PLAN_FILENAME} / {GOAL_FILENAME} may be read from "
                 f"the session directory.")
@@ -238,7 +237,7 @@ def write_plan(file_path, content=None, session_dir=None):
         return "Error: plan mode is not available in this context."
     if not file_path:
         return "Error: a file_path is required (CURRENT_PLAN.md or CURRENT_GOAL.md)."
-    resolved, name = _plan_file_name(file_path, None, session_dir)
+    resolved = _plan_file_path(file_path, None, session_dir)
     if resolved is None:
         return (f"Error: only {PLAN_FILENAME} / {GOAL_FILENAME} may be written to "
                 f"the session directory.")

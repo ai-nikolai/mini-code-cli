@@ -461,11 +461,8 @@ class AgentSession:
         self.enable_plan = bool(getattr(args, "plan", False))
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
         if self.enable_plan:
-            from .plan import get_plan_tools
-            self.plan_tools_dict = get_plan_tools(self.session_dir)
-            self.llm_tools.extend(
-                __import__("mini_code_cli.plan", fromlist=["get_plan_tool_schemas"])
-                .get_plan_tool_schemas(self.session_dir))
+            self.plan_tools_dict = plan_utils.get_plan_tools(self.session_dir)
+            self.llm_tools.extend(plan_utils.get_plan_tool_schemas(self.session_dir))
             self.tools_dict.update(self.plan_tools_dict)
 
     def _build_initial_messages(self):

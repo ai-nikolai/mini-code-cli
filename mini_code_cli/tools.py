@@ -222,6 +222,22 @@ def _schema_params(func):
     return properties, required
 
 
+def _callable_description(func, name):
+    """Return a human-friendly one-line description for a tool callable.
+
+    The default tools are plain functions whose ``__doc__`` is the description
+    the model sees. Tools contributed by the skills / plan features are built
+    with :func:`functools.partial` (to bind the base directory), and ``partial``
+    *replaces* ``__doc__`` with a generic "partial(func, ...)" string -- so for
+    a partial we look at the underlying function's ``__doc__`` instead, exactly
+    as ``_schema_params`` does when building the parameter schema. Fall back to
+    a generated name only when there is no docstring at all.
+    """
+    underlying = func.func if isinstance(func, functools.partial) else func
+    doc = (getattr(underlying, "__doc__", "") or "").strip()
+    return doc or f"Function {name}"
+
+
 def util_get_tools(allowed_tools=None, forbidden_tools=None, functions=None):
     """Return a JSON string describing tool functions for LLM usage.
 
@@ -248,7 +264,7 @@ def util_get_tools(allowed_tools=None, forbidden_tools=None, functions=None):
             "type": "function",
             "function": {
                 "name": name,
-                "description": func.__doc__ if func.__doc__ else f"Function {name}",
+                "description": _callable_description(func, name),
                 "parameters": {
                     "type": "object",
                     "properties": properties,
@@ -278,7 +294,7 @@ def util_get_tools_dict(allowed_tools=None, forbidden_tools=None, functions=None
         items = [(n, f) for n, f in items if n not in forbidden_tools]
 
     for name, func in items:
-        desc = func.__doc__ if func.__doc__ else f"Function {name}"
+        desc = _callable_description(func, name)
         result[name] = {"function": func, "description": desc}
     return result
 

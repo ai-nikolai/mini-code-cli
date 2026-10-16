@@ -377,8 +377,6 @@ def get_skills_tools_dict(allowed_dir):
 # always land in the correct place even when ``--allowed-dir`` points elsewhere.
 # ---------------------------------------------------------------------------
 
-import functools as _functools
-
 
 def _skill_rel_path(file_path, allowed_dir):
     """Return the on-disk path for ``file_path`` resolved under ``.mini``.
@@ -391,13 +389,10 @@ def _skill_rel_path(file_path, allowed_dir):
     """
     if not file_path:
         return None
-    root = skills_dir(allowed_dir)
-    base = skills_dir(allowed_dir)
-    target = os.path.join(base, file_path)
-    resolved = os.path.realpath(target)
-    resolved_root = os.path.realpath(root)
+    root = os.path.realpath(skills_dir(allowed_dir))
+    resolved = os.path.realpath(os.path.join(root, file_path))
     # Containment: the resolved target must live inside the ``.mini`` root.
-    if resolved != resolved_root and not resolved.startswith(resolved_root + os.sep):
+    if resolved != root and not resolved.startswith(root + os.sep):
         return None
     return resolved
 
@@ -443,8 +438,8 @@ def write_skill_file(file_path, content, allowed_dir):
 def _skill_file_functions(allowed_dir):
     """{name: functools.partial} for the two scoped skill-file tools."""
     return {
-        "read_skill_file": _functools.partial(read_skill_file, allowed_dir=allowed_dir),
-        "write_skill_file": _functools.partial(write_skill_file, allowed_dir=allowed_dir),
+        "read_skill_file": functools.partial(read_skill_file, allowed_dir=allowed_dir),
+        "write_skill_file": functools.partial(write_skill_file, allowed_dir=allowed_dir),
     }
 
 
