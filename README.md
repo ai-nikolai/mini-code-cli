@@ -26,7 +26,9 @@ mini-code --url "https://api.deepseek.com" --model "deepseek-v4-flash"
 ```bash
 mini-code --enable-shell --auto-mode
 mini-code -s -a --sudo
-mini-code -s -a -p -g -l --sudo #plan, previous session, subagents
+mini-code -s -a -p -g -l --sudo #plan, previous session, subagents (#or short-hand the next commands)
+mini-code --all
+mini-code --all-last
 ```
 
 4. Advanced usage:
