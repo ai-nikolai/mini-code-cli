@@ -197,4 +197,19 @@ vllm serve ornith-ai/Ornith-1.5-397B-FP8 \
     --trust-remote-code
 ```
 
+## Citation
+
+If you use `mini-code-cli` in your research or writing, please cite it using the BibTeX entry below:
+
+```bibtex
+@misc{mini-code-cli,
+  author       = {Rozanov, Nikolai},
+  title        = {mini-code-cli: A minimal, dependency-light coding agent},
+  year         = {2026},
+  version      = {0.0.8.4},
+  howpublished = {\url{https://github.com/ai-nikolai/mini-code-cli}},
+  note         = {A no-bloat, dependency-free agent CLI for experimenting with local LLMs.}
+}
+```
+
 ## (C) Nikolai Rozanov, 2026 - Present
