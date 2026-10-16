@@ -1,8 +1,8 @@
 [project]
 name = "mini-code-cli"
 # version = { file = "mini_code_cli/__init__.py", attr = "__version__" }
-version = "0.0.8.3"
-description = "Minimal Coding CLI"
+version = "0.0.8.4"
+description = "Mini Coding CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
