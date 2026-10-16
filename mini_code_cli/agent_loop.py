@@ -290,36 +290,10 @@ class AgentSession:
         self.model = model_name if model_name else args.model
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
 
-        # Which tools the LLM may call. The shell tool is only available when
-        # --enable-shell was passed.
-        forbidden = None if args.enable_shell else tools.shell_tools
-        self.tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden)
-        self.llm_tools = tools.util_get_tools(forbidden_tools=forbidden)
-
-        # Sub-agents (opt-in via --enable-subagents). Each registered sub-agent
-        # becomes an extra tool the model can call; see subagents/. A child
-        # session built by a sub-agent never sets enable_subagents, so sub-agents
-        # cannot recursively spawn sub-agents.
-        self.enable_subagents = bool(getattr(args, "enable_subagents", False))
-        self.subagents_registry = subagents.get_registry() if self.enable_subagents else {}
-        for sa in self.subagents_registry.values():
-            self.llm_tools.append(sa.tool_schema())
-            # Marked so _run_one_tool_call knows to delegate rather than call a
-            # real function.
-            self.tools_dict[sa.name] = {"function": None, "description": sa.description, "subagent": True}
-
-        # Skills (opt-in via --skills). Each registered skill tool is exposed to
-        # the model as a normal tool, but they are all sandbox-safe: the .mini
-        # directory lives *inside* --allowed-dir and the tools never accept a
-        # path from the model -- skill / script names are validated as single
-        # path segments and resolved under the .mini root. So skills are exposed
-        # even in sessions without --enable-shell (run_skill only executes a
-        # named Python file, never a free-form shell command).
-        self.enable_skills = bool(getattr(args, "enable_skills", False))
-        if self.enable_skills:
-            self.skills_tools_dict = skills.get_skills_tools_dict(self.allowed_dir)
-            self.llm_tools.extend(skills.get_skills_tools(self.allowed_dir))
-            self.tools_dict.update(self.skills_tools_dict)
+        # Which tools the LLM may call (shell / sub-agents / skills), and which
+        # of them are registered. Split out of __init__ for readability -- see
+        # _register_tools().
+        self._register_tools(args)
 
         # Token accounting for the whole session.
         self.token_stats = {
@@ -375,35 +349,24 @@ class AgentSession:
         restore_session = getattr(self.args, "restore_session", None)
         self.last_session_candidate = None
         self.loaded_last_session_dir = None
-        if getattr(self.args, "load_last_session", False) and not restore_session:
-            # Resolve the most recent session: the .mini pointer recorded under
-            # --allowed-dir is consulted first (an explicit record of the last
-            # session worked in), falling back to the timestamp heuristic over
-            # the cache dir.
-            detected = find_last_session_dir(
-                self.cache_dir,
-                allowed_dir=self.allowed_dir,
-                use_pointer=True,
-            )
-            if detected:
-                restore_session = detected
-                self.loaded_last_session_dir = detected
-        # If the user did NOT explicitly ask to resume a session (no
-        # --load-last-session / --restore-session), detect the most recent
-        # previous session so run() can offer it interactively below. This
-        # is only a *candidate*: the conversation still starts empty here and
-        # is spliced in only if the user confirms the resume (see
-        # _offer_resume_last_session). It is skipped entirely whenever a
-        # restore / load-last-session was requested, since those resolve their
-        # own session above and must not offer anything.
-        if not restore_session:
-            candidate = find_last_session_dir(
-                self.cache_dir,
-                allowed_dir=self.allowed_dir,
-                use_pointer=True,
-            )
-            if candidate:
-                self.last_session_candidate = candidate
+        # Resolve the "most recent session" exactly once, and reuse the result
+        # for both concerns below (an explicit --restore-session always wins and
+        # is used verbatim):
+        #   * --load-last-session turns the detected session into a real restore
+        #     (continue it under this new id), OR
+        #   * when the user did NOT explicitly ask to resume (no
+        #     --load-last-session / --restore-session), it becomes a resume
+        #     *candidate* that run() offers interactively (see
+        #     _offer_resume_last_session). The conversation still starts empty
+        #     here and is spliced in only if the user confirms.
+        # Skipped entirely once a real restore is already in hand, so those paths
+        # never offer anything.
+        detected = self._detect_last_session()
+        if getattr(self.args, "load_last_session", False) and not restore_session and detected:
+            restore_session = detected
+            self.loaded_last_session_dir = detected
+        if not restore_session and detected:
+            self.last_session_candidate = detected
         restore_directory = _restore_dir(restore_session)
         restored = load_history_from_dir(restore_directory) if restore_directory else None
         # A session built from an explicit restore / load-last-session reuses the
@@ -424,6 +387,56 @@ class AgentSession:
         # inspect and rewind to.
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
         save_summary(self.summary, self.cache_dir, self.unique_id)
+
+    def _detect_last_session(self):
+        """Resolve the most recent previous session dir, once.
+
+        Consults the .mini pointer recorded under --allowed-dir first (an
+        explicit record of the last session worked in), then falls back to the
+        timestamp heuristic over the cache dir. Returns the path, or None. The
+        constructor calls this a single time so the (relatively expensive)
+        pointer / directory scan does not run twice for the two independent
+        concerns -- --load-last-session vs. the interactive resume candidate.
+        """
+        return find_last_session_dir(
+            self.cache_dir,
+            allowed_dir=self.allowed_dir,
+            use_pointer=True,
+        )
+
+    def _register_tools(self, args):
+        """Wire up which tools the LLM may call, and register the opt-in ones.
+
+        Base tools depend on --enable-shell (the shell tool is withheld unless
+        shell is explicitly on). Then two opt-in features each add their own
+        sandbox-safe tools:
+
+          * Sub-agents (--enable-subagents): every registered sub-agent becomes
+            an extra tool. Its tools_dict entry has ``function=None`` so
+            _run_one_tool_call knows to *delegate* to a nested session rather
+            than call a real function. A child session never sets
+            enable_subagents, so sub-agents cannot recursively spawn sub-agents.
+          * Skills (--skills): the .mini directory (inside --allowed-dir) exposes
+            list/read/create/run_skill tools. They are sandbox-safe -- names are
+            validated as single path segments and resolved under .mini, so they
+            never accept an arbitrary path from the model and are usable even
+            without --enable-shell.
+        """
+        forbidden = None if args.enable_shell else tools.shell_tools
+        self.tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden)
+        self.llm_tools = tools.util_get_tools(forbidden_tools=forbidden)
+
+        self.enable_subagents = bool(getattr(args, "enable_subagents", False))
+        self.subagents_registry = subagents.get_registry() if self.enable_subagents else {}
+        for sa in self.subagents_registry.values():
+            self.llm_tools.append(sa.tool_schema())
+            self.tools_dict[sa.name] = {"function": None, "description": sa.description, "subagent": True}
+
+        self.enable_skills = bool(getattr(args, "enable_skills", False))
+        if self.enable_skills:
+            self.skills_tools_dict = skills.get_skills_tools_dict(self.allowed_dir)
+            self.llm_tools.extend(skills.get_skills_tools(self.allowed_dir))
+            self.tools_dict.update(self.skills_tools_dict)
 
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
@@ -778,7 +791,8 @@ class AgentSession:
                     self._persist()
                     if not should_continue:
                         break
-                    self.console.note("Continuing with LLM calls until no more tool calls.", "info")
+                    self.console.note(
+                        "Continuing with LLM calls until no more tool calls.", "info")
             except _Abort:
                 # Ctrl-C during a permission prompt already shut the session
                 # down; just unwind the loop quietly.
@@ -973,7 +987,11 @@ class AgentSession:
     # -- interactive input -------------------------------------------------
 
     def _read_user_line(self):
-        """Read one turn from the user. Returns the text to send, or None to quit."""
+        """Read one turn from the user. Returns the text to send, or None to quit.
+
+        An empty (blank) line is not a real instruction, so it is ignored and the
+        user is asked again rather than sending an empty turn to the model.
+        """
         self.console.short_divider()
         user_input = self.console.read_line(style_line_prompt("You:"))
         if user_input is None:  # EOF / Ctrl-C at the prompt
@@ -987,6 +1005,12 @@ class AgentSession:
             print_help(self.allowed_dir, self.server_url, self.args,
                        self.unique_id, self.cache_dir, self.model)
             # Nothing to send to the model; ask again.
+            return self._read_user_line()
+
+        # A blank line carries no instruction: say so and re-prompt instead of
+        # appending an empty user turn and spending an LLM call on it.
+        if not user_input.strip():
+            self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
             return self._read_user_line()
 
         return user_input

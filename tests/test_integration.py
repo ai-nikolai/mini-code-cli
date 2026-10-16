@@ -78,8 +78,15 @@ class TestAgentLoopIntegration(unittest.TestCase):
             return f.read()
 
     def test_plan_mode_end_to_end(self):
-        args = _make_args(cache_dir=self.tmp.name, allowed_dir=".", plan=True,
-                          prompt="Solve the puzzle")
+        # allowed_dir points at the throw-away temp dir (not "."): otherwise
+        # run() would consult the *real* .mini/last_session.json pointer in the
+        # repo, offer to resume it, and consume the scripted /quit. The plan
+        # files themselves live in the cache dir (session_dir), independent of
+        # allowed_dir, and the plan-file sandbox exemption keys off plan-mode +
+        # path-in-session-dir, so the temp allowed_dir changes nothing about the
+        # assertion.
+        args = _make_args(cache_dir=self.tmp.name, allowed_dir=self.tmp.name,
+                          plan=True, prompt="Solve the puzzle")
         sess = agent_loop.AgentSession(args, console=self.console)
 
         # /quit ends the interactive loop after the preset prompt has run.

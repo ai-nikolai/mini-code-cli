@@ -2,6 +2,27 @@ import requests
 import json
 
 
+def _coerce_usage_int(value):
+    """Best-effort: coerce a raw usage field to a non-negative int.
+
+    Servers sometimes report ``null``/``None`` or oddly-shaped numbers for token
+    usage. This normalises those to 0 so a downstream
+    ``accumulate_usage``/``usage["tool_calls"]`` assignment can never raise.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_or_zero(value):
+    """Return ``int(value)`` when that is safe, else 0 (for summing fields)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def determine_vllm_model(server_url, api_key=None, timeout=120):
     """In case of a vLLm local server, read the first served model id from
     ``{server_url}/v1/models`` so the caller does not have to name the model.
@@ -93,9 +114,12 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
 
         # Token usage, when the server reports it (many local servers do not).
         usage = response.json().get("usage", {}) or {}
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
-        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+        prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", 0))
+        completion_tokens = _coerce_usage_int(usage.get("completion_tokens", 0))
+        total_tokens = _coerce_usage_int(
+            usage.get("total_tokens",
+                      _usage_or_zero(usage.get("prompt_tokens"))
+                      + _usage_or_zero(usage.get("completion_tokens"))))
 
         return content, tool_calls, {
             "prompt_tokens": prompt_tokens,
@@ -125,4 +149,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         return None, None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")
+        return None, None, None
+    except Exception as e:  # noqa: BLE001 -- a network/parse hiccup must not crash the loop
+        print(f"Unexpected error calling OpenAI server: {e}")
         return None, None, None
