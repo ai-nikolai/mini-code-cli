@@ -16,4 +16,11 @@ DEFAULT_MODEL_URL = "http://0.0.0.0:30000"
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOOL_TIMEOUT = 120     # seconds before a single tool call is aborted
 DEFAULT_HTTP_TIMEOUT = 500     # seconds before an LLM HTTP request is aborted
-DEFAULT_MAX_MESSAGES = 150     # messages in history before it is compacted
+
+# History compaction is triggered by total accumulated prompt + completion
+# tokens (not a message count), so it reacts to how full the context window is
+# rather than how long the transcript has grown.
+DEFAULT_MAX_TOTAL_TOKENS = 125_000
+
+# Kept for backwards compatibility: the old message-count threshold.
+DEFAULT_MAX_MESSAGES = 150     # deprecated, retained for external callers/tests

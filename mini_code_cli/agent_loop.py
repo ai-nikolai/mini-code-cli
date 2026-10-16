@@ -41,7 +41,7 @@ from .config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_TOOL_TIMEOUT,
     DEFAULT_HTTP_TIMEOUT,
-    DEFAULT_MAX_MESSAGES,
+    DEFAULT_MAX_TOTAL_TOKENS,
 )
 from .persistence import (
     save_history,
@@ -205,16 +205,19 @@ def _make_tool_call_note(console, count):
 # history compaction
 # ---------------------------------------------------------------------------
 
-def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES):
-    """Compact the conversation history once it grows beyond ``max_messages``.
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_total_tokens=DEFAULT_MAX_TOTAL_TOKENS):
+    """Compact the conversation once it has used ``max_total_tokens`` tokens.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
-    When the history gets too large we ask the LLM to summarize it and replace the
-    old turns with that summary, keeping the original system prompt as the first
-    message. The compaction call itself is a single, tool-free request, so it
-    cannot trigger further tool calls or recurse into compaction.
+    The trigger is the session's total accumulated prompt + completion tokens (see
+    ``token_stats``), not a message count, so it reflects how full the context
+    window has grown rather than how many turns the transcript has.
+    When the token budget is exceeded we ask the LLM to summarize the history and
+    replace the old turns with that summary, keeping the original system prompt as
+    the first message. The compaction call itself is a single, tool-free request,
+    so it cannot trigger further tool calls or recurse into compaction.
     """
-    if len(messages) <= max_messages:
+    if token_stats.get("total_tokens", 0) < max_total_tokens:
         # No compaction: keep the same segment (history_index) and signal the
         # caller with (messages, did_compact=False, unchanged_index). Returning
         # the full triple here is required -- callers unpack all three, so a
@@ -961,6 +964,28 @@ class AgentSession:
         return os.path.basename(resolved) in (
             plan_utils.PLAN_FILENAME, plan_utils.GOAL_FILENAME)
 
+    def _is_plan_file_outside_session(self, name, tool_params):
+        """Whether a plan/goal write/read targets the wrong place (allowed_dir).
+
+        Plan mode keeps ``CURRENT_PLAN.md`` / ``CURRENT_GOAL.md`` in the session
+        directory (see :func:`_is_plan_file`), and :class:`PlanManager` also writes
+        them straight there. So a read/write of such a file *inside* ``--allowed-dir``
+        -- where the sandbox would normally allow it -- would create a stray copy in
+        the workspace; reject it so the two files only ever live in the session dir.
+        """
+        if not self.plan_mode or name not in ("read_file", "write_file"):
+            return False
+        path = tool_params.get("file_path", "")
+        if not path:
+            return False
+        try:
+            resolved = os.path.realpath(path)
+        except (ValueError, TypeError):
+            return False
+        session = os.path.realpath(os.path.join(self.cache_dir, self.unique_id))
+        return os.path.dirname(resolved) != session and \
+            os.path.basename(resolved) in (plan_utils.PLAN_FILENAME, plan_utils.GOAL_FILENAME)
+
     def _is_report_file(self, name, tool_params):
         """Whether a write targets this session's own sub-agent report.md.
 
@@ -1156,6 +1181,16 @@ class AgentSession:
                 self._append_tool_result(call_id,
                     f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
                 return
+        elif self._is_plan_file_outside_session(name, tool_params):
+            # A CURRENT_*.md write that would otherwise pass the sandbox (it is
+            # inside --allowed-dir) is still refused: those files live only in the
+            # session directory, so this stops a stray copy being written into the
+            # workspace.
+            self.console.note(
+                "CURRENT_PLAN.md / CURRENT_GOAL.md must stay in the session directory", "error")
+            self._append_tool_result(call_id,
+                "Error: CURRENT_PLAN.md / CURRENT_GOAL.md must stay in the session directory")
+            return
 
         # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
         shell_cmd = None
@@ -1249,10 +1284,12 @@ class AgentSession:
         signalling the loop to continue without asking the user."""
         # Keep long sessions within the model's context window. Compaction
         # rolls the session over to a fresh history segment (history_index + 1)
-        # and returns that bump so the recorder can stay flat across it.
+        # and returns that bump so the recorder can stay flat across it. The
+        # trigger is the session's total token usage, not a message count.
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
             self.args.llm_timeout, self.token_stats, self.history_index,
+            max_total_tokens=getattr(self.args, "max_total_tokens", DEFAULT_MAX_TOTAL_TOKENS),
         )
         if did_compact:
             self.history_index = new_index

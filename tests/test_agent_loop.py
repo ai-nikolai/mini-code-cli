@@ -54,11 +54,35 @@ class TestMaybeCompactWiring(unittest.TestCase):
         # messages are unchanged, no compaction happened, and the segment index
         # is passed straight through.
         msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
-        result = maybe_compact(list(msgs), "http://x", "m", "k", 60, {}, max_messages=100)
+        # token_stats is below the 100-token budget, so nothing is compacted.
+        stats = {"total_tokens": 0}
+        result = maybe_compact(list(msgs), "http://x", "m", "k", 60, stats, max_total_tokens=100)
         messages, did_compact, history_index = result
         self.assertEqual(messages, msgs)
         self.assertFalse(did_compact)
         self.assertEqual(history_index, 0)
+
+    def test_compaction_triggers_on_tokens_not_message_count(self):
+        # Compaction is decided by total accumulated tokens, never by how many
+        # messages there are: over a 100-token budget the 3 short messages must
+        # compact; under it they must not. We stub the summarization call so no
+        # network is needed (and use a full token_stats dict, since
+        # accumulate_usage does in-place += on its keys).
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": "b"}]
+        stats_over = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 150, "llm_calls": 0}
+        stats_under = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 90, "llm_calls": 0}
+        usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+        with mock.patch.object(agent_loop.utils, "call_openai_server",
+                               return_value=("summary", [], usage)):
+            _, did_over, _ = maybe_compact(msgs, "http://x", "m", "k", 60, stats_over, max_total_tokens=100)
+            _, did_under, _ = maybe_compact(msgs, "http://x", "m", "k", 60, stats_under, max_total_tokens=100)
+        self.assertTrue(did_over)
+        self.assertFalse(did_under)
+        # A missing total_tokens means 0 -> under budget -> no compaction.
+        _, did_missing, _ = maybe_compact(msgs, "http://x", "m", "k", 60, {})
+        self.assertFalse(did_missing)
 
     def test_accumulate_still_works(self):
         stats = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "llm_calls": 0}
@@ -224,11 +248,13 @@ class TestConversationHistory(unittest.TestCase):
         # would recurse (the wrapper calls the name it replaced), so we call the
         # private _maybe_compact_impl via the real function object captured first.
         real_compact = agent_loop.maybe_compact
+        # Force a tiny token budget regardless of what the loop passes, so
+        # compaction rolls the segment within a handful of turns.
         def compact(messages, server_url, model, api_key, llm_timeout, token_stats,
-                    history_index=0, max_messages=5):
+                    history_index=0, max_total_tokens=5):
             return real_compact(
                 messages, server_url, model, api_key, llm_timeout, token_stats,
-                history_index, max_messages)
+                history_index, max_total_tokens=5)
         with mock.patch.object(agent_loop, "maybe_compact", compact):
             for i in range(4):
                 _run_turn(self.sess, f"q{i}", f"a{i}")

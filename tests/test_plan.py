@@ -245,6 +245,22 @@ class TestSandboxExemptsPlanFiles(unittest.TestCase):
         self.assertEqual(last["role"], "tool")
         self.assertIn("not allowed outside allowed directory", last["content"])
 
+    def test_plan_file_write_into_allowed_dir_is_refused(self):
+        # A CURRENT_*.md write that would pass the sandbox (it is inside
+        # --allowed-dir) is still refused, so plan/goal files never land in the
+        # workspace -- only in the session (cache) dir.
+        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
+            sess = agent_loop.AgentSession(_make_args(cache_dir=self.tmp.name, allowed_dir=self.tmp.name, plan=True),
+                                           console=self.console)
+        call = {"id": "c1", "function": {"name": "write_file",
+                "arguments": '{"file_path": "%s", "content": "plan"}' %
+                             os.path.join(self.tmp.name, plan_utils.PLAN_FILENAME)}}
+        sess._run_one_tool_call(call)
+        last = sess.messages[-1]
+        self.assertEqual(last["role"], "tool")
+        self.assertIn("session directory", last["content"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, plan_utils.PLAN_FILENAME)))
+
 
 class TestPlanCompactionReinjectsPlan(unittest.TestCase):
     """After compaction the plan + goal must be re-appended to the messages."""
