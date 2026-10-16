@@ -619,20 +619,39 @@ class AgentSession:
         Appends ``initial_task`` as a user turn, then keeps stepping until the
         model makes no further tool calls (auto-mode). ``max_steps`` caps the
         number of model calls so a misbehaving sub-agent cannot loop forever.
+
+        The sub-agent records its work in its own cache dir: every step persists
+        history / recorder / usage into the child's own session folder, and it
+        seeds CURRENT_GOAL.md / CURRENT_PLAN.md (in plan mode) so each sub-session
+        is self-contained and easy to inspect or resume. A final record is left
+        even on a mid-run failure (the seeded goal is marked finished).
         """
         self.messages.append({"role": "user", "content": initial_task})
+        # Seed the goal up front so the child keeps a self-contained record in
+        # its own cache dir (a sub-agent always records a goal, independent of
+        # the parent's --plan flag). We use the child's own plan_manager here so
+        # nothing is written to the parent's session folder.
+        from .plan import PlanManager
+        child_plan = PlanManager(os.path.join(self.cache_dir, self.unique_id), enabled=True)
+        child_plan.write_goal(initial_task)
         steps = 0
-        while True:
-            should_continue = self._step()
+        try:
+            while True:
+                should_continue = self._step()
+                self._persist()
+                steps += 1
+                if max_steps and steps >= max_steps:
+                    self.console.note(
+                        f"Sub-agent reached max_steps ({max_steps}); stopping.", "warn")
+                    break
+                if not should_continue:
+                    break
+            return self._last_assistant_text()
+        finally:
+            # Leave a clean, finished record in the child's cache dir even on an
+            # error / early stop, so the sub-session is never left open.
+            child_plan.mark_finished()
             self._persist()
-            steps += 1
-            if max_steps and steps >= max_steps:
-                self.console.note(
-                    f"Sub-agent reached max_steps ({max_steps}); stopping.", "warn")
-                break
-            if not should_continue:
-                break
-        return self._last_assistant_text()
 
     def _last_assistant_text(self):
         """Return the content of the most recent assistant (non tool-call) turn."""
