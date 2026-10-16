@@ -99,6 +99,12 @@ class Console:
         # "… thinking" spinner state (see start_thinking / stop_thinking).
         self._thinking_thread = None
         self._thinking_stop = None
+        # "… calling tool" spinner state (see start_tool_call / stop_tool_call).
+        # Mirrors the thinking spinner: a daemon thread that rewrites a single
+        # live line in place (via the transient region) so the tool-execution
+        # phase looks alive without scrolling the transcript.
+        self._tool_call_thread = None
+        self._tool_call_stop = None
         # Live "transient" region (non-verbose mode) renders the tool-call area
         # and the usage line without scrolling the screen. We keep a single
         # invariant: whenever ``_transient_lines`` is > 0 a block of that many
@@ -427,6 +433,55 @@ class Console:
         thread = self._thinking_thread
         self._thinking_stop = None
         self._thinking_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def start_tool_call(self, message="Calling tool"):
+        """Start a background "… calling tool" spinner (non-scrolling).
+
+        Shown while the agent executes a tool call, mirroring
+        :meth:`start_thinking` which covers the LLM request. Runs a short
+        animation in a daemon thread that rewrites a single live line in place
+        via the transient region, so the wait looks alive without scrolling the
+        transcript. On a real colour/utf-8 TTY it animates in place; on piped /
+        ASCII output it simply prints one static line and starts no thread.
+        Stop it with :meth:`stop_tool_call` before drawing the next turn.
+        """
+        self.stop_tool_call()  # be defensive: never leak more than one spinner
+        if not self._can_clear_cursor():
+            self.emit(self.style(f"\u2026 {message}", fg="magenta", dim=True))
+            return
+        self._tool_call_stop = threading.Event()
+        self._tool_call_thread = threading.Thread(
+            target=self._spin_tool_call, args=(message,), daemon=True)
+        self._tool_call_thread.start()
+
+    def _spin_tool_call(self, message):
+        """Animation loop for the tool-call spinner (mirror of :meth:`_spin`)."""
+        stop = self._tool_call_stop
+        i = 0
+        while not stop.is_set():
+            dots = "\u2026 " * min((i % 3) + 1, 3)
+            i += 1
+            self.emit_transient(self.style(f"{dots}{message}", fg="magenta", dim=True))
+            stop.wait(0.3)
+        # Replace the spinner line with a blank so the following real output
+        # lands cleanly; the blank stays tracked as the transient block and is
+        # cleared by the next :meth:`emit` (e.g. the next assistant turn).
+        self.emit_transient(None)
+
+    def stop_tool_call(self):
+        """Stop the "… calling tool" spinner started by :meth:`start_tool_call`.
+
+        Signals the animation thread to finish its current frame and exit, then
+        joins it, so no writes race with the main thread's subsequent output.
+        Safe to call when no spinner is running (a no-op)."""
+        stop = self._tool_call_stop
+        thread = self._tool_call_thread
+        self._tool_call_stop = None
+        self._tool_call_thread = None
         if stop is not None:
             stop.set()
         if thread is not None and thread.is_alive():

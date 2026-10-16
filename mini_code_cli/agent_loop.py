@@ -581,6 +581,10 @@ class AgentSession:
         print_welcome(self.allowed_dir, self.server_url, self.args,
                       self.unique_id, self.cache_dir, self.model)
 
+        # Announce the session's unique id as an assistant-styled message so the
+        # user can see / copy the id this conversation is being saved under.
+        self._print_session_id()
+
         # Report the outcome of --load-last-session up front, so the user sees
         # whether we resumed an earlier conversation (under a brand-new id) or
         # started fresh because no previous session was found.
@@ -648,6 +652,20 @@ class AgentSession:
                 self.console.note("Interrupting: Mini Code Exiting...", "error")
                 # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
                 self._persist()
+
+    def _print_session_id(self):
+        """Print the session's unique id as an assistant-styled message.
+
+        A short, styled announcement (in the assistant accent) so the user can
+        see and copy the id the conversation is saved under -- the same id shown
+        in the welcome banner, but rendered as a transcript turn so it is easy
+        to spot and grep.
+        """
+        self.console.divider()
+        self.console.turn(
+            "Session id",
+            f"{self.unique_id}  (saved under {self.cache_dir})",
+            accent="green")
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
@@ -864,7 +882,7 @@ class AgentSession:
                        self.unique_id, self.cache_dir, self.model)
             return True
         if cmd in self.CLEAR_COMMANDS:
-            self.console.clear_screen()
+            self._clear_and_show_last()
             return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
@@ -892,12 +910,42 @@ class AgentSession:
                 return
         self._reset_history(target["turn"], target)
 
+    def _clear_and_show_last(self):
+        """Handle /clear: wipe the screen and re-print the last turn.
+
+        The conversation itself is unchanged; we just redraw the most recent
+        exchange so the user re-orients after clearing the view. If there is no
+        assistant reply yet, the last user turn is shown instead.
+        """
+        self.console.clear_screen()
+        last_role = last_text = None
+        for m in reversed(self.messages):
+            role = m.get("role")
+            content = m.get("content")
+            if role == "assistant" and not m.get("tool_calls") and content:
+                last_role, last_text = "Assistant", content
+                break
+            if role == "user" and content:
+                last_role, last_text = "You", content
+                break
+        if last_role is not None:
+            self.console.divider()
+            accent = "green" if last_role == "Assistant" else "cyan"
+            self.console.turn(last_role, last_text, accent=accent)
+
     # -- tool execution ----------------------------------------------------
 
     def _run_tool_calls(self, tool_calls):
         _make_tool_call_note(self.console, len(tool_calls))
-        for call in tool_calls:
-            self._run_one_tool_call(call)
+        # Show a "… calling tool" spinner (in-place, non-scrolling) while the
+        # tool(s) execute, mirroring the thinking spinner that covers the LLM
+        # call. Always stopped (finally) so it can never leak into the next turn.
+        self.console.start_tool_call()
+        try:
+            for call in tool_calls:
+                self._run_one_tool_call(call)
+        finally:
+            self.console.stop_tool_call()
 
     def _run_one_tool_call(self, call):
         call_id = call.get("id", "")
