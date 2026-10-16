@@ -3,7 +3,10 @@ PORT=30000
 
 echo "Starting Model."
 
-CUDA_VISIBLE_DEVICES=0 vllm serve ornith-ai/Ornith-1.5-35B-A3B \
+# MODEL="Qwen/Qwen3.8-27B"
+MODEL="ornith-ai/Ornith-1.5-35B-A3B"
+
+CUDA_VISIBLE_DEVICES=0 vllm serve ${MODEL} \
     --tensor-parallel-size 1 \
     --host 0.0.0.0 --port ${PORT} \
     --tensor-parallel-size 1 \
