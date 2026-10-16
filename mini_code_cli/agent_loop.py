@@ -138,6 +138,7 @@ def parse_args():
         args.enable_shell = True
         args.sudo = True
         args.auto_mode = True
+        args.skills = True
     
     if args.all_last:
         args.load_last_session = True
@@ -366,7 +367,13 @@ class AgentSession:
         # cache dir and continues it -- exactly like --restore-session, but without
         # needing to know the folder name. An explicit --restore-session always wins
         # and is used verbatim; otherwise the newest session is resolved here.
+        # A "last session" candidate -- only when the user did NOT explicitly
+        # ask to resume one (no --load-last-session / --restore-session): the
+        # most recent previous session in the cache dir. Unlike a real restore,
+        # the conversation starts empty here and is only spliced in if the user
+        # confirms they want it (see _offer_resume_last_session).
         restore_session = getattr(self.args, "restore_session", None)
+        self.last_session_candidate = None
         self.loaded_last_session_dir = None
         if getattr(self.args, "load_last_session", False) and not restore_session:
             # Resolve the most recent session: the .mini pointer recorded under
@@ -381,18 +388,35 @@ class AgentSession:
             if detected:
                 restore_session = detected
                 self.loaded_last_session_dir = detected
+        # If the user did NOT explicitly ask to resume a session (no
+        # --load-last-session / --restore-session), detect the most recent
+        # previous session so run() can offer it interactively below. This
+        # is only a *candidate*: the conversation still starts empty here and
+        # is spliced in only if the user confirms the resume (see
+        # _offer_resume_last_session). It is skipped entirely whenever a
+        # restore / load-last-session was requested, since those resolve their
+        # own session above and must not offer anything.
+        if not restore_session:
+            candidate = find_last_session_dir(
+                self.cache_dir,
+                allowed_dir=self.allowed_dir,
+                use_pointer=True,
+            )
+            if candidate:
+                self.last_session_candidate = candidate
         restore_directory = _restore_dir(restore_session)
         restored = load_history_from_dir(restore_directory) if restore_directory else None
+        # A session built from an explicit restore / load-last-session reuses the
+        # restored history (under this brand-new id, so the original is never
+        # overwritten); an idle start keeps the freshly built initial messages.
         self.messages = restored if restored is not None else self._build_initial_messages()
+        self._restore_from(restore_directory, restored)
         if restored is not None:
-            self._restore_usage_if_available(restore_session)
-            self._load_summary_if_restored(restore_directory)
-        else:
-            # --load-last-session asked for a session but nothing usable was found:
-            # don't advertise a load. The recorder starts empty and the first
-            # assistant / tool-call turn seeds turn 1 -- mirroring the restore
-            # path, which also has no leading system turn, so /history turn
-            # numbers stay consistent whether or not we restored.
+            # --load-last-session asked for a session but nothing usable was
+            # found: don't advertise a load. The recorder starts empty and the
+            # first assistant / tool-call turn seeds turn 1 -- mirroring the
+            # restore path, which also has no leading system turn, so /history
+            # turn numbers stay consistent whether or not we restored.
             self.loaded_last_session_dir = None
 
         # Snapshot the initial (or restored) messages as the first history segment
@@ -465,6 +489,28 @@ class AgentSession:
                 turn += 1
                 self.summary.append({"turn": turn, "what": "assistant",
                                      "history_file": 0, "index": i})
+
+    def _restore_from(self, directory, messages=None):
+        """Seed usage, recorder and messages for a restore under this id.
+
+        Shared by the constructor (for an explicit ``--restore-session`` /
+        ``--load-last-session``) and the interactive resume prompt. The caller
+        resolves and loads ``directory`` itself, then hands the loaded
+        ``messages`` here so all seeding lives in one place.
+
+        ``usage.json`` is layered *on top* of the in-memory totals (so a restore
+        under a brand-new session id accumulates cleanly), the recorder is
+        flattened across the segment boundary so ``/history`` / ``/reset`` stay
+        consistent, and ``self.messages`` becomes the restored snapshot.
+        Best-effort: a missing directory / unreadable files leave the session
+        unchanged (a fresh, empty history).
+        """
+        restored = messages if messages is not None else (
+            load_history_from_dir(directory) if directory else None)
+        self._restore_usage_if_available(directory)
+        self._load_summary_if_restored(directory)
+        if restored:
+            self.messages = restored
 
     def _record_turn(self, what, messages, history_index=None):
         """Append one entry to the high-level recorder.
@@ -584,11 +630,83 @@ class AgentSession:
                 f"Sub-agents enabled ({len(self.subagents_registry)} available: "
                 f"{', '.join(self.subagents_registry)}).", "info")
 
+    def _offer_resume_last_session(self):
+        """Offer to continue the most recent previous session, if one exists.
+
+        Only reached when the user did *not* already ask to resume a session
+        (``--load-last-session`` / ``--restore-session``), which resolve their
+        own before this and leave ``last_session_candidate`` unset. When a
+        candidate exists the user chooses between three outcomes:
+
+          * **Resume** -- splice the previous session's history into this one
+            (still under the brand-new id) and continue it, under a new id.
+          * **New** -- leave the conversation empty and start a fresh session.
+          * **Exit** -- stop here before any pointer is written or loop enters.
+
+        The choice is recorded by setting/clearing ``self.last_session_candidate``:
+        ``resume`` keeps it pointing at the previous session's directory (the
+        caller in :meth:`run` performs the restore); ``new`` clears it (nothing
+        to restore). Returns True when the user chose to exit so the caller
+        returns before writing any pointer or entering the loop.
+        """
+        if not self.last_session_candidate:
+            return False
+        choice = self._resume_choice()
+        if choice == "resume":
+            return False  # keep the candidate: run() restores it below.
+        # "new" -> clear the candidate (nothing to restore); "exit" -> clear
+        # and tell the caller to stop before writing a pointer / entering the
+        # loop.
+        self.last_session_candidate = None
+        return choice == "exit"
+
+    def _resume_choice(self):
+        """Prompt for the resume choice and return its label.
+
+        Returns one of ``"resume"``, ``"new"`` or ``"exit"``. The prompt
+        degrades cleanly on a non-TTY / piped console: an EOF / Ctrl-C (``read_line``
+        returns None) is treated as ``"exit"`` so the loop never spins on unread input.
+        """
+        self.console.emit(
+            self.console.style(
+                "A previous session was found. What would you like to do?", dim=True,
+                fg="cyan"))
+        self.console.emit("  1) Resume the previous session (continue where you left off)")
+        self.console.emit("  2) Start a new session (empty history)")
+        self.console.emit("  3) Exit (start nothing)")
+        while True:
+            answer = self.console.read_line(
+                self.console.style("Resume previous session? Type 1, 2, or 3: ", fg="cyan"))
+            if answer is None:
+                # EOF / Ctrl-C at the offer -> graceful exit, no session written.
+                return "exit"
+            choice = answer.strip().lower()
+            if choice in ("1", "resume"):
+                return "resume"
+            if choice in ("2", "new"):
+                return "new"
+            if choice in ("3", "exit"):
+                return "exit"
+            self.console.note("Please choose 1, 2, or 3.", "warn")
+
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
         self.print_announcements()
         print_welcome(self.allowed_dir, self.server_url, self.args,
                       self.unique_id, self.cache_dir, self.model)
+
+        # A previous session exists but the user did not explicitly ask to
+        # resume it. Offer them a choice; on "exit" we return here before
+        # writing any pointer or entering the loop, and we splice the
+        # restored history into this session if they pick "resume".
+        if self._offer_resume_last_session():
+            return
+        if self.last_session_candidate is not None:
+            restored_dir = self.last_session_candidate
+            self.last_session_candidate = None
+            restored = load_history_from_dir(restored_dir)
+            self._restore_from(restored_dir, restored)
+            self.loaded_last_session_dir = restored_dir
 
         # Announce the session's unique id as an assistant-styled message so the
         # user can see / copy the id this conversation is being saved under.

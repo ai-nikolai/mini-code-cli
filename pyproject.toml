@@ -1,7 +1,7 @@
 [project]
 name = "mini-code-cli"
 # version = { file = "mini_code_cli/__init__.py", attr = "__version__" }
-version = "0.1.0.2"
+version = "0.1.0.3"
 description = "Mini Coding Agent. Allows you to easily experiment with a small coding agent."
 readme = "README.md"
 requires-python = ">=3.10"
