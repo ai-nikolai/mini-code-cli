@@ -185,7 +185,10 @@ class SubAgent:
         max_steps = self.max_steps if max_steps is None else max_steps
         child_args = self._build_child_args(parent, task)
         # Swallow the nested transcript so the parent's screen is not spammed;
-        # only the parent's own notes/report get shown.
+        # only the parent's own notes/report get shown. The "Delegating" /
+        # "finished" notes are emitted by the *parent loop* (AgentSession
+        # ._run_subagent), not here -- that keeps a single announcement on the
+        # parent console rather than a duplicate one from this nested run().
         child_console = ui.Console(stream=io.StringIO(), color=False, unicode=False, verbose=False)
         try:
             child = agent_loop.AgentSession(child_args, console=child_console)
@@ -194,13 +197,13 @@ class SubAgent:
             # path the system prompt (built at system_prompt() time) told the
             # child to write to, so the two always agree.
             report_path = self._report_path(parent)
-            parent.console.note(
-                f"Delegating to sub-agent '{self.display_name}' (task: {_oneline(task, 80)})", "info")
             final_text = child._drive_auto(task, max_steps=max_steps)
-            summary = self._build_result(child, final_text, report_path)
-            parent.console.note(f"Sub-agent '{self.display_name}' finished.", "ok")
-            return summary
+            return self._build_result(child, final_text, report_path)
         except Exception as e:
+            # Turn any failure into an Error string the parent loop feeds back
+            # as the tool result (so the main agent sees why delegation failed
+            # and can react), rather than letting it propagate and crash the
+            # parent step.
             return f"Error: sub-agent '{self.display_name}' failed: {e}"
 
     def _build_child_args(self, parent, task):
