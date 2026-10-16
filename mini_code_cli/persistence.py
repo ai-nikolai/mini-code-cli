@@ -24,6 +24,7 @@ raising.
 import json
 import os
 import re
+import time
 
 from . import ui
 from .config import DEFAULT_CACHE_LOCATION
@@ -76,8 +77,112 @@ def generate_unique_id():
     return f"{timestamp}-{uuid.uuid4().hex[:8]}"
 
 
-def find_last_session_dir(cache_dir):
-    """Return the path to the most recently *active* session dir under ``cache_dir``.
+# ---------------------------------------------------------------------------
+# latest-session pointer (.mini)
+# ---------------------------------------------------------------------------
+
+# The .mini directory (inside the user's --allowed-dir) holds a tiny pointer to
+# the most recent session. --load-last-session consults this pointer *first*
+# (an explicit opt-in the user's environment recorded) before falling back to
+# the timestamp heuristic in find_last_session_dir().
+#
+# NOTE: .mini is also the skills feature's directory. The pointer is a single
+# dedicated file inside it (LAST_SESSION_FILENAME), so the two never collide and
+# the skills code (which only reads <skill-name>/ + SKILLS.md) is unaffected.
+SKILLS_DIRNAME = ".mini"
+LAST_SESSION_FILENAME = "last_session.json"
+
+
+def _last_session_dir_store(allowed_dir):
+    """Return the .mini directory for ``allowed_dir`` (creating it if needed).
+
+    Best-effort: never raises. Returns None if the directory cannot be ensured,
+    in which case the pointer is simply not consulted/updated.
+    """
+    if not allowed_dir:
+        return None
+    store = os.path.join(os.path.abspath(allowed_dir), SKILLS_DIRNAME)
+    try:
+        os.makedirs(store, exist_ok=True)
+        return store
+    except OSError as e:
+        ui.console.note(f"Could not use {store} for the latest-session pointer: {e}", "warn")
+        return None
+
+
+def save_last_session_pointer(allowed_dir, session_dir):
+    """Record ``session_dir`` as the latest session in ``allowed_dir/.mini``.
+
+    Writes a tiny JSON file (the absolute path plus a timestamp) so a later
+    --load-last-session run can resume the most recent session without scanning
+    the cache dir. Best-effort: never raises, returns the written path or None.
+    """
+    if not session_dir:
+        return None
+    store = _last_session_dir_store(allowed_dir)
+    if store is None:
+        return None
+    payload = {
+        "session_dir": os.path.abspath(session_dir),
+        "recorded_at": time.time(),
+    }
+    path = os.path.join(store, LAST_SESSION_FILENAME)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return path
+    except OSError as e:
+        ui.console.note(f"Could not record latest-session pointer: {e}", "warn")
+        return None
+
+
+def load_last_session_pointer(allowed_dir):
+    """Read the latest-session pointer recorded under ``allowed_dir/.mini``.
+
+    Returns the recorded session directory (a path into the cache folder), or
+    None if no pointer exists or it cannot be read. Best-effort: a missing or
+    malformed pointer simply yields None so the caller falls back to the
+    timestamp heuristic.
+    """
+    if not allowed_dir:
+        return None
+    store = os.path.join(os.path.abspath(allowed_dir), SKILLS_DIRNAME)
+    path = os.path.join(store, LAST_SESSION_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    session_dir = payload.get("session_dir")
+    if not session_dir or not os.path.isdir(session_dir):
+        return None
+    return session_dir
+
+
+def find_last_session_dir(cache_dir=None, allowed_dir=None, use_pointer=True):
+    """Return the path to the most recently *active* session dir.
+
+    When ``use_pointer`` and an ``allowed_dir`` are given, the .mini pointer
+    recorded by a previous run (see save_last_session_pointer) is consulted
+    *first* -- it is an explicit record of the session the user last worked in.
+    Only if that yields nothing do we fall back to the timestamp heuristic over
+    ``cache_dir`` (find_last_session_dir_by_mtime). Session folders with no
+    files are ignored. Never raises: a missing/unreadable cache dir simply
+    yields None.
+    """
+    if use_pointer and allowed_dir:
+        pointed = load_last_session_pointer(allowed_dir)
+        if pointed:
+            return pointed
+    return find_last_session_dir_by_mtime(cache_dir)
+
+
+def find_last_session_dir_by_mtime(cache_dir):
+    """Timestamp heuristic for the most recently *active* session dir.
 
     "Most recent" is decided by the newest modification time of any file inside
     each session folder (a session rewrites its ``history_{n}.json`` every step),

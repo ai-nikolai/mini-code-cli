@@ -115,6 +115,24 @@ class TestConsoleRendering(unittest.TestCase):
         self.assertIn("Assistant", text)
         self.assertIn("   line2", text)
 
+    def test_short_divider_renders_without_ansi(self):
+        c = ui.Console(stream=self.buf, color=False)
+        c.short_divider()
+        out = self.buf.getvalue().rstrip("\n")
+        # A short run of dashes, not the full-width divider.
+        self.assertTrue(set(out) <= {"-", " "})
+        self.assertLess(len(out.strip("-")), 12)
+        self.assertIn("-", out)
+
+    def test_short_divider_shorter_than_full_divider(self):
+        c = ui.Console(stream=self.buf, color=False)
+        c.short_divider()
+        short = len(self.buf.getvalue().rstrip("\n").strip())
+        self.buf.seek(0); self.buf.truncate()
+        c.divider()
+        full = len(self.buf.getvalue().rstrip("\n").strip())
+        self.assertLess(short, full)
+
     def test_welcome_renders_without_error(self):
         c = ui.Console(stream=self.buf, color=False)
         c.welcome("1.0", "id", "/cache", "/home", "http://x", "model",

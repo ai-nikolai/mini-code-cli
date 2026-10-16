@@ -52,6 +52,7 @@ from .persistence import (
     load_summary_from_dir,
     load_usage_from_dir,
     find_last_session_dir,
+    save_last_session_pointer,
     accumulate_usage,
     generate_unique_id,
     _restore_dir,
@@ -368,7 +369,15 @@ class AgentSession:
         restore_session = getattr(self.args, "restore_session", None)
         self.loaded_last_session_dir = None
         if getattr(self.args, "load_last_session", False) and not restore_session:
-            detected = find_last_session_dir(self.cache_dir)
+            # Resolve the most recent session: the .mini pointer recorded under
+            # --allowed-dir is consulted first (an explicit record of the last
+            # session worked in), falling back to the timestamp heuristic over
+            # the cache dir.
+            detected = find_last_session_dir(
+                self.cache_dir,
+                allowed_dir=self.allowed_dir,
+                use_pointer=True,
+            )
             if detected:
                 restore_session = detected
                 self.loaded_last_session_dir = detected
@@ -585,6 +594,13 @@ class AgentSession:
         # user can see / copy the id this conversation is being saved under.
         self._print_session_id()
 
+        # Record this session as the "latest" so a future --load-last-session can
+        # resume it without scanning the cache dir. This lives in the top-level
+        # loop's own directory (cache_dir/unique_id), and only the interactive
+        # run() writes it -- a sub-agent child drives via _drive_auto and would
+        # otherwise overwrite the pointer with its own buried path.
+        self._save_last_session_pointer()
+
         # Report the outcome of --load-last-session up front, so the user sees
         # whether we resumed an earlier conversation (under a brand-new id) or
         # started fresh because no previous session was found.
@@ -616,6 +632,7 @@ class AgentSession:
                 # 1) Get the user's turn: the one-shot preset, or a fresh line.
                 if pending is not None:
                     self.console.rule(title="Preset prompt", char="=", fg="cyan")
+                    self.console.short_divider()
                     self.console.turn("You", pending, accent="cyan")
                     user_input = pending
                     pending = None
@@ -654,18 +671,24 @@ class AgentSession:
                 self._persist()
 
     def _print_session_id(self):
-        """Print the session's unique id as an assistant-styled message.
+        """Print the session's unique id as a minimal "Assistant" turn.
 
-        A short, styled announcement (in the assistant accent) so the user can
-        see and copy the id the conversation is saved under -- the same id shown
-        in the welcome banner, but rendered as a transcript turn so it is easy
-        to spot and grep.
+        Instead of a banner/header the id is rendered as an assistant-styled
+        (green) turn carrying *only* the id in brackets, so the user can see /
+        copy the id this conversation is being saved under without the noise of
+        the extra "saved under" line.
         """
-        self.console.divider()
-        self.console.turn(
-            "Session id",
-            f"{self.unique_id}  (saved under {self.cache_dir})",
-            accent="green")
+        self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
+
+    def _save_last_session_pointer(self):
+        """Record this session's directory in --allowed-dir/.mini.
+
+        Writes the .mini pointer that a later --load-last-session consults first
+        (see save_last_session_pointer). Best-effort: never raises, so a pointer
+        hiccup can never break the interactive session.
+        """
+        save_last_session_pointer(self.allowed_dir,
+                                  os.path.join(self.cache_dir, self.unique_id))
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
@@ -833,6 +856,7 @@ class AgentSession:
 
     def _read_user_line(self):
         """Read one turn from the user. Returns the text to send, or None to quit."""
+        self.console.short_divider()
         user_input = self.console.read_line(style_line_prompt("You:"))
         if user_input is None:  # EOF / Ctrl-C at the prompt
             self.console.note("Thank you. Goodbye! Saving history...", "info")

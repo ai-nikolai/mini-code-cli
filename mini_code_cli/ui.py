@@ -371,6 +371,16 @@ class Console:
         """
         self.emit(self.style("-" * self.width, fg="gray", dim=True))
 
+    def short_divider(self, char="-", width=8, fg="gray"):
+        """Render a short horizontal delimiter line (not the full width).
+
+        Used to set off the user's own "You:" turn from the preceding assistant
+        reply with a light, unobtrusive rule rather than a full-width divider.
+        Defaults to a plain ASCII dash so it renders consistently regardless of
+        the console's unicode setting.
+        """
+        self.emit(self.style(char * width, fg=fg, dim=True))
+
     def clear_screen(self):
         """Clear the terminal and move the cursor to the top-left.
 
