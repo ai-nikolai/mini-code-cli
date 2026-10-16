@@ -206,9 +206,9 @@ If you use `mini-code-cli` in your research or writing, please cite it using the
   author       = {Rozanov, Nikolai},
   title        = {mini-code-cli: A minimal, dependency-light coding agent},
   year         = {2026},
-  version      = {0.0.8.4},
+  version      = {0.1.0.0},
   howpublished = {\url{https://github.com/ai-nikolai/mini-code-cli}},
-  note         = {A no-bloat, dependency-free agent CLI for experimenting with local LLMs.}
+  note         = {A no-bloat, dependency-free agent CLI for experimenting.}
 }
 ```
 
