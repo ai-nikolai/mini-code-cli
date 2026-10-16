@@ -1,4 +1,4 @@
-"""mini_code_cli.plan — support for ``--plan`` mode.
+"""mini_code_cli.plan -- support for ``--plan`` mode.
 
 In plan mode the agent keeps a small, human-readable "what am I working on"
 record in the session directory so both the model and the user can track the
@@ -9,21 +9,36 @@ active goal and the plan for reaching it:
     a short running log (e.g. an entry recording when a goal was set/changed,
     and when it was finished).
 
-The plan document itself is authored by the agent (the system prompt tells it
-to, and it uses its ``write_file`` tool). This manager owns the parts the loop
-is responsible for -- seeding/reading the goal, reading the plan back so history
-compaction can re-inject it, and appending the "goal finished" / goal-change log
-entries. It is deliberately free of any network or terminal dependency, and
-every method is a no-op when disabled, so it is trivial to unit-test in
-isolation.
+Two sandbox-scoped tools (:func:`read_plan` / :func:`write_plan`) let the agent
+read and rewrite these files from *inside* the loop. Unlike :class:`PlanManager`
+(which the loop uses directly), these go through the normal tool path and are
+confined to the session directory via :func:`mini_code_cli.sandbox.path_within`,
+so the prompt telling the agent to maintain the tracking files cannot be evaded.
+
+The plan files always live in the session directory (``cache_dir/<unique_id>``)
+-- i.e. the *cache* dir, independent of ``--allowed-dir``. Because that dir is
+usually outside ``--allowed-dir``, the two tools confine themselves to it and
+the prompt also points the agent at the concrete path. A read/write outside the
+session directory, or of any file that is not one of the two plan files, is a
+no-op that returns an error, so the tracking files cannot be moved or symlinked
+out.
 """
 
 import os
 from datetime import datetime
 
+from . import sandbox
+
 # The two tracking files kept in each session directory.
 PLAN_FILENAME = "CURRENT_PLAN.md"
 GOAL_FILENAME = "CURRENT_GOAL.md"
+
+# The only names an agent read/write of a session-dir file may touch. This keeps
+# the plan tools from creating stray files in the session directory.
+PLAN_ALLOWED_NAMES = (PLAN_FILENAME, GOAL_FILENAME)
+
+# Tool names contributed when plan mode is enabled (exposed to the agent).
+PLAN_TOOL_NAMES = ("read_plan", "write_plan")
 
 
 class PlanManager:
@@ -47,7 +62,7 @@ class PlanManager:
         # new goal apart from the previous one. Kept in sync by write_goal().
         self.goal = goal
         # The last goal (stripped) that was logged into CURRENT_PLAN.md, so
-        # write_goal can tell a genuine change apart from a re-stated goal and
+        # write_goal can tell a genuine change apart from the re-stated goal and
         # avoid spamming the plan with duplicate "goal updated" entries.
         self._last_logged_goal = None
 
@@ -152,3 +167,115 @@ class PlanManager:
                 return f.read()
         except OSError:
             return None
+
+
+# ---------------------------------------------------------------------------
+# Tools: read_plan / write_plan
+#
+# These are the tools the *agent* uses to maintain the tracking files. They are
+# confined to the session directory (the cache dir, usually outside
+# --allowed-dir) via the shared sandbox primitive, and only the two known plan
+# filenames may live there -- so the tracking files cannot be relocated and no
+# stray files are created in the session directory.
+# ---------------------------------------------------------------------------
+
+def _plan_file_name(file_path, default, session_dir):
+    """Return ``(resolved_path, name)`` for ``file_path`` inside ``session_dir``,
+    or ``(None, None)`` when not allowed.
+
+    Relative ``file_path`` values (e.g. ``CURRENT_PLAN.md``, which the prompt
+    instructs the agent to use) are joined onto ``session_dir``; absolute values
+    are honored verbatim. Either way the resolved path must live inside
+    ``session_dir`` and resolve to one of the allowed plan file names, so the
+    tracking files cannot be relocated outside the cache directory.
+    """
+    if file_path:
+        resolved = os.path.realpath(os.path.join(session_dir, file_path)
+                                    if not os.path.isabs(file_path) else file_path)
+    else:
+        resolved = os.path.realpath(os.path.join(session_dir, default or PLAN_FILENAME))
+    if not sandbox.path_within(resolved, session_dir):
+        return None, None
+    name = os.path.basename(resolved)
+    if name not in PLAN_ALLOWED_NAMES:
+        return None, None
+    return resolved, name
+
+
+def _session_dir_ok(session_dir):
+    return session_dir is not None
+
+
+def read_plan(file_path=None, session_dir=None):
+    """Read a plan tracking file (CURRENT_PLAN.md or CURRENT_GOAL.md).
+
+    Parameters: file_path (optional). Only a file inside the session directory
+    is honored; the target must be one of the two plan file names.
+    """
+    if not _session_dir_ok(session_dir):
+        return "Error: plan mode is not available in this context."
+    resolved, name = _plan_file_name(file_path, PLAN_FILENAME, session_dir)
+    if resolved is None:
+        return (f"Error: only {PLAN_FILENAME} / {GOAL_FILENAME} may be read from "
+                f"the session directory.")
+    if not os.path.isfile(resolved):
+        return None
+    try:
+        with open(resolved, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        return f"Error: {e}"
+
+
+def write_plan(file_path, content=None, session_dir=None):
+    """Write to a plan tracking file (CURRENT_PLAN.md or CURRENT_GOAL.md).
+
+    Parameters: file_path, content. Only a file inside the session directory is
+    honored, and it must be one of the two plan file names, so the tracking
+    files cannot be relocated outside the cache directory.
+    """
+    if not _session_dir_ok(session_dir):
+        return "Error: plan mode is not available in this context."
+    if not file_path:
+        return "Error: a file_path is required (CURRENT_PLAN.md or CURRENT_GOAL.md)."
+    resolved, name = _plan_file_name(file_path, None, session_dir)
+    if resolved is None:
+        return (f"Error: only {PLAN_FILENAME} / {GOAL_FILENAME} may be written to "
+                f"the session directory.")
+    try:
+        os.makedirs(session_dir, exist_ok=True)
+        with open(resolved, "w", encoding="utf-8") as f:
+            f.write(content or "")
+        return f"Wrote to {resolved}"
+    except OSError as e:
+        return f"Error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Wiring (tool schemas + bound functions)
+# ---------------------------------------------------------------------------
+
+def _plan_functions(session_dir):
+    """{name: functools.partial} for the two plan tools, session_dir bound."""
+    import functools
+    return {
+        "read_plan": functools.partial(read_plan, session_dir=session_dir),
+        "write_plan": functools.partial(write_plan, session_dir=session_dir),
+    }
+
+
+def get_plan_tools(session_dir):
+    """Return the {name: {function, description}} mapping for the plan tools.
+
+    Mirrors ``skills.get_skills_tools_dict``: the four plan tools are built
+    directly with ``session_dir`` already bound, so the agent (and the runner)
+    receive a clean schema and bound callables without extra wiring.
+    """
+    from . import tools
+    return tools.util_get_tools_dict(functions=_plan_functions(session_dir))
+
+
+def get_plan_tool_schemas(session_dir):
+    """Return the OpenAI tool schemas for the two plan tools."""
+    from . import tools
+    return tools.util_get_tools(functions=_plan_functions(session_dir))

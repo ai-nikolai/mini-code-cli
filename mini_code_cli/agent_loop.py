@@ -290,6 +290,10 @@ class AgentSession:
         self.model = model_name if model_name else args.model
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
 
+        # Unique session id must exist before _register_tools(), which builds
+        # the plan-mode session dir (and thus the plan tools) from it.
+        self.unique_id = generate_unique_id()
+
         # Which tools the LLM may call (shell / sub-agents / skills), and which
         # of them are registered. Split out of __init__ for readability -- see
         # _register_tools().
@@ -303,8 +307,6 @@ class AgentSession:
             "llm_calls": 0,
             "tool_calls": 0,
         }
-
-        self.unique_id = generate_unique_id()
 
         # Plan-mode tracking (see plan.py). Always instantiated so the loop can
         # call it unconditionally; every method no-ops when --plan is disabled.
@@ -440,6 +442,32 @@ class AgentSession:
             self.llm_tools.extend(skills.get_skills_tools(self.allowed_dir))
             self.tools_dict.update(self.skills_tools_dict)
 
+        # Scoped skill-file tools (read_skill_file / write_skill_file) let the
+        # agent create/edit skill files, skill.md and helper scripts. They are
+        # confined to the ``.mini`` skills directory (see skills.py) via the
+        # shared sandbox primitive, so skill files always land inside .mini even
+        # when --allowed-dir points elsewhere.
+        if self.enable_skills:
+            self.skills_file_tools_dict = skills.get_skills_file_tools_dict(self.allowed_dir)
+            self.llm_tools.extend(skills.get_skills_file_tools(self.allowed_dir))
+            self.tools_dict.update(self.skills_file_tools_dict)
+
+        # Plan-mode tools (read_plan / write_plan) let the agent maintain its
+        # own tracking files (CURRENT_PLAN.md / CURRENT_GOAL.md) in its own
+        # session directory. Those files live in the cache dir -- usually
+        # outside --allowed-dir -- and each tool confines itself there via the
+        # shared sandbox primitive (see plan.py), so the agent cannot relocate
+        # them.
+        self.enable_plan = bool(getattr(args, "plan", False))
+        self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+        if self.enable_plan:
+            from .plan import get_plan_tools
+            self.plan_tools_dict = get_plan_tools(self.session_dir)
+            self.llm_tools.extend(
+                __import__("mini_code_cli.plan", fromlist=["get_plan_tool_schemas"])
+                .get_plan_tool_schemas(self.session_dir))
+            self.tools_dict.update(self.plan_tools_dict)
+
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
         if self.args.system_prompt:
@@ -449,6 +477,7 @@ class AgentSession:
                 tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
                 plan_mode=self.plan_mode,
                 skills_dir=self.allowed_dir if self.enable_skills else None,
+                session_dir=self.session_dir,
             )
 
         messages = [{"role": "system", "content": system_prompt}]

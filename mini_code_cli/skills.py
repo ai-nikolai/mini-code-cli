@@ -363,3 +363,98 @@ def get_skills_tools_dict(allowed_dir):
     """Return {name: bound-function} for the four skill tools."""
     from . import tools
     return tools.util_get_tools_dict(functions=_skill_functions(allowed_dir))
+
+
+# ---------------------------------------------------------------------------
+# Tools: read_skill_file / write_skill_file
+#
+# These let the agent read and write files *inside* the ``.mini`` skills
+# directory (skill.md files, helper scripts, etc.). They are deliberately
+# separate from the named skill_* tools above: they take an explicit path inside
+# the ``.mini`` directory and are confined to it via the shared sandbox
+# primitive (see :mod:`mini_code_cli.sandbox`), so a skill file can never be
+# read from or written outside ``.mini``. This is what guarantees skill files
+# always land in the correct place even when ``--allowed-dir`` points elsewhere.
+# ---------------------------------------------------------------------------
+
+import functools as _functools
+
+
+def _skill_rel_path(file_path, allowed_dir):
+    """Return the on-disk path for ``file_path`` resolved under ``.mini``.
+
+    ``file_path`` is treated as a path *relative* to the ``.mini`` skills
+    directory (e.g. ``my_skill/skill.md``) and is joined onto the ``.mini``
+    root, then resolved. Returns ``None`` when the resolved path does not stay
+    inside ``.mini`` (path traversal / absolute paths / escaping the skills
+    root).
+    """
+    if not file_path:
+        return None
+    root = skills_dir(allowed_dir)
+    base = skills_dir(allowed_dir)
+    target = os.path.join(base, file_path)
+    resolved = os.path.realpath(target)
+    resolved_root = os.path.realpath(root)
+    # Containment: the resolved target must live inside the ``.mini`` root.
+    if resolved != resolved_root and not resolved.startswith(resolved_root + os.sep):
+        return None
+    return resolved
+
+
+def read_skill_file(file_path, allowed_dir):
+    """Read a file that lives inside the ``.mini`` skills directory.
+
+    Parameters: file_path -- a path relative to the ``.mini`` directory (e.g.
+    ``my_skill/skill.md``). Only files inside ``.mini`` are honored; anything
+    outside returns an error.
+    """
+    target = _skill_rel_path(file_path, allowed_dir)
+    if target is None:
+        return f"Error: file must be inside the .mini skills directory: {skills_dir(allowed_dir)}"
+    if not os.path.isfile(target):
+        return f"Error: no such file inside .mini: {file_path}"
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        return f"Error: {e}"
+
+
+def write_skill_file(file_path, content, allowed_dir):
+    """Write a file inside the ``.mini`` skills directory.
+
+    Parameters: file_path (a path relative to the ``.mini`` directory, e.g.
+    ``my_skill/skill.md``), content. Only files inside ``.mini`` are honored, so
+    a skill file can never be relocated outside the skills directory.
+    """
+    target = _skill_rel_path(file_path, allowed_dir)
+    if target is None:
+        return f"Error: file must be inside the .mini skills directory: {skills_dir(allowed_dir)}"
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(content or "")
+        return f"Wrote to {target}"
+    except OSError as e:
+        return f"Error: {e}"
+
+
+def _skill_file_functions(allowed_dir):
+    """{name: functools.partial} for the two scoped skill-file tools."""
+    return {
+        "read_skill_file": _functools.partial(read_skill_file, allowed_dir=allowed_dir),
+        "write_skill_file": _functools.partial(write_skill_file, allowed_dir=allowed_dir),
+    }
+
+
+def get_skills_file_tools_dict(allowed_dir):
+    """Return {name: {function, description}} for the two scoped skill-file tools."""
+    from . import tools
+    return tools.util_get_tools_dict(functions=_skill_file_functions(allowed_dir))
+
+
+def get_skills_file_tools(allowed_dir):
+    """Return the OpenAI tool schemas for the two scoped skill-file tools."""
+    from . import tools
+    return tools.util_get_tools(functions=_skill_file_functions(allowed_dir))

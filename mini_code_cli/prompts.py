@@ -1,11 +1,12 @@
 # System prompt defining available tools and compaction behavior
-def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir=None):
+def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir=None, session_dir=None):
     """
     Takes a list of tool names and returns a system prompt string.
 
     When ``plan_mode`` is True the prompt also instructs the agent to maintain
-    a running goal (CURRENT_GOAL.md) and plan (CURRENT_PLAN.md) in the session
-    directory -- see plan.py.
+    a running goal (CURRENT_GOAL.md) and plan (CURRENT_PLAN.md) -- using the
+    scoped read_plan / write_plan tools, which are confined to the session
+    directory ``session_dir`` (see plan.py).
     """
 
     if tools_dict:
@@ -32,7 +33,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
 
     plan_mode_prompt = ""
     if plan_mode:
-        plan_mode_prompt = "\n" + plan_instructions()
+        plan_mode_prompt = "\n" + plan_instructions(session_dir)
     
     
     prompt = f"""
@@ -43,17 +44,23 @@ Important: Follow the user instruction. Do not create additional .md files (unle
     return prompt.strip()
 
 
-def plan_instructions():
+def plan_instructions(session_dir=None):
     """The extra system-prompt block appended when ``--plan`` mode is enabled.
 
-    Tells the agent to maintain two tracking files in the session directory
-    (see plan.py): ``CURRENT_GOAL.md`` holding the user's latest instruction,
-    and ``CURRENT_PLAN.md`` holding the agent's plan for reaching it. The plan
-    file must be updated as the task progresses and marked finished when done.
+    Tells the agent to maintain two tracking files using the scoped plan tools
+    (read_plan / write_plan, defined in plan.py). Those tools write ONLY inside
+    the session directory ``session_dir`` (which lives in the cache dir and is
+    usually outside ``--allowed-dir``), so the agent must call those tools --
+    never the generic read_file / write_file -- to keep its records in place.
     """
+    where = session_dir if session_dir else "the session directory (in the cache dir)"
     return (
         "PLAN MODE: You must keep your work organized in two files in the "
-        "current session directory.\n"
+        f"session directory ({where}).\n"
+        "Use the plan tools ``write_plan`` and ``read_plan`` to do this -- "
+        "these are scoped so they write/read only inside the session directory, "
+        "and you must NOT use the generic read_file / write_file tools for "
+        "these files. The two files are:\n"
         "1. CURRENT_GOAL.md: at the very start, write the user's current "
         "instruction / goal (verbatim) to this file. Always keep it up to date "
         "with the user's latest instruction.\n"
@@ -62,16 +69,22 @@ def plan_instructions():
         "progress. Once you have completely finished the current goal, you MUST "
         "append an entry to CURRENT_PLAN.md clearly marking the task as finished "
         "(e.g. 'Task finished: <goal>').\n"
-        "These files must always be kept in the session directory so the work is "
-        "easy to track and resume."
+        "When updating, use write_plan with file_path 'CURRENT_PLAN.md' or "
+        "'CURRENT_GOAL.md' and content equal to the FULL file you want to store "
+        "(write_plan overwrites the whole file -- always write the complete, "
+        "updated contents, not just the new lines). Always keep both files in "
+        "the session directory so the work is easy to track and resume."
     )
 
 def skills_instructions(skills_dir):
     """The extra system-prompt block when the skills feature is enabled.
 
     Tells the agent it has a local ``.mini`` directory of reusable skills and
-    explains the four skill tools (see :mod:`mini_code_cli.skills`). ``skills_dir``
-    is the actual ``.mini`` path so the prompt can point at it concretely.
+    explains the skill tools (see :mod:`mini_code_cli.skills`). ``skills_dir``
+    is the parent allowed dir; the concrete ``.mini`` path is computed for the
+    prompt. The agent must maintain skill files with the scoped
+    read_skill_file / write_skill_file tools, which write/read ONLY inside the
+    ``.mini`` directory, so skill files always land in the right place.
     """
     from . import skills as skills_mod
     return (
@@ -79,7 +92,8 @@ def skills_instructions(skills_dir):
         f"`.mini` directory at: {skills_mod.skills_dir(skills_dir)}.\n"
         "Each skill is a sub-directory containing a `skill.md` (what the skill is "
         "/ how to use it) and optional executable Python helper scripts. There is "
-        "also a high-level `SKILLS.md` summary of all skills.\n"
+        "also a high-level `SKILLS.md` summary of all skills. All skill files live "
+        "inside the ``.mini`` directory above.\n"
         "Use these tools to work with skills:\n"
         "  * `list_skills`  - see which skills exist (name + one-line summary).\n"
         "  * `read_skill`   - read a skill's `skill.md` by name, to learn how to "
@@ -87,7 +101,16 @@ def skills_instructions(skills_dir):
         "  * `create_skill` - create a new skill (its sub-directory and `skill.md`) "
         "when you build a reusable capability. Give a clear, single-segment name "
         "and a short summary. It is normal to then add Python helper scripts into "
-        "the skill's directory.\n"
+        "the skill's directory. Use the scoped tools below (not the generic "
+        "read_file / write_file) so the skill files are written into the ``.mini`` "
+        "directory correctly.\n"
+        "  * `write_skill_file` - write a file into a skill's directory (e.g. "
+        "a new skill's `skill.md` or a helper script), giving its path inside "
+        "the ``.mini`` directory (e.g. \"my_skill/skill.md\"). This tool is "
+        "scoped so it can only write inside the ``.mini`` directory.\n"
+        "  * `read_skill_file`  - read a file that already lives inside the "
+        "``.mini`` directory (e.g. to check what an existing skill's script "
+        "contains). This tool is scoped so it can only read inside ``.mini``.\n"
         "  * `run_skill`    - run one of a skill's Python scripts, passing any "
         "command-line arguments via its `args`. Read the skill first to know "
         "which script to run and what arguments it expects.\n"
