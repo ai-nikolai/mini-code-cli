@@ -10,6 +10,7 @@ import io
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -142,3 +143,61 @@ class TestConsoleRendering(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConsoleParentInput(unittest.TestCase):
+    """A swallowed console (parent_console set) routes input to the parent.
+
+    Covers the sub-agent wiring: when a sub-agent's own console has its output
+    redirected away from the terminal, its interactive input (permission
+    answers, any further prompts) must be answered on the console that actually
+    owns the screen -- the parent -- so the main agent responds in place of the
+    sub-agent instead of the human or hanging on an answer nobody reads.
+    """
+
+    def setUp(self):
+        # A real parent console (no colour so it stays clean/piped).
+        self.parent_buf = io.StringIO()
+        self.parent = ui.Console(stream=self.parent_buf, color=False, unicode=False)
+        # The swallowed console: output goes to its own buffer, input routes to
+        # the parent (the console that owns the terminal).
+        self.child = ui.Console(stream=io.StringIO(), color=False, unicode=False,
+                                parent_console=self.parent)
+
+    def test_read_line_delegates_to_parent(self):
+        # Feeding stdin lines, the child must not read them itself; it forwards
+        # the whole prompt to the parent and returns what the parent read.
+        with mock.patch("builtins.input", return_value="hello") as m:
+            self.assertEqual(self.child.read_line("q: "), "hello")
+        # The prompt was passed straight to the parent's input() call.
+        self.assertEqual(m.call_args[0], ("q: ",))
+
+    def test_read_line_none_when_parent_reads_none(self):
+        # On EOF / Ctrl-C the parent returns None, and the child passes that
+        # straight through (no crash, no swallowed-but-unread value).
+        with mock.patch("builtins.input", side_effect=EOFError):
+            self.assertIsNone(self.child.read_line("q: "))
+
+    def test_read_line_without_parent_reads_itself(self):
+        # A standalone console (no parent) keeps reading input() directly -- the
+        # normal interactive path is unchanged.
+        standalone = ui.Console(stream=io.StringIO(), color=False, unicode=False)
+        with mock.patch("builtins.input", return_value="self") as m:
+            self.assertEqual(standalone.read_line("x: "), "self")
+        self.assertEqual(m.call_args[0], ("x: ",))
+
+    def test_ask_permission_box_and_answer_on_parent(self):
+        # The permission box must be drawn on the parent (the one on screen), and
+        # the answer read from the parent. When the parent reads 'y', proceed; when
+        # it reads 'n', refuse. This is what lets the main agent answer the
+        # sub-agent's permission prompt.
+        with mock.patch("builtins.input", return_value="y"):
+            self.assertTrue(self.child.ask_permission("run_shell_command", "{}"))
+        self.assertIn("Permission needed", self.parent_buf.getvalue())
+        self.assertIn("Tool       : run_shell_command", self.parent_buf.getvalue())
+
+        self.parent_buf.truncate(0)
+        self.parent_buf.seek(0)
+        with mock.patch("builtins.input", return_value="n"):
+            self.assertFalse(self.child.ask_permission("read_file", "{}"))
+

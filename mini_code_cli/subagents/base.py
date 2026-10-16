@@ -189,7 +189,14 @@ class SubAgent:
         # "finished" notes are emitted by the *parent loop* (AgentSession
         # ._run_subagent), not here -- that keeps a single announcement on the
         # parent console rather than a duplicate one from this nested run().
-        child_console = ui.Console(stream=io.StringIO(), color=False, unicode=False, verbose=False)
+        # The child's output is swallowed (streamed to a buffer so it does not
+        # spam the parent's screen), but its interactive input -- permission
+        # answers and any further prompts -- is forwarded to the *parent*'s
+        # console (the one that owns the terminal) via ``parent_console``. So the
+        # main agent answers the sub-agent's questions instead of the human, and
+        # instead of hanging on an answer nobody reads.
+        child_console = ui.Console(stream=io.StringIO(), color=False, unicode=False, verbose=False,
+                                   parent_console=parent.console)
         try:
             child = agent_loop.AgentSession(child_args, console=child_console)
             # The child writes its report into its own session dir. Read it
@@ -224,8 +231,13 @@ class SubAgent:
         child.tool_timeout = parent.args.tool_timeout
         # Behaviour.
         child.auto_mode = True          # sub-agents run unattended to completion
-        child.ask_permission = False
-        child.sudo = False
+        # Inherit the parent's permission behaviour so a sub-agent never acts
+        # with less (or more) authority than the main agent: --ask-permission
+        # means the child also asks, and --sudo means the child also runs every
+        # non-destructive call unattended. The shell-safety DENY tier is refused
+        # for the child just as it is for the parent (see _run_one_tool_call).
+        child.ask_permission = getattr(parent.args, "ask_permission", False)
+        child.sudo = getattr(parent.args, "sudo", False)
         child.agent_md = None
         child.system_prompt = self.system_prompt(task, parent)
         # Sandbox + shell (sub-agents never widen the parent's permissions).

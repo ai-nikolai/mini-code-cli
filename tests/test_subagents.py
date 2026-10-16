@@ -359,3 +359,38 @@ class TestSubAgentWiring(_BaseSession):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestChildInheritsPermissions(unittest.TestCase):
+    """A sub-agent child inherits the parent's permission behaviour, so it acts
+    with exactly the same authority as the main agent: --sudo => the child also
+    runs unattended, --ask-permission => the child also asks, otherwise it
+    proceeds without asking. This is what makes "run --sudo and subagents run
+    sudo" work."""
+
+    def _make_args(self, **kw):
+        a = _make_args(cache_dir="/tmp/x", allowed_dir=".", plan=True, enable_subagents=True)
+        a.__dict__.update(kw)
+        return a
+
+    def test_child_inherits_sudo(self):
+        parent = agent_loop.AgentSession(
+            self._make_args(sudo=True),
+            console=ui.Console(stream=io.StringIO(), color=False, unicode=False))
+        built = builtin.ResearchSubAgent()._build_child_args(parent, "do x")
+        self.assertTrue(built.sudo)
+
+    def test_child_inherits_ask_permission(self):
+        parent = agent_loop.AgentSession(
+            self._make_args(ask_permission=True),
+            console=ui.Console(stream=io.StringIO(), color=False, unicode=False))
+        built = builtin.ResearchSubAgent()._build_child_args(parent, "do x")
+        self.assertTrue(built.ask_permission)
+
+    def test_child_defaults_to_no_permission(self):
+        parent = agent_loop.AgentSession(
+            self._make_args(),
+            console=ui.Console(stream=io.StringIO(), color=False, unicode=False))
+        built = builtin.ResearchSubAgent()._build_child_args(parent, "do x")
+        self.assertFalse(built.ask_permission)
+        self.assertFalse(built.sudo)

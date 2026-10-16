@@ -87,8 +87,14 @@ class Console:
         Force a terminal width. ``None`` auto-detects (falling back to 80).
     """
 
-    def __init__(self, stream=None, color=None, unicode=None, width=None, verbose=True):
+    def __init__(self, stream=None, color=None, unicode=None, width=None, verbose=True, parent_console=None):
         self.stream = stream if stream is not None else sys.stdout
+        # ``parent_console`` lets a swallowed console (a sub-agent's own, whose
+        # output is redirected away from the screen) route its *interactive
+        # input* (the "You:" line, permission answers, ...) to the console that
+        # actually owns the terminal -- the human-facing one. It is None for a
+        # normal console, in which case input is read directly below.
+        self.parent_console = parent_console
         self._color = color
         self._unicode = unicode
         self._width = width
@@ -677,19 +683,30 @@ class Console:
         interactive prompt (the "You:" line, permission answers, ...) through
         the console keeps all input handling in one place.
         """
+        if self.parent_console is not None:
+            # A swallowed console (e.g. a sub-agent's) has its output redirected
+            # away from the terminal; route both the prompt and the typed answer
+            # through the console that actually owns the screen. The prompt
+            # string carries its own styling, so it renders identically here or
+            # there.
+            return self.parent_console.read_line(prompt_text)
         try:
             return input(prompt_text)
         except (EOFError, KeyboardInterrupt):
             return None
 
-    def ask_permission(self, name, params_str, shell_cmd=None, tier=None, reason=None):
-        """Draw a permission-prompt box and read the user's answer (y / yes).
+    def _permission_prompt_and_answer(self, name, params_str, shell_cmd, tier, reason):
+        """Draw the permission box and read the answer on the right console.
 
-        The box *and* the input both go through the console. Any previous
-        transient tool output is cleared first so the box renders cleanly.
-        Returns True to proceed.
+        Shared by :meth:`ask_permission`, so the box, the prompt and the input
+        all land on one console. For a *swallowed* console (a sub-agent's, whose
+        output is redirected to a buffer) the box is drawn on the console that
+        actually owns the terminal (``parent_console``) instead -- so the human
+        sees it and answers it -- and the parent tool-call spinner is restored
+        afterwards. For a normal console it simply operates on ``self``.
         """
-        self.clear_transient()
+        console = self.parent_console if self.parent_console is not None else self
+        console.clear_transient()
         lines = [f"Tool       : {name}", f"Parameters : {params_str}"]
         if shell_cmd is not None:
             snippet = self._oneline(shell_cmd, 120)
@@ -698,11 +715,30 @@ class Console:
                 lines.append(f"           : risky - needs your confirmation ({reason})")
             else:
                 lines.append(f"Command    : {snippet}")
-        self.print_box(lines, title="Permission needed", fg="yellow")
+        console.print_box(lines, title="Permission needed", fg="yellow")
         prompt = self.style("Proceed? Type 'y' or 'yes' and press Enter: ",
                             fg="yellow", bold=True)
-        answer = self.read_line(prompt)
+        answer = console.read_line(prompt)
+        if console is not self:
+            # The box was shown on the parent; restore its tool-call spinner (it
+            # was still running while the box was on screen) so the screen is
+            # consistent once the sub-agent continues.
+            console.stop_tool_call()
+            console.start_tool_call()
         return (answer or "").strip().lower() in ("y", "yes")
+
+    def ask_permission(self, name, params_str, shell_cmd=None, tier=None, reason=None):
+        """Draw a permission-prompt box and read the user's answer (y / yes).
+
+        The box *and* the input both go through this console. Any previous
+        transient tool output is cleared first so the box renders cleanly. For a
+        swallowed console (a sub-agent's) the whole box is rendered on the
+        console that owns the terminal (its ``parent_console``) instead, so the
+        human sees it and answers it -- the main agent responds in place of the
+        sub-agent. Returns True to proceed.
+        """
+        return self._permission_prompt_and_answer(
+            name, params_str, shell_cmd, tier, reason)
 
 
 # One shared default console used throughout the package.
