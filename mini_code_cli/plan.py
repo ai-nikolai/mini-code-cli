@@ -5,15 +5,17 @@ session directory (``cache_dir/<unique_id>`` -- i.e. the *cache* dir,
 independent of ``--allowed-dir``):
 
   * ``CURRENT_GOAL.md``  -- the user's latest instruction / goal (verbatim).
-  * ``CURRENT_PLAN.md``  -- a running log of the requests made, and a
-    "Task finished: <goal>" marker once the goal is complete.
+  * ``CURRENT_PLAN.md``  -- a running log of the requests made, plus the
+    current, generated step-by-step plan for the active goal (marked finished
+    once the goal is complete).
 
 :class:`PlanManager` is what the *loop* uses to read/write those files directly
 (plain ``open`` -- not through any agent tool -- so the records land even when
 the allowed dir is elsewhere). The agent itself does not author these files:
-the loop writes the goal after each user request, logs the request into the
-plan, re-injects them into the conversation after a history compaction, and
-marks the goal finished on shutdown.
+the loop writes the goal after each user request, asks the model (with no
+tools) to author the plan from the whole conversation, saves it, re-sends it
+into the conversation, re-injects both after a history compaction, and marks
+the goal finished on shutdown.
 """
 
 import os
@@ -36,6 +38,9 @@ class PlanManager:
         self.session_dir = session_dir
         self.enabled = enabled
         self.goal = goal
+        # The last plan the loop generated for the current goal. Kept in memory
+        # so a compaction re-injection (and the plan file) share one source.
+        self.plan = None
 
     @property
     def plan_path(self):
@@ -48,7 +53,7 @@ class PlanManager:
     def _append(self, text):
         """Append one dated line to CURRENT_PLAN.md (creating it if needed).
 
-        Shared by ``append_plan_line`` and ``mark_finished``. Best-effort and
+        Used by ``append_plan_line`` and ``mark_finished``. Best-effort and
         never raises: a plan-tracking hiccup must never break the agent loop.
         """
         if not self.enabled:
@@ -87,23 +92,41 @@ class PlanManager:
         """Log one user request (or other note) into CURRENT_PLAN.md.
 
         The loop calls this after every real user request so the running plan
-        reflects the work as it proceeds. Best-effort and never raises.
+        log reflects the work as it proceeds. Best-effort and never raises.
         """
         if not self.enabled:
             return
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._append(f"- [{stamp}] {text}")
 
-    def mark_finished(self, goal=None):
-        """Append a timestamped "finished" entry to CURRENT_PLAN.md."""
+    def write_plan(self, plan):
+        """Store the generated step-by-step plan for the current goal.
+
+        The loop asks the model (with no tools) to author the plan from the
+        whole conversation, then calls this to keep ``self.plan`` and the
+        ``CURRENT_PLAN.md`` file in sync with it. Best-effort and never raises.
+        """
         if not self.enabled:
             return
-        goal = goal or self.goal or self._read(self.goal_path) or "current goal"
+        plan = plan or ""
+        self.plan = plan
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._append(f"- [{stamp}] Task finished: {goal}")
+        try:
+            os.makedirs(self.session_dir, exist_ok=True)
+            with open(self.plan_path, "w", encoding="utf-8") as f:
+                f.write("# Current Plan\n\n")
+                if plan.strip():
+                    f.write(plan.strip() + "\n")
+                f.write(f"\n_Updated: {stamp}_\n")
+        except OSError:
+            pass
 
     def read_plan(self):
-        return self._read(self.plan_path)
+        """Return the current plan text from disk (or ``self.plan`` if absent)."""
+        if not self.enabled:
+            return None
+        text = self._read(self.plan_path)
+        return text if text is not None and text.strip() else self.plan
 
     def read_goal(self):
         return self._read(self.goal_path)
@@ -116,3 +139,11 @@ class PlanManager:
                 return f.read()
         except OSError:
             return None
+
+    def mark_finished(self, goal=None):
+        """Append a timestamped "finished" entry to CURRENT_PLAN.md."""
+        if not self.enabled:
+            return
+        goal = goal or self.goal or self._read(self.goal_path) or "current goal"
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._append(f"- [{stamp}] Task finished: {goal}")

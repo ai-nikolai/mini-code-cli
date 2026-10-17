@@ -802,6 +802,13 @@ class AgentSession:
 
                 # 2) Hand the user turn to the model and act on its tool calls.
                 self.messages.append({"role": "user", "content": user_input})
+
+                # In plan mode, ask the model (with no tools, like compaction)
+                # to author an actual step-by-step plan for this instruction,
+                # save it into CURRENT_PLAN.md, and re-inject it into the
+                # conversation so the model works from it.
+                if self.plan_mode:
+                    self._generate_plan_and_inject(user_input)
                 while True:
                     should_continue = self._step()
                     self._persist()
@@ -895,18 +902,62 @@ class AgentSession:
         """Record the user's latest request in the plan-mode tracking files.
 
         The loop owns these files (see plan.py), so every real user request
-        (a non-empty, non-slash line) is appended to CURRENT_PLAN.md as a
-        dated log entry and its text becomes the goal in CURRENT_GOAL.md.
-        Slash commands and blank input are not requests, so they are ignored.
-        No-op when --plan is off.
+        (a non-empty, non-slash line) becomes the goal in CURRENT_GOAL.md. A
+        concrete, step-by-step plan for that instruction is generated separately
+        (see :meth:`_generate_plan_and_inject`), so the plan is an actual plan
+        rather than a copy of the raw request. Slash commands and blank input are
+        not requests, so they are ignored. No-op when --plan is off.
         """
         if not self.plan_mode or user_input is None:
             return
         stripped = user_input.strip()
         if not stripped or stripped.startswith("/"):
             return
-        self.plan_manager.append_plan_line(stripped)
         self.plan_manager.write_goal(stripped)
+
+    def _generate_plan_and_inject(self, current_instruction):
+        """Ask the model to author a plan for the current instruction.
+
+        The loop owns the plan document (see plan.py), so it asks the model --
+        with no tools, exactly like history compaction -- to output a concrete,
+        ordered step-by-step plan for accomplishing ONLY ``current_instruction``,
+        using the whole conversation. The generated plan is written into
+        CURRENT_PLAN.md (see :meth:`PlanManager.write_plan`) and re-sent into the
+        conversation so the model can work from it.
+
+        The plan is appended *after* the current user turn (which the caller has
+        just added) so the model sees the request then its own plan. Best-effort:
+        a failed or empty plan call leaves the request/goal without a plan, so
+        the loop degrades to plain goal-following. No-op when --plan is off.
+        """
+        if not self.plan_mode:
+            return
+        plan_prompt_text = prompts.plan_prompt(self.messages, current_instruction)
+        plan_text = ""
+        try:
+            ui.console.note("Generating a plan for the current goal...", "info")
+            response, _, usage = utils.call_openai_server(
+                [{"role": "user", "content": plan_prompt_text}],
+                max_tokens=1024,
+                temperature=0.0,
+                model=self.model,
+                server_url=self.server_url,
+                api_key=self.api_key,
+                timeout=self.args.llm_timeout,
+            )
+            accumulate_usage(self.token_stats, usage)
+            plan_text = response or ""
+        except Exception as exc:
+            ui.console.note("Could not generate a plan: %s" % exc, "warn")
+
+        # Persist the generated plan to CURRENT_PLAN.md and re-inject it so the
+        # model works from the plan it just authored.
+        self.plan_manager.write_plan(plan_text)
+        if plan_text and plan_text.strip():
+            self.messages.append({
+                "role": "user",
+                "content": "Current plan for the goal (from CURRENT_PLAN.md):\n%s" % plan_text.strip(),
+            })
 
     def _finish_goal_and_shutdown(self):
         """Mark the active goal finished in CURRENT_PLAN.md, then quit/save.
