@@ -293,10 +293,18 @@ class AgentSession:
         # Unique session id must exist before _register_tools(), which builds
         # the plan-mode session dir (and thus the plan tools) from it.
         self.unique_id = generate_unique_id()
+        self.session_dir = os.path.join(self.cache_dir, self.unique_id)
 
-        # Which tools the LLM may call (shell / sub-agents / skills), and which
-        # of them are registered. Split out of __init__ for readability -- see
-        # _register_tools().
+        # Plan-mode tracking (see plan.py). Set before _register_tools() so the
+        # plan tools can be wired up; always instantiated so the loop can call
+        # it unconditionally -- every method no-ops when --plan is disabled.
+        self.plan_mode = bool(getattr(self.args, "plan", False))
+        self.plan_manager = plan_utils.PlanManager(
+            self.session_dir, enabled=self.plan_mode)
+
+        # Which tools the LLM may call (shell / sub-agents / skills / plan), and
+        # which of them are registered. Split out of __init__ for readability --
+        # see _register_tools().
         self._register_tools(args)
 
         # Token accounting for the whole session.
@@ -307,12 +315,6 @@ class AgentSession:
             "llm_calls": 0,
             "tool_calls": 0,
         }
-
-        # Plan-mode tracking (see plan.py). Always instantiated so the loop can
-        # call it unconditionally; every method no-ops when --plan is disabled.
-        self.plan_mode = bool(getattr(self.args, "plan", False))
-        self.plan_manager = plan_utils.PlanManager(
-            os.path.join(self.cache_dir, self.unique_id), enabled=self.plan_mode)
 
         # High-level recorder + history segments. Instead of a single ever-growing
         # history.json, a session keeps:
@@ -438,19 +440,11 @@ class AgentSession:
 
         self.enable_skills = bool(getattr(args, "enable_skills", False))
         if self.enable_skills:
-            self.skills_tools_dict = skills.get_skills_tools_dict(self.allowed_dir)
+            # list/create/run_skill + the scoped read/write_skill_file tools.
+            self.tools_dict.update(skills.get_skills_tools_dict(self.allowed_dir))
             self.llm_tools.extend(skills.get_skills_tools(self.allowed_dir))
-            self.tools_dict.update(self.skills_tools_dict)
-
-        # Scoped skill-file tools (read_skill_file / write_skill_file) let the
-        # agent create/edit skill files, skill.md and helper scripts. They are
-        # confined to the ``.mini`` skills directory (see skills.py) via the
-        # shared sandbox primitive, so skill files always land inside .mini even
-        # when --allowed-dir points elsewhere.
-        if self.enable_skills:
-            self.skills_file_tools_dict = skills.get_skills_file_tools_dict(self.allowed_dir)
+            self.tools_dict.update(skills.get_skills_file_tools_dict(self.allowed_dir))
             self.llm_tools.extend(skills.get_skills_file_tools(self.allowed_dir))
-            self.tools_dict.update(self.skills_file_tools_dict)
 
         # Plan-mode tools (read_plan / write_plan) let the agent maintain its
         # own tracking files (CURRENT_PLAN.md / CURRENT_GOAL.md) in its own
@@ -458,12 +452,10 @@ class AgentSession:
         # outside --allowed-dir -- and each tool confines itself there via the
         # shared sandbox primitive (see plan.py), so the agent cannot relocate
         # them.
-        self.enable_plan = bool(getattr(args, "plan", False))
-        self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+        self.enable_plan = self.plan_mode
         if self.enable_plan:
-            self.plan_tools_dict = plan_utils.get_plan_tools(self.session_dir)
+            self.tools_dict.update(plan_utils.get_plan_tools(self.session_dir))
             self.llm_tools.extend(plan_utils.get_plan_tool_schemas(self.session_dir))
-            self.tools_dict.update(self.plan_tools_dict)
 
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
