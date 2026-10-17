@@ -50,9 +50,11 @@ class ResearchSubAgent(SubAgent):
 class PlanSubAgent(SubAgent):
     """Draft or refine a step-by-step plan for a goal.
 
-    Always runs in plan mode and reports back by writing the plan it produced
-    into ``report.md`` so the parent can surface it. Useful for delegating the
-    "how do I even approach this?" step to a focused, throwaway agent.
+    Always runs in plan mode so the nested agent keeps its own CURRENT_PLAN.md /
+    CURRENT_GOAL.md maintenance (as a self-contained example), but produces the
+    plan as plain text and reports back by writing it into ``report.md`` so the
+    parent can surface it. Useful for delegating the "how do I even approach
+    this?" step to a focused, throwaway agent.
     """
 
     name = "planner"
@@ -65,15 +67,19 @@ class PlanSubAgent(SubAgent):
     max_steps = 5
 
     def wants_plan_mode(self, parent):
-        # The planner always runs plan-mode so the nested agent keeps a tidy
-        # CURRENT_PLAN.md / CURRENT_GOAL.md of its own.
+        # The planner always runs plan-mode so it demonstrates (and maintains)
+        # the loop-owned CURRENT_PLAN.md / CURRENT_GOAL.md files as a
+        # self-contained example, then reports the plan back via report.md.
         return True
 
     def system_prompt(self, task, parent):
         base = super().system_prompt(task, parent)
         return base + (
-            "\n\nOutput the plan as a numbered markdown list in CURRENT_PLAN.md, "
-            "then copy it verbatim into report.md so the main agent receives it."
+            "\n\nProduce a clear, step-by-step plan for this goal and return it "
+            "as text; copy it verbatim into report.md so the main agent receives "
+            "it. (The loop owns the actual CURRENT_PLAN.md / CURRENT_GOAL.md "
+            "tracking files -- this agent produces the plan as output, not by "
+            "writing those files.)"
         )
 
 

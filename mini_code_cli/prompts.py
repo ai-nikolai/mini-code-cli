@@ -3,10 +3,10 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
     """
     Takes a list of tool names and returns a system prompt string.
 
-    When ``plan_mode`` is True the prompt also instructs the agent to maintain
-    a running goal (CURRENT_GOAL.md) and plan (CURRENT_PLAN.md) -- using the
-    scoped read_plan / write_plan tools, which are confined to the session
-    directory ``session_dir`` (see plan.py).
+    When ``plan_mode`` is True the prompt also explains that the loop keeps a
+    running goal (CURRENT_GOAL.md) and plan (CURRENT_PLAN.md) in the session
+    directory (see plan.py) for the human to inspect; the model does not author
+    those files itself.
     """
 
     if tools_dict:
@@ -47,33 +47,26 @@ Important: Follow the user instruction. Do not create additional .md files (unle
 def plan_instructions(session_dir=None):
     """The extra system-prompt block appended when ``--plan`` mode is enabled.
 
-    Tells the agent to maintain two tracking files using the scoped plan tools
-    (read_plan / write_plan, defined in plan.py). Those tools write ONLY inside
-    the session directory ``session_dir`` (which lives in the cache dir and is
-    usually outside ``--allowed-dir``), so the agent must call those tools --
-    never the generic read_file / write_file -- to keep its records in place.
+    Explains that the loop -- not the agent -- maintains two human-readable
+    tracking files in the session directory (see plan.py): CURRENT_GOAL.md
+    (the user's latest instruction) and CURRENT_PLAN.md (a running log of the
+    work, finished when the goal is complete). They exist so the human can
+    inspect progress in the session directory; the model should just do the
+    work and not try to maintain these files itself (there are no tools for it,
+    and the files live outside ``--allowed-dir`` anyway).
     """
     where = session_dir if session_dir else "the session directory (in the cache dir)"
     return (
-        "PLAN MODE: You must keep your work organized in two files in the "
-        f"session directory ({where}).\n"
-        "Use the plan tools ``write_plan`` and ``read_plan`` to do this -- "
-        "these are scoped so they write/read only inside the session directory, "
-        "and you must NOT use the generic read_file / write_file tools for "
-        "these files. The two files are:\n"
-        "1. CURRENT_GOAL.md: at the very start, write the user's current "
-        "instruction / goal (verbatim) to this file. Always keep it up to date "
-        "with the user's latest instruction.\n"
-        "2. CURRENT_PLAN.md: first, write a clear, step-by-step plan for how you "
-        "will accomplish the goal. As you work, update this file to reflect "
-        "progress. Once you have completely finished the current goal, you MUST "
-        "append an entry to CURRENT_PLAN.md clearly marking the task as finished "
-        "(e.g. 'Task finished: <goal>').\n"
-        "When updating, use write_plan with file_path 'CURRENT_PLAN.md' or "
-        "'CURRENT_GOAL.md' and content equal to the FULL file you want to store "
-        "(write_plan overwrites the whole file -- always write the complete, "
-        "updated contents, not just the new lines). Always keep both files in "
-        "the session directory so the work is easy to track and resume."
+        "PLAN MODE: Two human-readable tracking files are kept in the "
+        f"session directory ({where}) and maintained by the loop, not by you, "
+        "so they can be used to track progress:\n"
+        "1. CURRENT_GOAL.md -- the user's latest instruction / goal.\n"
+        "2. CURRENT_PLAN.md -- a running log of the work performed, ending with "
+        "a 'Task finished: <goal>' marker once the goal is complete.\n"
+        "You do NOT write or edit these files (no tool does, and they live "
+        "outside the directory you are allowed to operate in); just carry out "
+        "the work. The current plan + goal are re-sent to you after any history "
+        "compaction so you can always see what you are still working toward."
     )
 
 def skills_instructions(skills_dir):

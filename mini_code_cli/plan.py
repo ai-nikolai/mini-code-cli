@@ -1,34 +1,26 @@
 """mini_code_cli.plan -- support for ``--plan`` mode.
 
-In plan mode the agent keeps two small, human-readable tracking files in the
+In plan mode the *loop* keeps two small, human-readable tracking files in the
 session directory (``cache_dir/<unique_id>`` -- i.e. the *cache* dir,
 independent of ``--allowed-dir``):
 
   * ``CURRENT_GOAL.md``  -- the user's latest instruction / goal (verbatim).
-  * ``CURRENT_PLAN.md``  -- the agent's current plan, with a finished entry
-    appended when the goal is done.
+  * ``CURRENT_PLAN.md``  -- a running log of the requests made, and a
+    "Task finished: <goal>" marker once the goal is complete.
 
-:class:`PlanManager` is what the *loop* uses to write/read those files directly
-(plain ``open`` -- not the file tools -- so the records land even when the
-allowed dir is elsewhere).
-
-The ``read_plan`` / ``write_plan`` *functions* below are the *agent*'s tools.
-They are confined to the session directory via :func:`mini_code_cli.sandbox.path_within`,
-and only the two known plan filenames may live there -- so the tracking files
-cannot be relocated or symlinked out, and no stray files are created.
+:class:`PlanManager` is what the *loop* uses to read/write those files directly
+(plain ``open`` -- not through any agent tool -- so the records land even when
+the allowed dir is elsewhere). The agent itself does not author these files:
+the loop writes the goal after each user request, logs the request into the
+plan, re-injects them into the conversation after a history compaction, and
+marks the goal finished on shutdown.
 """
 
 import os
-import functools
 from datetime import datetime
-
-from . import sandbox
 
 PLAN_FILENAME = "CURRENT_PLAN.md"
 GOAL_FILENAME = "CURRENT_GOAL.md"
-# Only these names may live inside the session directory -- keeps the plan
-# tools from creating stray files and from relocating the tracking files.
-PLAN_ALLOWED_NAMES = (PLAN_FILENAME, GOAL_FILENAME)
 
 
 class PlanManager:
@@ -44,9 +36,6 @@ class PlanManager:
         self.session_dir = session_dir
         self.enabled = enabled
         self.goal = goal
-        # Last goal logged into CURRENT_PLAN.md, so re-stating the same goal
-        # doesn't spam the plan with duplicate "goal updated" entries.
-        self._last_logged_goal = None
 
     @property
     def plan_path(self):
@@ -57,7 +46,11 @@ class PlanManager:
         return os.path.join(self.session_dir, GOAL_FILENAME)
 
     def _append(self, text):
-        """Append one dated line to CURRENT_PLAN.md (creating it if needed)."""
+        """Append one dated line to CURRENT_PLAN.md (creating it if needed).
+
+        Shared by ``append_plan_line`` and ``mark_finished``. Best-effort and
+        never raises: a plan-tracking hiccup must never break the agent loop.
+        """
         if not self.enabled:
             return
         try:
@@ -79,18 +72,27 @@ class PlanManager:
             pass
 
     def write_goal(self, goal):
-        """Persist the user's latest instruction to CURRENT_GOAL.md and, in
-        plan mode, log the goal into CURRENT_PLAN.md only on a genuine change."""
+        """Persist the user's latest instruction to CURRENT_GOAL.md (overwriting
+        any previous goal) and remember it in ``self.goal`` so
+        :meth:`mark_finished` can name the goal later.
+
+        Best-effort: a tracking hiccup must never break the agent loop.
+        """
         if not self.enabled:
             return
-        stripped = (goal or "").strip()
-        self._write(self.goal_path, f"# Current Goal\n\n{stripped}\n")
-        if stripped and stripped != self._last_logged_goal:
-            verb = "Goal set to" if self._last_logged_goal is None else "Goal updated to"
-            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self._append(f"- [{stamp}] {verb}: {stripped}")
-            self._last_logged_goal = stripped
         self.goal = goal
+        self._write(self.goal_path, f"# Current Goal\n\n{(goal or '').strip()}\n")
+
+    def append_plan_line(self, text):
+        """Log one user request (or other note) into CURRENT_PLAN.md.
+
+        The loop calls this after every real user request so the running plan
+        reflects the work as it proceeds. Best-effort and never raises.
+        """
+        if not self.enabled:
+            return
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._append(f"- [{stamp}] {text}")
 
     def mark_finished(self, goal=None):
         """Append a timestamped "finished" entry to CURRENT_PLAN.md."""
@@ -114,74 +116,3 @@ class PlanManager:
                 return f.read()
         except OSError:
             return None
-
-
-# ---------------------------------------------------------------------------
-# Tools: read_plan / write_plan (agent-facing, session-dir confined)
-# ---------------------------------------------------------------------------
-
-def _resolved(file_path, default, session_dir):
-    """Resolve ``file_path`` inside ``session_dir`` if it is one of the allowed
-    plan files, else None. Relative paths are joined onto ``session_dir``."""
-    if not file_path:
-        file_path = default
-    resolved = os.path.realpath(
-        file_path if os.path.isabs(file_path) else os.path.join(session_dir, file_path))
-    if not sandbox.path_within(resolved, session_dir) \
-            or os.path.basename(resolved) not in PLAN_ALLOWED_NAMES:
-        return None
-    return resolved
-
-
-def read_plan(file_path=None, session_dir=None):
-    """Read a plan tracking file (CURRENT_PLAN.md / CURRENT_GOAL.md)."""
-    if not session_dir:
-        return "Error: plan mode is not available in this context."
-    resolved = _resolved(file_path, PLAN_FILENAME, session_dir)
-    if resolved is None:
-        return f"Error: only {PLAN_FILENAME} / {GOAL_FILENAME} may be read."
-    if not os.path.isfile(resolved):
-        return None
-    try:
-        with open(resolved, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError as e:
-        return f"Error: {e}"
-
-
-def write_plan(file_path, content=None, session_dir=None):
-    """Write a plan tracking file (CURRENT_PLAN.md / CURRENT_GOAL.md)."""
-    if not session_dir:
-        return "Error: plan mode is not available in this context."
-    if not file_path:
-        return f"Error: a file_path is required ({PLAN_FILENAME} / {GOAL_FILENAME})."
-    resolved = _resolved(file_path, None, session_dir)
-    if resolved is None:
-        return f"Error: only {PLAN_FILENAME} / {GOAL_FILENAME} may be written."
-    try:
-        os.makedirs(session_dir, exist_ok=True)
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content or "")
-        return f"Wrote to {resolved}"
-    except OSError as e:
-        return f"Error: {e}"
-
-
-def _plan_functions(session_dir):
-    """{name: functools.partial} for the two plan tools, session_dir bound."""
-    return {
-        "read_plan": functools.partial(read_plan, session_dir=session_dir),
-        "write_plan": functools.partial(write_plan, session_dir=session_dir),
-    }
-
-
-def get_plan_tools(session_dir):
-    """Return the {name: {function, description}} mapping for the plan tools."""
-    from . import tools
-    return tools.util_get_tools_dict(functions=_plan_functions(session_dir))
-
-
-def get_plan_tool_schemas(session_dir):
-    """Return the OpenAI tool schemas for the two plan tools."""
-    from . import tools
-    return tools.util_get_tools(functions=_plan_functions(session_dir))

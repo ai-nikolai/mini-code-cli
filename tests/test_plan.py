@@ -1,10 +1,15 @@
 """Tests for the --plan mode feature (plan.py + its wiring into agent_loop.py).
 
 Covers:
-  * the PlanManager (write/read goal + plan, mark finished) in isolation,
+  * the PlanManager (write/read goal + plan, log requests, mark finished) in
+    isolation,
   * the plan-mode system-prompt instructions,
-  * the loop wiring: goal seeding, plan-file sandbox exemption, and the
-    plan re-injection that runs after a history compaction.
+  * the loop wiring: recording each user request/goal in the tracking files,
+    the plan re-injection that runs after a history compaction, and marking the
+    goal finished on shutdown.
+  * the fact that the tracking files are loop-owned: the model authors none of
+    them, so a generic write_file of a plan file (which lives outside
+    --allowed-dir) is still blocked by the sandbox.
 """
 import io
 import os
@@ -145,109 +150,56 @@ class TestPlanWiringInLoop(unittest.TestCase):
                                            console=self.console)
         self.assertIn("PLAN MODE", sess.messages[0]["content"])
 
-    def test_capture_goal_writes_goal_file(self):
+    def test_record_goal_request_writes_goal_file(self):
         sess = self._make(plan=True)
-        sess._capture_goal("Build the thing")
+        sess._record_goal_request("Build the thing")
         self.assertIn("Build the thing",
                       open(os.path.join(sess.plan_manager.session_dir, plan_utils.GOAL_FILENAME)).read())
 
-    def test_capture_goal_ignores_slash_commands(self):
+    def test_record_goal_request_ignores_slash_commands(self):
         sess = self._make(plan=True)
-        sess._capture_goal("/history")
+        sess._record_goal_request("/history")
         self.assertIsNone(sess.plan_manager.read_goal())
 
-    def test_capture_goal_noop_when_disabled(self):
+    def test_record_goal_request_noop_when_disabled(self):
         sess = self._make(plan=False)
-        sess._capture_goal("do x")
+        sess._record_goal_request("do x")
         self.assertIsNone(sess.plan_manager.read_goal())
 
-    def test_capture_goal_ignores_empty_input(self):
+    def test_record_goal_request_ignores_empty_input(self):
         sess = self._make(plan=True)
-        sess._capture_goal("   ")
+        sess._record_goal_request("   ")
         self.assertIsNone(sess.plan_manager.read_goal())
 
-    def test_is_plan_file_true_for_plan_files(self):
+    def test_record_goal_request_logs_to_plan(self):
         sess = self._make(plan=True)
-        p = os.path.join(sess.plan_manager.session_dir, plan_utils.PLAN_FILENAME)
-        self.assertTrue(sess._is_plan_file("write_file", {"file_path": p}))
-        g = os.path.join(sess.plan_manager.session_dir, plan_utils.GOAL_FILENAME)
-        self.assertTrue(sess._is_plan_file("read_file", {"file_path": g}))
-
-    def test_is_plan_file_false_for_other_files(self):
-        sess = self._make(plan=True)
-        other = os.path.join(sess.plan_manager.session_dir, "notes.txt")
-        self.assertFalse(sess._is_plan_file("write_file", {"file_path": other}))
-
-    def test_is_plan_file_false_when_disabled(self):
-        sess = self._make(plan=False)
-        p = os.path.join(sess.plan_manager.session_dir, plan_utils.PLAN_FILENAME)
-        self.assertFalse(sess._is_plan_file("write_file", {"file_path": p}))
-
-    def test_is_plan_file_false_for_write_outside_session_dir(self):
-        sess = self._make(plan=True)
-        # Same filename, but a different directory must not be treated as a plan file.
-        elsewhere = os.path.join(self.tmp.name, plan_utils.PLAN_FILENAME)
-        self.assertFalse(sess._is_plan_file("write_file", {"file_path": elsewhere}))
+        sess._record_goal_request("do the thing")
+        plan = open(os.path.join(sess.plan_manager.session_dir, plan_utils.PLAN_FILENAME)).read()
+        self.assertIn("do the thing", plan)
 
     def test_mark_finished_and_shutdown(self):
         sess = self._make(plan=True)
-        sess._capture_goal("my goal")
+        sess._record_goal_request("my goal")
         with mock.patch.object(sess, "shutdown"):
             sess._finish_goal_and_shutdown()
-        self.assertIn("Task finished: my goal",
-                      open(os.path.join(sess.plan_manager.session_dir, plan_utils.PLAN_FILENAME)).read())
+        plan = open(os.path.join(sess.plan_manager.session_dir, plan_utils.PLAN_FILENAME)).read()
+        self.assertIn("Task finished: my goal", plan)
 
     def test_mark_finished_noop_when_disabled(self):
         sess = self._make(plan=False)
-        sess._mark_current_goal_finished()  # must not raise
+        with mock.patch.object(sess, "shutdown"):
+            sess._finish_goal_and_shutdown()  # must not raise
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, sess.unique_id, plan_utils.PLAN_FILENAME)))
 
 
-class TestSandboxExemptsPlanFiles(unittest.TestCase):
-    """A plan-file write must pass the sandbox even though the session dir is
-    (usually) outside --allowed-dir."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.buf = io.StringIO()
-        self.console = ui.Console(stream=self.buf, color=False, unicode=False)
-
-    def _run_tool(self, sess, call):
-        sess._run_one_tool_call(call)
-
-    def test_plan_file_write_allowed_even_outside_allowed_dir(self):
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(cache_dir=self.tmp.name, allowed_dir="/tmp", plan=True),
-                                           console=self.console)
-        sdir = sess.plan_manager.session_dir
-        call = {"id": "c1", "function": {"name": "write_file",
-                "arguments": '{"file_path": "%s/%s", "content": "plan"}' %
-                             (sdir, plan_utils.PLAN_FILENAME)}}
-        with mock.patch.object(sess, "_run_one_tool_call",
-                               wraps=sess._run_one_tool_call) as spy:
-            sess._run_one_tool_call(call)
-            # The tool actually ran (not blocked by the sandbox), so it reached
-            # the real write_file rather than returning a refusal up front.
-            spy.assert_called_once_with(call)
-        self.assertTrue(os.path.exists(os.path.join(sdir, plan_utils.PLAN_FILENAME)))
-
-    def test_non_plan_file_write_still_blocked(self):
-        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
-            sess = agent_loop.AgentSession(_make_args(cache_dir=self.tmp.name, allowed_dir=self.tmp.name, plan=True),
-                                           console=self.console)
-        outside = os.path.join(os.path.dirname(self.tmp.name), "secret.txt")
-        call = {"id": "c1", "function": {"name": "write_file",
-                "arguments": '{"file_path": "%s", "content": "x"}' % outside}}
-        sess._run_one_tool_call(call)
-        # A blocked write appends a refusal tool-result and writes nothing.
-        last = sess.messages[-1]
-        self.assertEqual(last["role"], "tool")
-        self.assertIn("not allowed outside allowed directory", last["content"])
-
-
 class TestPlanCompactionReinjectsPlan(unittest.TestCase):
-    """After compaction the plan + goal must be re-appended to the messages."""
+    """After compaction the loop-owned plan + goal must be re-appended.
+
+    The tracking files are owned by the loop (not authored by the model), and
+    they live in the session dir which sits outside --allowed-dir. A model that
+    tried to write a plan file itself would therefore still hit the sandbox --
+    the loop is the only writer.
+    """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

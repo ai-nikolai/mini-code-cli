@@ -5,11 +5,10 @@ This is the former ``verify_integration.py`` smoke test, now a proper
 loop with a mocked LLM, exercising the parts a unit test alone cannot:
 
   * preset-prompt handling and the main loop,
-  * real tool execution (the LLM "asks" to write the plan / goal files and the
-    ``write_file`` tool actually writes them -- plan-file writes are allowed
-    even though the session dir is normally outside ``--allowed-dir``),
+  * real tool execution (the LLM writes a file the agent is allowed to touch,
+    driving a *real* tool call inside the loop),
   * persistence and clean shutdown,
-  * the plan-mode goal / plan files on disk.
+  * the plan-mode goal / plan files the loop maintains on disk.
 
 There is no network access: both ``call_openai_server`` and
 ``determine_vllm_model`` are patched.
@@ -53,23 +52,18 @@ class TestAgentLoopIntegration(unittest.TestCase):
     def _fake_llm(self, session):
         """A tiny stand-in for the LLM server.
 
-        On the first assistant turn it asks the model to write the plan and
-        goal files; on every later turn it just says "done" with no tool calls.
-        This drives a *real* tool execution inside the loop.
+        On the first assistant turn it writes a small note inside the allowed
+        dir, driving a *real* tool call inside the loop; on every later turn it
+        just says "done" with no tool calls.
         """
         def fake_call(messages, **kw):
             n = sum(1 for m in messages if m.get("role") == "assistant")
             if n == 0:
-                sdir = session.plan_manager.session_dir
-                calls = [
-                    {"id": "w1", "function": {"name": "write_file",
-                     "arguments": json.dumps({"file_path": os.path.join(sdir, plan_utils.PLAN_FILENAME),
-                                              "content": "# Plan\n1. do A\n2. do B\n"})}},
-                    {"id": "w2", "function": {"name": "write_file",
-                     "arguments": json.dumps({"file_path": os.path.join(sdir, plan_utils.GOAL_FILENAME),
-                                              "content": "Solve the puzzle\n"})}},
-                ]
-                return "Planning...", calls, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                note_path = os.path.join(session.allowed_dir, "note.txt")
+                call = {"id": "w1", "function": {"name": "write_file",
+                        "arguments": json.dumps({"file_path": note_path,
+                                                 "content": "a working note\n"})}}
+                return "Working...", [call], {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
             return "done", [], {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         return fake_call
 
@@ -100,7 +94,7 @@ class TestAgentLoopIntegration(unittest.TestCase):
         plan = self._read_file(os.path.join(sdir, plan_utils.PLAN_FILENAME))
         goal = self._read_file(os.path.join(sdir, plan_utils.GOAL_FILENAME))
 
-        # The LLM's write_file tool calls actually ran and produced the files.
-        self.assertIn("do A", plan)
-        self.assertIn("do B", plan)
+        # The loop owns the tracking files (the model authors none of them):
+        # the preset prompt became the goal and was logged into the plan.
         self.assertIn("Solve the puzzle", goal)
+        self.assertIn("Solve the puzzle", plan)
