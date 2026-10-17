@@ -1,12 +1,15 @@
 """Tests for the --plan mode feature (plan.py + its wiring into agent_loop.py).
 
 Covers:
-  * the PlanManager (write/read goal, write/generate plan, log requests, mark
-    finished) in isolation,
-  * the plan-mode system-prompt instructions and the plan-generation prompt,
+  * the PlanManager (write/read goal, write/generate plan, write review summary,
+    log requests, mark finished) in isolation,
+  * the plan-mode system-prompt instructions, the plan-generation prompt and the
+    plan-completion-review prompt,
   * the loop wiring: recording each user request/goal in the tracking files,
     asking the model (no tools) to author an actual plan from the whole
     conversation, saving it, and re-injecting it into the conversation,
+  * the completion-review prompt and the review loop (review -> follow-up work ->
+  re-review), including the finalized_plan guard that stops an infinite loop,
   * the plan re-injection that runs after a history compaction, and marking the
     goal finished on shutdown.
   * the fact that the tracking files are loop-owned: the model authors none of
@@ -14,6 +17,7 @@ Covers:
     --allowed-dir) is still blocked by the sandbox.
 """
 import io
+import json
 import os
 import sys
 import types
@@ -130,6 +134,28 @@ class TestPlanManager(unittest.TestCase):
         pm.plan = "generated plan text"
         self.assertEqual(pm.read_plan(), "generated plan text")
 
+    def test_write_plan_summary_persists_and_updates_memory(self):
+        pm = plan_utils.PlanManager(self.session, enabled=True, goal="do x")
+        pm.write_plan("1. step one")
+        pm.write_plan_summary("ALL TASKS DONE. Go back to user.")
+        self.assertEqual(pm.review_summary, "ALL TASKS DONE. Go back to user.")
+        text = open(pm.plan_path).read()
+        self.assertIn("# Plan completion summary", text)
+        self.assertIn("ALL TASKS DONE", text)
+
+    def test_write_plan_summary_replaces_previous(self):
+        pm = plan_utils.PlanManager(self.session, enabled=True, goal="do x")
+        pm.write_plan_summary("TASKS still in progress. Outstanding: 1.")
+        pm.write_plan_summary("ALL TASKS DONE. Go back to user.")
+        text = open(pm.plan_path).read()
+        self.assertIn("ALL TASKS DONE", text)
+        self.assertNotIn("TASKS still in progress", text)
+
+    def test_write_plan_summary_noop_when_disabled(self):
+        pm = plan_utils.PlanManager(self.session, enabled=False)
+        pm.write_plan_summary("ALL TASKS DONE.")
+        self.assertIsNone(pm.review_summary)
+
 
 class TestPlanPrompt(unittest.TestCase):
     def test_plan_mode_instructions_present(self):
@@ -155,6 +181,23 @@ class TestPlanPrompt(unittest.TestCase):
         self.assertIn("sys", text)
         self.assertIn("make a thing", text)
         self.assertIn("numbered", text)
+
+    def test_plan_review_prompt_includes_history_and_goal(self):
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "make a thing"},
+            {"role": "assistant", "content": "done it"},
+        ]
+        text = prompts.plan_review_prompt(messages, "make a thing")
+        self.assertIn("sys", text)
+        self.assertIn("make a thing", text)
+        self.assertIn("TASKS still in progress", text)
+        self.assertIn("Go back to user", text)
+
+    def test_plan_review_prompt_mentions_task_states(self):
+        text = prompts.plan_review_prompt([], "do x")
+        for state in ("DONE", "TODO", "IN-PROGRESS"):
+            self.assertIn(state, text)
 
 
 class TestPlanWiringInLoop(unittest.TestCase):
@@ -210,6 +253,12 @@ class TestPlanWiringInLoop(unittest.TestCase):
         sess._record_goal_request("   ")
         self.assertIsNone(sess.plan_manager.read_goal())
 
+    def test_record_goal_request_rearms_review(self):
+        sess = self._make(plan=True)
+        sess.finalized_plan = False
+        sess._record_goal_request("the request")
+        self.assertTrue(sess.finalized_plan)
+
     def test_mark_finished_and_shutdown(self):
         sess = self._make(plan=True)
         sess._record_goal_request("my goal")
@@ -255,6 +304,66 @@ class TestPlanWiringInLoop(unittest.TestCase):
         # No plan was generated (empty string is stored, no re-injection).
         self.assertEqual(sess.plan_manager.plan, "")
 
+    def test_finalized_plan_starts_true(self):
+        sess = self._make(plan=True)
+        self.assertTrue(sess.finalized_plan)
+
+    def test_review_plan_completion_noop_when_not_due(self):
+        sess = self._make(plan=True)
+        sess.finalized_plan = False
+        with mock.patch.object(agent_loop.utils, "call_openai_server",
+                               side_effect=AssertionError("should not be called")):
+            sess._review_plan_completion()  # must not call the model
+        # Nothing re-injected.
+        self.assertTrue(all("Plan completion summary" not in m.get("content", "")
+                            for m in sess.messages))
+
+    def test_review_plan_completion_noop_when_disabled(self):
+        sess = self._make(plan=False)
+        with mock.patch.object(agent_loop.utils, "call_openai_server",
+                               side_effect=AssertionError("should not be called")):
+            sess._review_plan_completion()  # must not call the model
+
+    def test_review_plan_completion_runs_once_and_clears_flag(self):
+        sess = self._make(plan=True)
+        sess.messages.append({"role": "user", "content": "the request"})
+        sess.plan_manager.write_plan("1. do a")
+        with mock.patch.object(
+                agent_loop.utils, "call_openai_server",
+                return_value=("ALL TASKS DONE. Go back to user.", [],
+                              {"total_tokens": 3})):
+            sess._review_plan_completion()
+        # Flag is cleared so it does not run again for the same state.
+        self.assertFalse(sess.finalized_plan)
+        # The summary was written to the plan document and re-injected.
+        plan = open(os.path.join(sess.plan_manager.session_dir, plan_utils.PLAN_FILENAME)).read()
+        self.assertIn("ALL TASKS DONE", plan)
+        texts = [m.get("content", "") for m in sess.messages]
+        self.assertTrue(any("Plan completion summary" in t and "ALL TASKS DONE" in t
+                            for t in texts))
+
+    def test_step_rearms_review_when_predicts_more_work(self):
+        # A step that predicts a tool call re-arms finalized_plan (review due),
+        # while a step with no tool calls leaves it untouched.
+        sess = self._make(plan=True, auto_mode=True)
+        sess.messages.append({"role": "user", "content": "the request"})
+        call = {"id": "w1", "function": {"name": "write_file",
+                "arguments": json.dumps({"file_path": os.path.join(sess.allowed_dir, "n.txt"),
+                                         "content": "ok\n"})}}
+        # First step predicts a tool call -> re-arms the review.
+        with mock.patch.object(agent_loop.utils, "call_openai_server",
+                               return_value=("working", [call], {"total_tokens": 2})):
+            made = sess._step()
+            self.assertTrue(made)
+            self.assertTrue(sess.finalized_plan)
+        # Second step makes no tool calls -> the flag stays as it was.
+        sess.finalized_plan = False
+        with mock.patch.object(agent_loop.utils, "call_openai_server",
+                               return_value=("done", [], {"total_tokens": 2})):
+            made = sess._step()
+            self.assertFalse(made)
+            self.assertFalse(sess.finalized_plan)
+
 
 class TestPlanCompactionReinjectsPlan(unittest.TestCase):
     """After compaction the loop-owned plan + goal must be re-appended.
@@ -296,6 +405,44 @@ class TestPlanCompactionReinjectsPlan(unittest.TestCase):
         out = self.sess._apply_plan_to_compacted(
             [{"role": "system", "content": "sys"}])
         self.assertEqual(len(out), 1)
+
+
+class TestPlanReviewEndToEnd(unittest.TestCase):
+    """Drive the full plan-mode review + follow-up loop with a mocked LLM."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.buf = io.StringIO()
+        self.console = ui.Console(stream=self.buf, color=False, unicode=False)
+
+    def _make(self, **kw):
+        with mock.patch.object(agent_loop.utils, "determine_vllm_model", return_value=None):
+            return agent_loop.AgentSession(_make_args(cache_dir=self.tmp.name,
+                                                      allowed_dir=self.tmp.name, **kw),
+                                           console=self.console)
+
+    def test_review_runs_and_marks_finished(self):
+        # Plan prompt (no work) -> review -> "all done" -> no follow-up -> loop
+        # exits on /quit. The plan document carries a completion summary.
+        sess = self._make(plan=True, prompt="build a thing")
+        inputs = iter(["/quit"])
+
+        def fake_call(messages, **kw):
+            # Both the plan prompt and the review prompt are tool-free model
+            # calls; the response for both is the review summary.
+            return ("ALL TASKS DONE. Go back to user.", [], {"total_tokens": 3})
+
+        with mock.patch.object(agent_loop.utils, "call_openai_server",
+                               side_effect=fake_call):
+            with mock.patch.object(self.console, "read_line",
+                                   side_effect=lambda *a, **k: next(inputs)):
+                sess.run(initial_prompt=sess.args.prompt)
+
+        plan = open(os.path.join(sess.plan_manager.session_dir, plan_utils.PLAN_FILENAME)).read()
+        self.assertIn("# Plan completion summary", plan)
+        self.assertIn("ALL TASKS DONE", plan)
+        self.assertTrue(any("Task finished:" in line for line in plan.splitlines()))
 
 
 if __name__ == "__main__":

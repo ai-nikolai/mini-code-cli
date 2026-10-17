@@ -303,6 +303,14 @@ class AgentSession:
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
 
+        # Completion-review flag for plan mode (see _review_plan_completion /
+        # _review_plan_completion_loop). True means a review is DUE: either the
+        # turn just started or the model predicted more tool calls since the
+        # last review. It is cleared once a review runs and re-set by _step
+        # whenever a step predicts more tool calls, so the review runs at most
+        # once per work-batch and never loops forever.
+        self.finalized_plan = True
+
         # Which tools the LLM may call (shell / sub-agents / skills / plan), and
         # which of them are registered. Split out of __init__ for readability --
         # see _register_tools().
@@ -816,6 +824,19 @@ class AgentSession:
                         break
                     self.console.note(
                         "Continuing with LLM calls until no more tool calls.", "info")
+
+                # Plan-mode completion review + follow-up work. Only reached once
+                # the work loop exited (no more tool calls predicted). When a
+                # review is due, review the plan -- mark done items as done, mark
+                # outstanding items TODO/IN-PROGRESS, and append EITHER
+                # "ALL TASKS DONE. Go back to user." or "TASKS still in progress."
+                # -- save the summary to the plan document and re-inject it, then
+                # run one more pass through the main agent so the model acts on
+                # the review result. The finalized_plan flag stops us reviewing
+                # twice for the same work-batch, and the pass cap stops a
+                # misbehaving model from looping forever.
+                if self.plan_mode:
+                    self._review_plan_completion_loop()
             except _Abort:
                 # Ctrl-C during a permission prompt already shut the session
                 # down; just unwind the loop quietly.
@@ -914,6 +935,9 @@ class AgentSession:
         if not stripped or stripped.startswith("/"):
             return
         self.plan_manager.write_goal(stripped)
+        # A brand-new request starts a fresh work-batch: a completion review is
+        # due again for it (see finalized_plan / _review_plan_completion).
+        self.finalized_plan = True
 
     def _generate_plan_and_inject(self, current_instruction):
         """Ask the model to author a plan for the current instruction.
@@ -969,6 +993,110 @@ class AgentSession:
         """
         self.plan_manager.mark_finished(self.plan_manager.goal)
         self.shutdown()
+
+    # A hard cap on plan-completion review passes per user turn, purely to
+    # guarantee run() terminates even if the model keeps predicting tool calls
+    # after every review. Normal sessions never reach it.
+    MAX_REVIEW_PASSES = 5
+
+    def _review_plan_completion_loop(self):
+        """Review plan completion, then keep doing the model's follow-up work.
+
+        Plan mode only. After the main work loop exited (the model predicted no
+        more tool calls), the plan is reviewed once: the model marks each task
+        done or outstanding and emits a summary ("ALL TASKS DONE. Go back to
+        user." or "TASKS still in progress." + which ones remain). The summary
+        is appended to the conversation and the main agent runs one more pass
+        through the work loop. If that pass predicts more work the review is due
+        again, so we loop back and review after doing it.
+
+        Two guards keep this terminating:
+
+          * ``self.finalized_plan`` is cleared once a review runs and re-set by
+            :meth:`_step` whenever a step predicts more tool calls, so the review
+            runs at most once per work-batch (never twice back to back).
+          * A hard pass cap (``MAX_REVIEW_PASSES``) stops a misbehaving model
+            that keeps predicting tool calls from looping forever.
+        """
+        if not self.plan_mode:
+            return
+        for _ in range(self.MAX_REVIEW_PASSES):
+            if not self.finalized_plan:
+                break
+            self._review_plan_completion()  # reviews once, clears finalized_plan
+            # Run one more pass through the main agent. If it predicts more work,
+            # _step re-arms finalized_plan so we loop back and do it, then review
+            # again. Otherwise finalized_plan stays cleared and the loop exits.
+            while True:
+                should_continue = self._step()
+                self._persist()
+                if not should_continue:
+                    break
+                self.console.note(
+                    "Continuing with LLM calls until no more tool calls.", "info")
+        else:
+            # The loop exhausted its passes without breaking: the model kept
+            # predicting work past the cap. Stop rather than loop forever.
+            self.console.note(
+                "Plan-completion review hit the pass cap "
+                "({}); stopping this pass.".format(self.MAX_REVIEW_PASSES), "warn")
+
+    def _review_plan_completion(self):
+        """Once the work looks done, review the plan's completion.
+
+        Reached from :meth:`_review_plan_completion_loop` after the main work
+        loop exits (i.e. no more tool calls predicted). Only runs when a review
+        is due (``self.finalized_plan``). The loop asks the model -- with no
+        tools, like compaction -- to mark each item of the current plan as done
+        or outstanding (TODO / IN-PROGRESS) and to add a one-line summary to the
+        plan document. If nothing is outstanding the summary says the goal is
+        complete and to go back to the user; if any are outstanding it says work
+        is still in progress (listing them). The summary is written to the plan
+        document and re-injected into the conversation so the model can act on
+        the review result in the follow-up pass.
+
+        On running, ``self.finalized_plan`` is cleared (so this does not run
+        again for the same state) and re-armed by :meth:`_step` whenever a step
+        predicts more tool calls -- so the review runs once per work-batch and
+        never loops forever. Best-effort: a failed review leaves the plan
+        unchanged and the conversation runs on. No-op when --plan is off, the
+        review already ran this turn, or a review is not due.
+        """
+        if not self.plan_mode or not self.finalized_plan:
+            return
+
+        plan_prompt_text = prompts.plan_review_prompt(
+            self.messages, self.plan_manager.goal or "")
+        summary = ""
+        try:
+            ui.console.note("Reviewing the current plan...", "info")
+            response, _, usage = utils.call_openai_server(
+                [{"role": "user", "content": plan_prompt_text}],
+                max_tokens=1024,
+                temperature=0.0,
+                model=self.model,
+                server_url=self.server_url,
+                api_key=self.api_key,
+                timeout=self.args.llm_timeout,
+            )
+            accumulate_usage(self.token_stats, usage)
+            summary = response or ""
+        except Exception as exc:
+            ui.console.note("Could not review the plan: %s" % exc, "warn")
+
+        # Persist the review summary to the plan document and re-inject it so
+        # the model works from the review result.
+        self.plan_manager.write_plan_summary(summary)
+        if summary and summary.strip():
+            self.messages.append({
+                "role": "user",
+                "content": "Plan completion summary (from CURRENT_PLAN.md):\n%s"
+                % summary.strip(),
+            })
+        # The review just ran -- clear the flag so it does not run again until a
+        # later step predicts more work re-arms it (see _step).
+        self.finalized_plan = False
+
 
     def _apply_plan_to_compacted(self, messages):
         """Re-inject the current goal + plan after a history compaction.
@@ -1341,6 +1469,10 @@ class AgentSession:
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
             self.token_stats["tool_calls"] += len(tool_calls)
+            # The model predicted more tool calls: once the work settles down a
+            # completion review is due again (finalized_plan). See
+            # _review_plan_completion_loop / _review_plan_completion.
+            self.finalized_plan = True
 
         if response_text:
             self._print_assistant(response_text)
