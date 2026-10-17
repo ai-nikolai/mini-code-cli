@@ -244,6 +244,13 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
                 "role": "user",
                 "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
             })
+
+            # In plan mode, re-inject the running plan + current goal so a
+            # compaction (which would otherwise drop them) keeps the model
+            # working against the goal it is still trying to finish.
+            if self.plan_mode:
+                self.messages = self._apply_plan_to_compacted(compacted)
+            
             ui.console.note(f"History compacted to {len(compacted)} messages.", "warn")
             # A new segment (history_index + 1) is started on compaction: the
             # compacted messages are its snapshot, and every later turn appends
@@ -1425,11 +1432,6 @@ class AgentSession:
         )
         if did_compact:
             self.history_index = new_index
-            # In plan mode, re-inject the running plan + current goal so a
-            # compaction (which would otherwise drop them) keeps the model
-            # working against the goal it is still trying to finish.
-            if self.plan_mode:
-                self.messages = self._apply_plan_to_compacted(self.messages)
             # Snapshot the compacted messages into the new segment so its turns
             # are preserved, and record the summary as the first turn of it.
             save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
