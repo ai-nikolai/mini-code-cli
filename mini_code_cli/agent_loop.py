@@ -816,6 +816,8 @@ class AgentSession:
             except KeyboardInterrupt:
                 self.console.note("Interrupting: Mini Code Exiting...", "error")
                 # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
+            finally:
+                self.console.note("Good bye", "warning")
                 self._persist()
 
     def _print_session_id(self):
