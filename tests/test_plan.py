@@ -134,6 +134,34 @@ class TestPlanManager(unittest.TestCase):
         pm.plan = "generated plan text"
         self.assertEqual(pm.read_plan(), "generated plan text")
 
+    def test_read_current_status_noop_when_disabled(self):
+        pm = plan_utils.PlanManager(self.session, enabled=False)
+        # Disabled manager returns None (reads are no-ops), so the command
+        # degrades to a note rather than anything rendered.
+        self.assertIsNone(pm.read_current_status())
+
+    def test_read_current_status_bundles_goal_plan_and_review(self):
+        pm = plan_utils.PlanManager(self.session, enabled=True)
+        pm.write_goal("the goal")
+        pm.write_plan("1. step one\n2. step two")
+        pm.write_plan_summary("TASKS still in progress. 2. step two")
+        status = pm.read_current_status()
+        self.assertIn("# Current Goal", status)
+        self.assertIn("the goal", status)
+        self.assertIn("# Current Plan", status)
+        self.assertIn("1. step one", status)
+        self.assertIn("2. step two", status)
+        self.assertIn("# Plan completion summary", status)
+        self.assertIn("TASKS still in progress", status)
+
+    def test_read_current_status_falls_back_when_missing(self):
+        pm = plan_utils.PlanManager(self.session, enabled=True)
+        status = pm.read_current_status()
+        # Every section is present with a (none) note rather than raising.
+        self.assertIn("(no goal set)", status)
+        self.assertIn("(no plan generated yet)", status)
+        self.assertIn("(no completion review yet)", status)
+
     def test_write_plan_summary_persists_and_updates_memory(self):
         pm = plan_utils.PlanManager(self.session, enabled=True, goal="do x")
         pm.write_plan("1. step one")
@@ -252,6 +280,38 @@ class TestPlanWiringInLoop(unittest.TestCase):
         sess = self._make(plan=True)
         sess._record_goal_request("   ")
         self.assertIsNone(sess.plan_manager.read_goal())
+
+    def test_show_plan_noop_when_not_plan_mode(self):
+        sess = self._make(plan=False)
+        buf = io.StringIO()
+        sess.console = ui.Console(stream=buf, color=False, unicode=False)
+        sess._show_plan()
+        self.assertIn("not enabled", buf.getvalue())
+
+    def test_show_plan_renders_goal_and_plan(self):
+        sess = self._make(plan=True)
+        sess._record_goal_request("build a widget")
+        # Mock the plan-authoring LLM call so _generate_plan_and_inject writes
+        # a real, non-empty plan (no network in the test suite).
+        with mock.patch.object(agent_loop.utils, "call_openai_server",
+                               return_value=("1. read the brief\n2. write it", {}, {})):
+            sess._generate_plan_and_inject("build a widget")
+        buf = io.StringIO()
+        sess.console = ui.Console(stream=buf, color=False, unicode=False)
+        sess._show_plan()
+        rendered = buf.getvalue()
+        self.assertIn("build a widget", rendered)
+        self.assertIn("1. read the brief", rendered)
+        self.assertIn("# Current Plan", rendered)
+
+    def test_plan_command_is_handled(self):
+        sess = self._make(plan=True)
+        sess._record_goal_request("build a widget")
+        sess._generate_plan_and_inject("build a widget")
+        buf = io.StringIO()
+        sess.console = ui.Console(stream=buf, color=False, unicode=False)
+        self.assertTrue(sess._handle_command("/plan"))
+        self.assertIn("build a widget", buf.getvalue())
 
     def test_record_goal_request_rearms_review(self):
         sess = self._make(plan=True)

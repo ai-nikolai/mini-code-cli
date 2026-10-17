@@ -165,6 +165,7 @@ def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
     ui.console.emit(ui.console.style("History / navigation commands:", bold=True, fg="cyan"))
     ui.console.emit("  /history         list the conversation (turn number, what happened, where)")
     ui.console.emit("  /history <n>      show the full messages recorded for turn n")
+    ui.console.emit("  /plan             show the current goal + plan (plan mode only)")
     ui.console.emit("  /reset [<n>]      rewind to the end of turn n (drops everything after it)")
     ui.console.emit("  /clear            clear the screen (keeps the conversation history)")
     ui.console.emit("  /help             show this help")
@@ -773,11 +774,13 @@ class AgentSession:
         # Hint at startup so the high-level history feature is discoverable:
         # /history browses the recorder, /history <n> inspects a turn, and
         # /reset <n> rewinds the conversation to that turn's state.
-        self.console.emit(
-            self.console.style(
-                "Tip: /history to browse the conversation, /history <n> to inspect a "
-                "turn, /reset <n> to rewind. Type /help for all commands.",
-                dim=True, fg="cyan"))
+        tip = ("Tip: /history to browse the conversation, /history <n> to inspect a "
+               "turn, /reset <n> to rewind. Type /help for all commands.")
+        if getattr(self.args, "plan", False):
+            tip = ("Tip: /plan to show the current goal + plan (plan mode), "
+                   "/history to browse the conversation, /history <n> to inspect a "
+                   "turn, /reset <n> to rewind. Type /help for all commands.")
+        self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
         # The --prompt value is a one-shot initial turn: it is sent verbatim and
         # then cleared, so later turns come from the user (manual mode) or are
@@ -848,11 +851,13 @@ class AgentSession:
                 # Ctrl-C during a permission prompt already shut the session
                 # down; just unwind the loop quietly.
                 break
+
             except KeyboardInterrupt:
                 self.console.note("Interrupting: Mini Code Exiting...", "error")
+                self._persist()
                 # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
-            finally:
-                self.console.note("Good bye", "warning")
+            except Exception as e:
+                self.console.note(f"Exception {e}. Exiting...", "error")
                 self._persist()
 
     def _print_session_id(self):
@@ -1161,6 +1166,8 @@ class AgentSession:
           /history <n>       show the full messages recorded for turn <n>
           /reset [<n>]       rewind the conversation to the end of turn <n>
                              (no <n> rewinds to the most recent turn)
+          /plan              show the current goal + plan the loop maintains
+                             (plan mode only)
           /clear             clear the screen (keeps the conversation)
           /help              show the command help
 
@@ -1187,6 +1194,9 @@ class AgentSession:
         if cmd in self.CLEAR_COMMANDS:
             self._clear_and_show_last()
             return True
+        if cmd == "plan":
+            self._show_plan()
+            return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
 
@@ -1212,6 +1222,33 @@ class AgentSession:
                     f"No such turn {arg!r} (have 1..{len(self.summary)}).", "error")
                 return
         self._reset_history(target["turn"], target)
+
+    def _show_plan(self):
+        """Show the current plan/goal the loop maintains (``/plan`` command).
+
+        Plan mode keeps two human-readable tracking files in the session
+        directory (CURRENT_GOAL.md / CURRENT_PLAN.md) that the loop -- not the
+        agent -- author. Those files live outside ``--allowed-dir``, so the
+        model has no tool to read them back; the simplest way for the user to
+        inspect progress is this command, which renders the goal, the current
+        plan and the last completion review as one box, matching how
+        ``/history`` shows the transcript. A no-op (just a note) when --plan is
+        off, since the manager has nothing to read.
+        """
+        if not self.plan_mode:
+            self.console.note("Plan mode is not enabled (--plan).", "warn")
+            return
+        status = self.plan_manager.read_current_status()
+        if status is None:
+            self.console.note("No plan information available for this session.", "warn")
+            return
+        self.console.rule(title="Plan", char="═", fg="cyan")
+        self.console.status_box(
+            status.splitlines(),
+            title="Current goal + plan",
+            fg="green",
+            dim=True,
+        )
 
     def _clear_and_show_last(self):
         """Handle /clear: wipe the screen and re-print the last turn.

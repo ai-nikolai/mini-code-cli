@@ -323,6 +323,26 @@ class Console:
     def print_box(self, lines, title=None, fg="cyan"):
         self.emit(self.box(lines, title=title, fg=fg))
 
+    def status_box(self, lines, title=None, fg="cyan", dim=False):
+        """Render a bordered box of free-form *status* lines (used for /plan).
+
+        Unlike :meth:`turn` (a conversation turn) this renders the loop-owned
+        tracking files as a single, glanceable box: the goal and the current
+        plan side by side, with the last completion review under a fixed
+        section. Each line is shown verbatim (so a numbered markdown plan stays
+        a numbered list). ``dim`` renders the lines dimmed so the box reads as
+        secondary, reference content rather than a live turn. Best-effort: a
+        blank line is rendered as an empty cell so plan sections stay visible.
+        """
+        styled_lines = []
+        for line in lines:
+            text = "" if line is None else str(line)
+            if dim:
+                styled_lines.append(self.style(text, dim=True))
+            else:
+                styled_lines.append(text)
+        self.print_box(styled_lines, title=title, fg=fg)
+
     def truncate(self, text, limit):
         text = str(text)
         if len(text) > limit:

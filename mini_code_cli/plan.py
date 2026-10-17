@@ -168,6 +168,38 @@ class PlanManager:
     def read_goal(self):
         return self._read(self.goal_path)
 
+    def read_current_status(self):
+        """Return the goal, current plan and last review as one flat text block.
+
+        The plan-mode tracking files live outside ``--allowed-dir``, so the model
+        has no tool to display them; this gives the interactive ``/plan`` command
+        a single, ready-to-render view (see Console.status_box). It concatenates
+        the goal, the current plan and the last completion-review summary under
+        fixed headers. Missing sections fall back to in-memory values or a
+        "(none)" note rather than raising -- a tracking hiccup must never break
+        the loop.
+        """
+        if not self.enabled:
+            return None
+        goal = self.goal or (self._read(self.goal_path) or "").strip()
+        plan = self.plan or (self._read(self.plan_path) or "").strip()
+        review = self.review_summary or ""
+
+        sections = [
+            ("# Current Goal", goal or "(no goal set)"),
+            ("# Current Plan", plan or "(no plan generated yet)"),
+            ("# Plan completion summary",
+             review if review.strip() else "(no completion review yet)"),
+        ]
+
+        parts = []
+        for header, body in sections:
+            parts.append(header)
+            parts.append("")
+            parts.append(body)
+            parts.append("")
+        return "\n".join(parts).rstrip("\n")
+
     def _read(self, path):
         if not self.enabled:
             return None
