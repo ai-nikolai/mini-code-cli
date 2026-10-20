@@ -1119,7 +1119,7 @@ class AgentSession:
         # Show a "… calling tool" spinner (in-place, non-scrolling) while the
         # tool(s) execute, mirroring the thinking spinner that covers the LLM
         # call. Always stopped (finally) so it can never leak into the next turn.
-        self.console.start_tool_call()
+        
         try:
             for call in tool_calls:
                 self._run_one_tool_call(call)
@@ -1127,9 +1127,11 @@ class AgentSession:
             self.console.stop_tool_call()
 
     def _run_one_tool_call(self, call):
+
         call_id = call.get("id", "")
         name = call.get("function", {}).get("name", "")
         params_str = call.get("function", {}).get("arguments", "{}")
+        self.console.start_tool_call(tool_name=name)
 
         try:
             tool_params = json.loads(params_str)

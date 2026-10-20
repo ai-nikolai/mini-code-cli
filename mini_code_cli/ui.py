@@ -474,7 +474,7 @@ class Console:
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
 
-    def start_tool_call(self, message="Calling tool"):
+    def start_tool_call(self, message="calling tool", tool_name=None):
         """Start a background "… calling tool" spinner (non-scrolling).
 
         Shown while the agent executes a tool call, mirroring
@@ -487,7 +487,7 @@ class Console:
         """
         self.stop_tool_call()  # be defensive: never leak more than one spinner
         if not self._can_clear_cursor():
-            self.emit(self.style(f"\u2026 {message}", fg="magenta", dim=True))
+            self.emit(self.style(f"\u2026 {message}:{tool_name}", fg="magenta", dim=True))
             return
         self._tool_call_stop = threading.Event()
         self._tool_call_thread = threading.Thread(
