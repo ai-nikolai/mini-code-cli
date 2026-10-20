@@ -206,7 +206,7 @@ def _make_tool_call_note(console, count):
 # history compaction
 # ---------------------------------------------------------------------------
 
-def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES, plan_hook=None):
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES, plan_hook=None, console=None):
     """Compact the conversation history once it grows beyond ``max_messages``.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
@@ -232,6 +232,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     try:
         ui.console.note(f"Compacting conversation history ({len(messages)} messages -> summary)...", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
+        console.start_thinking("compacting")
         summary, _, compact_usage = utils.call_openai_server(
             [{"role": "user", "content": summary_prompt}],
             max_tokens=1024,
@@ -241,6 +242,8 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
             api_key=api_key,
             timeout=llm_timeout,
         )
+        console.stop_thinking()
+
         accumulate_usage(token_stats, compact_usage)
         if summary:
             system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
@@ -836,6 +839,7 @@ class AgentSession:
         plan_text = ""
         try:
             ui.console.note("Generating a plan for the current goal...", "info")
+            self.console.start_thinking("planning")
             response, _, usage = utils.call_openai_server(
                 [{"role": "user", "content": plan_prompt_text}],
                 # The generated plan can be long: leave it unlimited (the server
@@ -847,6 +851,8 @@ class AgentSession:
                 api_key=self.api_key,
                 timeout=self.args.llm_timeout,
             )
+            self.console.stop_thinking()
+
             accumulate_usage(self.token_stats, usage)
             plan_text = response or ""
         except Exception as exc:
@@ -878,6 +884,7 @@ class AgentSession:
         summary = ""
         try:
             ui.console.note("Reviewing the current plan...", "info")
+            self.console.start_thinking("reviewing plan")
             response, _, usage = utils.call_openai_server(
                 [{"role": "user", "content": plan_prompt_text}],
                 max_tokens=1024,
@@ -887,6 +894,7 @@ class AgentSession:
                 api_key=self.api_key,
                 timeout=self.args.llm_timeout,
             )
+            self.console.stop_thinking()
             accumulate_usage(self.token_stats, usage)
             summary = response or ""
         except Exception as exc:
@@ -1263,7 +1271,7 @@ class AgentSession:
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
             self.args.llm_timeout, self.token_stats, self.history_index,
-            plan_hook=self._handle_compaction if self.plan_mode else None,
+            plan_hook=self._handle_compaction if self.plan_mode else None, console=self.console
         )
         if did_compact:
             self.history_index = new_index

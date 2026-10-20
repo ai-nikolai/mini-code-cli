@@ -241,6 +241,8 @@ else:
 
 Do not take any action yourself -- only report the plan state.
 
+Be concise in your analysis.
+
 Current goal:
 {goal}
 
