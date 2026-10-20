@@ -560,7 +560,7 @@ class Console:
             return
         label = self.style("tool", fg="yellow", bold=True) if self.color_enabled else "tool"
         self.emit(label)
-        self.emit(f"    {name}")
+        self.emit(f"    {name}: {str(params)[:35]}")
 
     def usage_inline(self, usage):
         """A compact one-liner describing a single LLM call's token usage."""
