@@ -330,7 +330,7 @@ class AgentSession:
     def start_session(self):
         """Loads existing session, detects existing session and asks or starts a new session."""
         loading_success = False
-        if restore_session:
+        if self.restore_session:
             try:
                 restore_directory = _restore_dir(self.restore_session)        
                 loading_success = self.restore_previous_session(restore_directory)
@@ -343,10 +343,14 @@ class AgentSession:
                 if detected and not self.background_mode:
                     answer = self.show_resume_choice()
                     if answer == "resume":
+                        self.console.note("Resuming the session.", "warn")
                         restore_directory = _restore_dir(detected)     
                         loading_success = self.restore_previous_session(restore_directory)
                     elif answer == "exit":
-                        self.console.note("Please choose 1, 2, or 3.", "warn")
+                        self.console.note("User chose to exit! Exiting.", "warn")
+                        raise SystemExit("") # Exit gracefully instead of crashing
+                    else:
+                        self.console.note("Will start with new session!", "warn")
 
             except Exception as e:
                 pass
