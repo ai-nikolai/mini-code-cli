@@ -151,7 +151,11 @@ def compaction_prompt(messages):
     """
     Takes a messages list and returns a compact prompt string summarizing the conversation.
     """
-    conversation = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+    # .get() rather than msg['content']: a tool-call-only assistant turn has
+    # content None (or the key absent) and must not raise KeyError here -- a
+    # failed build of the summary prompt would abort the whole compaction.
+    conversation = "\n".join(
+        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
     prompt = f"""
 Please analyze the following conversation and output a concise summary covering:
 1. Key topics discussed

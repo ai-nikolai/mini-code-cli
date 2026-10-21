@@ -122,6 +122,7 @@ def parse_args():
     parser.add_argument("--skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
+    parser.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES, help=f"History length (in messages) before the conversation is compacted into a summary. Lower it to compact sooner on small context windows. default={DEFAULT_MAX_MESSAGES}")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --subagents, --shell, --automode, --sudo")
@@ -1288,6 +1289,9 @@ class AgentSession:
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
             self.args.llm_timeout, self.token_stats, self.history_index,
+            # getattr keeps argparse-like namespaces without the attribute
+            # (older callers / tests) working, falling back to the default.
+            max_messages=getattr(self.args, "max_messages", DEFAULT_MAX_MESSAGES),
             plan_hook=self._handle_compaction if self.plan_mode else None, console=self.console
         )
         if did_compact:

@@ -45,6 +45,7 @@ from unittest import mock
 
 from mini_code_cli import ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
+from mini_code_cli.config import DEFAULT_MAX_MESSAGES
 from mini_code_cli.tools import grep as grep_tool
 from mini_code_cli.subagents import SubAgent, register, clear_registry
 
@@ -79,6 +80,7 @@ def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False):
         skills=False,
         llm_timeout=30,
         tool_timeout=30,
+        max_messages=DEFAULT_MAX_MESSAGES,
         plan=plan,
         verbose=False,
     )
