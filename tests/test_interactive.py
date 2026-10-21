@@ -7,6 +7,7 @@ These cover the parts of the CLI a user drives directly rather than the model:
   * the ``.mini`` latest-session pointer: its readers, its writer, and the
     rule that a real session records it while a background (sub-agent) one does not;
   * the shared ``oneline`` helper (one implementation, three callers);
+  * ``resolve_session_dir``, the one rule for what ``--restore-session`` means;
   * the shell-safety classifier, as a table across all three tiers;
   * two compaction regressions: a message without ``content`` must not break
     the summary prompt, and an empty summary must not roll the segment over.
@@ -289,6 +290,73 @@ class PointerWrittenBySessionsTest(_SessionCase):
 
         self.assertEqual(persistence.find_last_session_dir(self.workdir),
                          os.path.abspath(original.session_dir))
+
+
+# ---------------------------------------------------------------------------
+# resolving what --restore-session refers to
+# ---------------------------------------------------------------------------
+
+class ResolveSessionDirTest(unittest.TestCase):
+    """One canonical resolver: session dir, history file, bare id, or None."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.cache = os.path.join(self.root, "cache")
+        self.session = os.path.join(self.cache, "1792-abc")
+        os.makedirs(self.session)
+        for name in ("history.json", "history_1.json"):
+            with open(os.path.join(self.session, name), "w") as f:
+                f.write("[]")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_none_and_empty(self):
+        for value in (None, ""):
+            self.assertIsNone(persistence.resolve_session_dir(value))
+            self.assertIsNone(persistence.resolve_session_dir(value, self.cache))
+
+    def test_a_session_directory_is_returned(self):
+        self.assertEqual(persistence.resolve_session_dir(self.session), self.session)
+
+    def test_a_history_file_yields_its_directory(self):
+        for name in ("history.json", "history_1.json"):
+            self.assertEqual(
+                persistence.resolve_session_dir(os.path.join(self.session, name)),
+                self.session)
+
+    def test_a_bare_session_id_resolves_under_the_cache_dir(self):
+        self.assertEqual(
+            persistence.resolve_session_dir("1792-abc", self.cache), self.session)
+
+    def test_a_bare_id_without_a_cache_dir_is_left_alone(self):
+        self.assertEqual(persistence.resolve_session_dir("1792-abc"), "1792-abc")
+
+    def test_a_nonexistent_path_is_passed_through_unchanged(self):
+        """A typo must stay a typo: the caller reports it, we do not invent a dir."""
+        missing = os.path.join(self.root, "nope")
+        self.assertEqual(persistence.resolve_session_dir(missing, self.cache), missing)
+        self.assertEqual(persistence.resolve_session_dir("not-a-session", self.cache),
+                         "not-a-session")
+
+    def test_a_tilde_is_expanded(self):
+        with mock.patch.dict(os.environ, {"HOME": self.root}):
+            self.assertEqual(
+                persistence.resolve_session_dir("~/cache/1792-abc"), self.session)
+
+    def test_the_private_duplicates_are_gone(self):
+        self.assertFalse(hasattr(persistence, "_restore_dir"))
+        self.assertFalse(hasattr(persistence, "_resolve_history_path"))
+
+    def test_load_history_accepts_a_directory_or_a_file(self):
+        messages = [{"role": "user", "content": "hi"}]
+        with open(os.path.join(self.session, "history.json"), "w") as f:
+            json.dump(messages, f)
+
+        self.assertEqual(persistence.load_history(self.session), messages)
+        self.assertEqual(
+            persistence.load_history(os.path.join(self.session, "history.json")),
+            messages)
 
 
 # ---------------------------------------------------------------------------

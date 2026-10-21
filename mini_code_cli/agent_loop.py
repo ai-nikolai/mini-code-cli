@@ -56,7 +56,7 @@ from .persistence import (
     save_last_session_pointer,
     accumulate_usage,
     generate_unique_id,
-    _restore_dir,
+    resolve_session_dir,
 )
 from .sandbox import is_within_allowed_dir, tool_paths_are_allowed, _FILE_TOOL_PATH_ARGS
 from .permissions import (
@@ -363,7 +363,7 @@ class AgentSession:
 
         if self.restore_session:
             try:
-                restore_directory = _restore_dir(self.restore_session)        
+                restore_directory = resolve_session_dir(self.restore_session, self.cache_dir)        
                 loading_success = self.restore_previous_session(restore_directory)
             except Exception as e:
                 pass
@@ -373,13 +373,13 @@ class AgentSession:
                 detected = self._detect_last_session()
                 if detected and not self.background_mode and self.load_last_session:
                     self.console.note("Continuing the last session (--load-last-session).", "warn")
-                    restore_directory = _restore_dir(detected)
+                    restore_directory = resolve_session_dir(detected, self.cache_dir)
                     loading_success = self.restore_previous_session(restore_directory)
                 elif detected and not self.background_mode:
                     answer = self.show_resume_choice()
                     if answer == "resume":
                         self.console.note("Resuming the session.", "warn")
-                        restore_directory = _restore_dir(detected)     
+                        restore_directory = resolve_session_dir(detected, self.cache_dir)     
                         loading_success = self.restore_previous_session(restore_directory)
                     elif answer == "exit":
                         self.console.note("User chose to exit! Exiting.", "warn")

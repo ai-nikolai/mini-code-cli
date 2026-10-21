@@ -42,30 +42,38 @@ def history_dir(cache_dir, session_name=""):
     return os.path.join(cache_dir, session_name)
 
 
-def _resolve_history_path(restore_session):
-    """Resolve a ``--restore-session`` path to the ``history.json`` file it holds.
+def resolve_session_dir(restore_session, cache_dir=None):
+    """Resolve a ``--restore-session`` value to the session *directory* it names.
 
-    Accepts either the session directory itself or a direct path to a
-    ``history.json`` file. A leading ``~`` is expanded for convenience.
-    """
-    candidate = os.path.expanduser(restore_session)
-    if os.path.isdir(candidate):
-        candidate = os.path.join(candidate, "history.json")
-    return candidate
+    This is the one place that decides what a user-supplied session reference
+    means (it used to be two near-duplicate helpers, ``_resolve_history_path``
+    and ``_restore_dir``, which disagreed on edge cases). It accepts:
 
+      * ``None`` / ``""``              -> ``None`` (nothing to restore);
+      * a path to a history file       -> the directory containing it, so both
+                                          ``history.json`` and ``history_{n}.json``
+                                          work;
+      * a path to a session directory  -> that directory;
+      * a bare session id             -> ``cache_dir/<id>`` when ``cache_dir`` is
+                                          given, so ``--restore-session 1792-abc``
+                                          works without spelling out the full path;
+      * ``~``                          -> expanded.
 
-def _restore_dir(restore_session):
-    """Resolve a ``--restore-session`` value to the directory its history lives in.
-
-    Accepts either the session directory itself or a direct path to a history
-    file inside it (``history.json`` or ``history_{n}.json``). A leading ``~`` is
-    expanded for convenience.
+    The result is *not* required to exist: callers decide whether a missing
+    directory is fatal (a requested restore) or merely means "nothing to
+    restore". Never raises.
     """
     if not restore_session:
         return None
-    candidate = os.path.expanduser(restore_session)
+    candidate = os.path.expanduser(str(restore_session))
     if os.path.isfile(candidate):
-        return os.path.dirname(candidate)
+        return os.path.dirname(os.path.abspath(candidate))
+    if not os.path.isdir(candidate) and cache_dir:
+        # A bare session id: look for it inside the cache dir. Only accept it
+        # when it resolves to something real, so a typo'd path stays a typo.
+        under_cache = os.path.join(cache_dir, candidate)
+        if os.path.isdir(under_cache):
+            return under_cache
     return candidate
 
 
@@ -232,7 +240,11 @@ def load_history(restore_session):
     """
     if not restore_session:
         return None
-    history_path = _resolve_history_path(restore_session)
+    directory = resolve_session_dir(restore_session)
+    if os.path.isfile(os.path.expanduser(str(restore_session))):
+        history_path = os.path.expanduser(str(restore_session))
+    else:
+        history_path = os.path.join(directory, "history.json")
     if not os.path.isfile(history_path):
         ui.console.note(f"No history found to restore from: {restore_session}", "warn")
         return None
