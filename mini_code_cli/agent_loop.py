@@ -311,13 +311,8 @@ class AgentSession:
 
         # LLM / server configuration.
         self.server_url = f"{args.url}"
-        try:
-            model_name = utils.determine_vllm_model(self.server_url)
-        except:
-            model_name = None
-            pass
-        self.model = model_name if model_name else args.model
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
+        self.model = self._resolve_model(args)
         
         self._register_tools(args)
 
@@ -463,6 +458,32 @@ class AgentSession:
         Called at most once per session (see __init__).
         """
         return find_last_session_dir(self.allowed_dir)
+
+    def _resolve_model(self, args):
+        """Pick the model id: the one the user named, else the server's default.
+
+        The ``/v1/models`` probe is *lazy*: it only runs when ``--model`` was not
+        given, so a normal run with an explicit model makes no extra request and
+        cannot be delayed by an unreachable server. It is also exception-safe --
+        a failed probe warns once and falls back to ``args.model`` (possibly
+        None) instead of killing the session. It used to be a bare ``except:``
+        around an unconditional probe, which swallowed KeyboardInterrupt and
+        turned every construction into a network round-trip.
+        """
+        if args.model:
+            return args.model
+        try:
+            detected = utils.determine_vllm_model(
+                self.server_url, api_key=self.api_key or None,
+                timeout=getattr(args, "llm_timeout", DEFAULT_HTTP_TIMEOUT))
+        except Exception as e:
+            self.console.note(
+                f"Could not detect a model served at {self.server_url} ({e}); "
+                f"falling back to --model.", "warn")
+            return args.model
+        if detected:
+            self.console.note(f"Using the model served at {self.server_url}: {detected}", "info")
+        return detected or args.model
 
     def _register_tools(self, args):
         """Wire up which tools the LLM may call, and register the opt-in ones.

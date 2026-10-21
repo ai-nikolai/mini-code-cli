@@ -8,6 +8,7 @@ These cover the parts of the CLI a user drives directly rather than the model:
     rule that a real session records it while a background (sub-agent) one does not;
   * the shared ``oneline`` helper (one implementation, three callers);
   * ``resolve_session_dir``, the one rule for what ``--restore-session`` means;
+  * model resolution (the lazy, exception-safe ``/v1/models`` probe);
   * the shell-safety classifier, as a table across all three tiers;
   * two compaction regressions: a message without ``content`` must not break
     the summary prompt, and an empty summary must not roll the segment over.
@@ -290,6 +291,61 @@ class PointerWrittenBySessionsTest(_SessionCase):
 
         self.assertEqual(persistence.find_last_session_dir(self.workdir),
                          os.path.abspath(original.session_dir))
+
+
+# ---------------------------------------------------------------------------
+# model resolution (the /v1/models probe)
+# ---------------------------------------------------------------------------
+
+class ResolveModelTest(_SessionCase):
+    """The vLLM model probe is lazy and exception-safe."""
+
+    def build(self, model=None, console=None):
+        args = make_args(self.workdir, self.cache_dir)
+        args.model = model
+        return AgentSession(args, console=console or self.console())
+
+    def test_an_explicit_model_skips_the_probe_entirely(self):
+        with mock.patch.object(utils, "determine_vllm_model",
+                               side_effect=AssertionError("probed despite --model")):
+            session = self.build(model="my-model")
+        self.assertEqual(session.model, "my-model")
+
+    def test_the_probe_supplies_a_model_when_none_was_named(self):
+        with mock.patch.object(utils, "determine_vllm_model", return_value="served-model"):
+            session = self.build(model=None)
+        self.assertEqual(session.model, "served-model")
+
+    def test_a_failed_probe_falls_back_and_warns(self):
+        args = make_args(self.workdir, self.cache_dir)
+        args.model = None
+        console = self.console()
+        with mock.patch.object(utils, "determine_vllm_model",
+                               side_effect=OSError("connection refused")):
+            session = AgentSession(args, console=console)
+
+        self.assertIsNone(session.model)                     # degraded, not fatal
+        self.assertIn("Could not detect a model", self.output())
+
+    def test_a_failed_probe_does_not_swallow_interrupts(self):
+        """A bare `except:` used to hide KeyboardInterrupt during construction."""
+        args = make_args(self.workdir, self.cache_dir)
+        args.model = None
+        with mock.patch.object(utils, "determine_vllm_model",
+                               side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                AgentSession(args, console=self.console())
+
+    def test_the_probe_passes_the_api_key_and_a_bounded_timeout(self):
+        args = make_args(self.workdir, self.cache_dir)
+        args.model = None
+        args.api_key = "secret"
+        with mock.patch.object(utils, "determine_vllm_model",
+                               return_value=None) as probe:
+            AgentSession(args, console=self.console())
+        _, kwargs = probe.call_args
+        self.assertEqual(kwargs["api_key"], "secret")
+        self.assertLessEqual(kwargs["timeout"], 500)
 
 
 # ---------------------------------------------------------------------------
