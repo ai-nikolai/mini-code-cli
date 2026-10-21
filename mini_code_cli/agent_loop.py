@@ -391,6 +391,14 @@ class AgentSession:
         self.allowed_dir = os.path.abspath(args.allowed_dir)
         self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
+        # Mint the session id eagerly: the startup banner is printed *before* the
+        # resume offer is answered, so it must be able to name the session that
+        # early. start_new_session() reuses this id; a successful restore
+        # overwrites it, which is why the "[<id>]" line (printed after
+        # start_session) can differ from the id in the banner.
+        self.unique_id = generate_unique_id()
+        self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+
         self.console = console if console is not None else ui.console
         self.console.verbose = getattr(args, "verbose", False)
 
@@ -501,8 +509,13 @@ class AgentSession:
         return self._try_restore(resolve_session_dir(detected, self.cache_dir))
 
     def start_new_session(self):
-        """A function to start a new session."""
-        self.unique_id = generate_unique_id()
+        """Start a fresh session under ``self.unique_id``.
+
+        The id is normally minted in ``__init__`` (see there) and simply reused
+        here; it is re-minted only when it is missing, which is what happens
+        after a failed restore has cleared it.
+        """
+        self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
 
         self.plan_manager = plan_utils.PlanManager(
@@ -957,13 +970,23 @@ class AgentSession:
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
-        self.start_session()
-        # Startup output, in a fixed order: the banner (what this session is),
-        # the flag-dependent warnings (API key / shell / --sudo -- the ones that
-        # change how much the agent may do unattended), the id this conversation
-        # is saved under, and finally the command tip.
+        # Startup output comes FIRST, before the session is resolved. The banner
+        # and the flag-dependent warnings (API key / shell / --sudo / an unknown
+        # model) describe how this process is configured -- how much the agent
+        # may do unattended -- so the user must see them *before* being asked
+        # whether to resume an older conversation (and before anything can
+        # consume stdin). None of them depends on which session is finally used:
+        # they read args, allowed_dir, cache_dir, server_url and the resolved
+        # model, plus the provisional id minted in __init__.
         self.print_welcome()
         self.print_announcements()
+        self._warn_compaction_budget()
+
+        # Only now resolve the session (resume offer / restore / fresh start),
+        # because all of that can consume input and can replace the id. The id
+        # line and the tip therefore come after it and show the id actually in
+        # use (the banner may have shown the provisional one).
+        self.start_session()
         self._print_session_id()
         self._emit_tip()
 
@@ -1006,9 +1029,15 @@ class AgentSession:
                    "turn, /reset <n> to rewind. Type /help for all commands.")
         self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
-        # Say so when the compaction budget came from the fallback: an unknown
-        # model gets a deliberately conservative window, so the user should know
-        # the limit is a guess they can override rather than a measured value.
+    def _warn_compaction_budget(self):
+        """Warn when the compaction budget came from the unknown-model fallback.
+
+        An unknown model gets a deliberately conservative window, so the user
+        should know the limit is a guess they can override rather than a
+        measured value. This is a startup warning (it describes the run's
+        configuration, not a turn), so it is printed with the other
+        announcements rather than after the session has been settled.
+        """
         if self.compaction_budget.source == "default":
             self.console.note(
                 f"Unknown model {self.model!r}: assuming a "
