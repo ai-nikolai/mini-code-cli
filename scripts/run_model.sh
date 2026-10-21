@@ -2,7 +2,6 @@ PORT=30000
 
 
 echo "Starting Model."
-
 CUDA_VISIBLE_DEVICES=0 vllm serve ornith-ai/Ornith-1.5-35B-A3B \
     --tensor-parallel-size 1 \
     --host 0.0.0.0 --port ${PORT} \
@@ -12,7 +11,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve ornith-ai/Ornith-1.5-35B-A3B \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
     --reasoning-parser qwen3 \
-    --trust-remote-code &
+    --trust-remote-code > ./vllm.log 2>&1 &
 
 
 TIMEOUT_SECONDS=1200

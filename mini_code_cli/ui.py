@@ -323,6 +323,26 @@ class Console:
     def print_box(self, lines, title=None, fg="cyan"):
         self.emit(self.box(lines, title=title, fg=fg))
 
+    def status_box(self, lines, title=None, fg="cyan", dim=False):
+        """Render a bordered box of free-form *status* lines (used for /plan).
+
+        Unlike :meth:`turn` (a conversation turn) this renders the loop-owned
+        tracking files as a single, glanceable box: the goal and the current
+        plan side by side, with the last completion review under a fixed
+        section. Each line is shown verbatim (so a numbered markdown plan stays
+        a numbered list). ``dim`` renders the lines dimmed so the box reads as
+        secondary, reference content rather than a live turn. Best-effort: a
+        blank line is rendered as an empty cell so plan sections stay visible.
+        """
+        styled_lines = []
+        for line in lines:
+            text = "" if line is None else str(line)
+            if dim:
+                styled_lines.append(self.style(text, dim=True))
+            else:
+                styled_lines.append(text)
+        self.print_box(styled_lines, title=title, fg=fg)
+
     def truncate(self, text, limit):
         text = str(text)
         if len(text) > limit:
@@ -454,7 +474,7 @@ class Console:
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
 
-    def start_tool_call(self, message="Calling tool"):
+    def start_tool_call(self, message="calling tool", tool_name=None):
         """Start a background "… calling tool" spinner (non-scrolling).
 
         Shown while the agent executes a tool call, mirroring
@@ -467,7 +487,7 @@ class Console:
         """
         self.stop_tool_call()  # be defensive: never leak more than one spinner
         if not self._can_clear_cursor():
-            self.emit(self.style(f"\u2026 {message}", fg="magenta", dim=True))
+            self.emit(self.style(f"\u2026 {message}:{tool_name}", fg="magenta", dim=True))
             return
         self._tool_call_stop = threading.Event()
         self._tool_call_thread = threading.Thread(
@@ -540,7 +560,7 @@ class Console:
             return
         label = self.style("tool", fg="yellow", bold=True) if self.color_enabled else "tool"
         self.emit(label)
-        self.emit(f"    {name}")
+        self.emit(f"    {name}: {str(params)[:35]}")
 
     def usage_inline(self, usage):
         """A compact one-liner describing a single LLM call's token usage."""

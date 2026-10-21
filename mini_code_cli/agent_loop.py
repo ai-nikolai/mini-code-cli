@@ -52,7 +52,7 @@ from .persistence import (
     load_summary_from_dir,
     load_usage_from_dir,
     find_last_session_dir,
-    save_last_session_pointer,
+    # save_last_session_pointer,
     accumulate_usage,
     generate_unique_id,
     _restore_dir,
@@ -122,6 +122,7 @@ def parse_args():
     parser.add_argument("--skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
+    parser.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES, help=f"History length (in messages) before the conversation is compacted into a summary. Lower it to compact sooner on small context windows. default={DEFAULT_MAX_MESSAGES}")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --subagents, --shell, --automode, --sudo")
@@ -165,6 +166,7 @@ def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
     ui.console.emit(ui.console.style("History / navigation commands:", bold=True, fg="cyan"))
     ui.console.emit("  /history         list the conversation (turn number, what happened, where)")
     ui.console.emit("  /history <n>      show the full messages recorded for turn n")
+    ui.console.emit("  /plan             show the current goal + plan (plan mode only)")
     ui.console.emit("  /reset [<n>]      rewind to the end of turn n (drops everything after it)")
     ui.console.emit("  /clear            clear the screen (keeps the conversation history)")
     ui.console.emit("  /help             show this help")
@@ -205,7 +207,7 @@ def _make_tool_call_note(console, count):
 # history compaction
 # ---------------------------------------------------------------------------
 
-def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES):
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES, plan_hook=None, console=None):
     """Compact the conversation history once it grows beyond ``max_messages``.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
@@ -213,6 +215,13 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     old turns with that summary, keeping the original system prompt as the first
     message. The compaction call itself is a single, tool-free request, so it
     cannot trigger further tool calls or recurse into compaction.
+
+    ``plan_hook`` is an optional callable the caller supplies only when running
+    under plan mode (in practice ``AgentSession._handle_compaction``). After the
+    summary is built the hook re-injects the running goal + plan so the compacted
+    messages carry them forward. Passing it in -- instead of referencing the
+    owning session -- keeps ``maybe_compact`` a small, module-level, network-free
+    helper that the test-suite can import and exercise directly.
     """
     if len(messages) <= max_messages:
         # No compaction: keep the same segment (history_index) and signal the
@@ -224,6 +233,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     try:
         ui.console.note(f"Compacting conversation history ({len(messages)} messages -> summary)...", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
+        console.start_thinking("compacting")
         summary, _, compact_usage = utils.call_openai_server(
             [{"role": "user", "content": summary_prompt}],
             max_tokens=1024,
@@ -233,6 +243,8 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
             api_key=api_key,
             timeout=llm_timeout,
         )
+        console.stop_thinking()
+
         accumulate_usage(token_stats, compact_usage)
         if summary:
             system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
@@ -243,6 +255,15 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
                 "role": "user",
                 "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
             })
+
+            # In plan mode, re-inject the running plan + current goal so a
+            # compaction (which would otherwise drop them) keeps the model
+            # working against the goal it is still trying to finish. The hook is
+            # wired in only when the caller runs under plan mode; otherwise
+            # compaction degrades to a plain summary.
+            if plan_hook is not None:
+                plan_hook(compacted)
+            
             ui.console.note(f"History compacted to {len(compacted)} messages.", "warn")
             # A new segment (history_index + 1) is started on compaction: the
             # compacted messages are its snapshot, and every later turn appends
@@ -268,32 +289,34 @@ class AgentSession:
     be unit-tested.
     """
 
-    EXIT_COMMANDS = {"quit", "exit", "/quit", "/exit"}
+    EXIT_COMMANDS = {"quit", "exit", "/quit", "/exit", "exit()", "quit()"}
     CLEAR_COMMANDS = {"clear", "/clear"}
 
-    def __init__(self, args, console=None):
+    def __init__(self, args, console=None, background_mode = False):
         self.args = args
         self.allowed_dir = os.path.abspath(args.allowed_dir)
         self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
-        # The console that renders everything the agent prints. Unit tests /
-        # other callers can swap it out (e.g. AgentSession(args, console=...) with
-        # a color=False console) but it defaults to the shared ui.console.
         self.console = console if console is not None else ui.console
-        # --verbose toggles the amount of detail printed. Defaults to False so
-        # the quiet, transcript-only view is the out-of-the-box experience.
         self.console.verbose = getattr(args, "verbose", False)
 
         # LLM / server configuration.
         self.server_url = f"{args.url}"
-        model_name = utils.determine_vllm_model(self.server_url)
+        try:
+            model_name = utils.determine_vllm_model(self.server_url)
+        except:
+            model_name = None
+            pass
         self.model = model_name if model_name else args.model
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
-
-        # Which tools the LLM may call (shell / sub-agents / skills), and which
-        # of them are registered. Split out of __init__ for readability -- see
-        # _register_tools().
+        
         self._register_tools(args)
+
+        # report_path is set on a *sub-agent child* session (by
+        # SubAgent._build_child_args) 
+        self.report_path = getattr(args, "report_path", None)
+
+        self.plan_mode = bool(getattr(self.args, "plan", False))
 
         # Token accounting for the whole session.
         self.token_stats = {
@@ -304,107 +327,102 @@ class AgentSession:
             "tool_calls": 0,
         }
 
+        self.background_mode = background_mode
+
+        self.restore_session = getattr(self.args, "restore_session", None) #specific session
+        
+    def start_session(self):
+        """Loads existing session, detects existing session and asks or starts a new session."""
+        loading_success = False
+        if self.restore_session:
+            try:
+                restore_directory = _restore_dir(self.restore_session)        
+                loading_success = self.restore_previous_session(restore_directory)
+            except Exception as e:
+                pass
+            
+        else:
+            try:
+                detected = self._detect_last_session()
+                if detected and not self.background_mode:
+                    answer = self.show_resume_choice()
+                    if answer == "resume":
+                        self.console.note("Resuming the session.", "warn")
+                        restore_directory = _restore_dir(detected)     
+                        loading_success = self.restore_previous_session(restore_directory)
+                    elif answer == "exit":
+                        self.console.note("User chose to exit! Exiting.", "warn")
+                        raise SystemExit("") # Exit gracefully instead of crashing
+                    else:
+                        self.console.note("Will start with new session!", "warn")
+
+            except Exception as e:
+                pass
+                   
+        if not loading_success:
+            self.start_new_session()
+
+    def start_new_session(self):
+        """A function to start a new session."""
         self.unique_id = generate_unique_id()
+        self.session_dir = os.path.join(self.cache_dir, self.unique_id)
 
-        # Plan-mode tracking (see plan.py). Always instantiated so the loop can
-        # call it unconditionally; every method no-ops when --plan is disabled.
-        self.plan_mode = bool(getattr(self.args, "plan", False))
         self.plan_manager = plan_utils.PlanManager(
-            os.path.join(self.cache_dir, self.unique_id), enabled=self.plan_mode)
+            self.session_dir, enabled=self.plan_mode)
 
-        # High-level recorder + history segments. Instead of a single ever-growing
-        # history.json, a session keeps:
-        #   * ``history_{n}.json`` files -- one per conversation *segment*; a brand
-        #     new segment is started (n -> n+1) every time the history is compacted.
-        #   * ``summary_history.json`` -- a flat, high-level *recorder*: one record
-        #     per turn (the running turn number, *what* happened -- an assistant
-        #     reply, a tool call, or a compaction summary -- and which
-        #     ``history_{n}.json`` + message index the turn lives in).
-        # The recorder lets the user inspect and rewind the conversation (/history,
-        # /reset) without reading the full detailed histories, because every turn's
-        # recorded index marks a faithful end-of-turn snapshot of its segment.
         self.history_index = 0
         self.summary = []
 
-        # report_path is set on a *sub-agent child* session (by
-        # SubAgent._build_child_args) so it can exempt its own report.md -- which
-        # lives under the parent's cache dir, usually outside --allowed-dir --
-        # from the sandbox. A normal session leaves this None.
-        self.report_path = getattr(args, "report_path", None)
+        self.messages = self._build_initial_messages()
 
-        # Conversation state. When --restore-session is given we continue that
-        # session's history instead of starting fresh -- still under the brand
-        # new unique id above, so the original session file is never
-        # overwritten. Falls back to a freshly built history if the restore
-        # file is missing or unreadable.
-        # --load-last-session auto-detects the most recent previous session in the
-        # cache dir and continues it -- exactly like --restore-session, but without
-        # needing to know the folder name. An explicit --restore-session always wins
-        # and is used verbatim; otherwise the newest session is resolved here.
-        # A "last session" candidate -- only when the user did NOT explicitly
-        # ask to resume one (no --load-last-session / --restore-session): the
-        # most recent previous session in the cache dir. Unlike a real restore,
-        # the conversation starts empty here and is only spliced in if the user
-        # confirms they want it (see _offer_resume_last_session).
-        restore_session = getattr(self.args, "restore_session", None)
-        self.last_session_candidate = None
-        self.loaded_last_session_dir = None
-        # Resolve the "most recent session" exactly once, and reuse the result
-        # for both concerns below (an explicit --restore-session always wins and
-        # is used verbatim):
-        #   * --load-last-session turns the detected session into a real restore
-        #     (continue it under this new id), OR
-        #   * when the user did NOT explicitly ask to resume (no
-        #     --load-last-session / --restore-session), it becomes a resume
-        #     *candidate* that run() offers interactively (see
-        #     _offer_resume_last_session). The conversation still starts empty
-        #     here and is spliced in only if the user confirms.
-        # Skipped entirely once a real restore is already in hand, so those paths
-        # never offer anything.
-        detected = self._detect_last_session()
-        if getattr(self.args, "load_last_session", False) and not restore_session and detected:
-            restore_session = detected
-            self.loaded_last_session_dir = detected
-        if not restore_session and detected:
-            self.last_session_candidate = detected
-        restore_directory = _restore_dir(restore_session)
-        restored = load_history_from_dir(restore_directory) if restore_directory else None
-        # A session built from an explicit restore / load-last-session reuses the
-        # restored history (under this brand-new id, so the original is never
-        # overwritten); an idle start keeps the freshly built initial messages.
-        self.messages = restored if restored is not None else self._build_initial_messages()
-        self._restore_from(restore_directory, restored)
-        # --load-last-session asked for a session but nothing usable was found:
-        # clear the flag so run() reports "no previous session to load" instead
-        # of pretending it resumed one. When the restore succeeded the flag set
-        # above (loaded_last_session_dir = detected) is kept so run() prints the
-        # "Loaded most recent session ... and continuing it" note. Best-effort:
-        # a missing/empty/corrupt history falls back to a fresh session rather
-        # than crashing.
-        if restored is None:
-            self.loaded_last_session_dir = None
-
-        # Snapshot the initial (or restored) messages as the first history segment
-        # and persist the recorder, so a session starts with on-disk state to
-        # inspect and rewind to.
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
         save_summary(self.summary, self.cache_dir, self.unique_id)
+
+
+    def restore_previous_session(self, restore_directory):
+        """A function to restore from a directory.
+
+        Order matters here. ``self.messages`` must be loaded *before* the
+        recorder is restored, because the legacy fallback in
+        :meth:`_load_summary_if_restored` rebuilds the recorder by scanning the
+        restored messages. ``self.summary`` / ``self.history_index`` are seeded
+        first so that fallback can append to them and so ``_persist()`` has a
+        segment index to write to. Previously all three were unset on this path,
+        so restoring a session folder that had a ``history_N.json`` but no
+        ``summary_history.json`` (older code, or a hand-made folder) raised
+        AttributeError and the caller silently started a *new* session instead.
+        """
+        try:
+            self.unique_id = os.path.basename(os.path.normpath(restore_directory))
+            self.session_dir = restore_directory
+            self.plan_manager = plan_utils.PlanManager(
+                self.session_dir, enabled=self.plan_mode)
+            self.summary = []
+            self.history_index = 0
+            self._restore_usage_if_available(restore_directory)
+            restored = load_history_from_dir(restore_directory) if restore_directory else None
+
+            self.messages = restored if restored is not None else self._build_initial_messages()
+            self._load_summary_if_restored(restore_directory)
+
+            return True
+
+        except Exception as e:
+            self.unique_id = None
+            self.session_dir = None
+            self.plan_manager = None
+            return False
+
 
     def _detect_last_session(self):
         """Resolve the most recent previous session dir, once.
 
-        Consults the .mini pointer recorded under --allowed-dir first (an
-        explicit record of the last session worked in), then falls back to the
-        timestamp heuristic over the cache dir. Returns the path, or None. The
-        constructor calls this a single time so the (relatively expensive)
-        pointer / directory scan does not run twice for the two independent
-        concerns -- --load-last-session vs. the interactive resume candidate.
+        There is deliberately NO timestamp/mtime fallback over the cache dir: a
+        previous session is restored only via the ``.mini`` pointer (an explicit
+        record of the session the user last worked in). Returns the path, or None.
+        Called at most once per session (see __init__).
         """
-        return find_last_session_dir(
-            self.cache_dir,
-            allowed_dir=self.allowed_dir,
-            use_pointer=True,
-        )
+        return find_last_session_dir(self.allowed_dir)
 
     def _register_tools(self, args):
         """Wire up which tools the LLM may call, and register the opt-in ones.
@@ -436,9 +454,12 @@ class AgentSession:
 
         self.enable_skills = bool(getattr(args, "enable_skills", False))
         if self.enable_skills:
-            self.skills_tools_dict = skills.get_skills_tools_dict(self.allowed_dir)
+            # list/create/run_skill + the scoped read/write_skill_file tools.
+            self.tools_dict.update(skills.get_skills_tools_dict(self.allowed_dir))
             self.llm_tools.extend(skills.get_skills_tools(self.allowed_dir))
-            self.tools_dict.update(self.skills_tools_dict)
+            self.tools_dict.update(skills.get_skills_file_tools_dict(self.allowed_dir))
+            self.llm_tools.extend(skills.get_skills_file_tools(self.allowed_dir))
+
 
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
@@ -449,6 +470,7 @@ class AgentSession:
                 tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
                 plan_mode=self.plan_mode,
                 skills_dir=self.allowed_dir if self.enable_skills else None,
+                session_dir=self.session_dir,
             )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -466,7 +488,7 @@ class AgentSession:
 
         return messages
 
-    def _restore_usage_if_available(self, restore_session):
+    def _restore_usage_if_available(self, restore_directory):
         """Seed this session's token totals from a sibling usage.json, if the
         restored session had one, so the running summary stays continuous.
 
@@ -474,15 +496,12 @@ class AgentSession:
         of) the in-memory totals, and any problem here is ignored silently so a
         missing or malformed usage file can never break a restore.
         """
-        if not restore_session:
-            return
-        directory = _restore_dir(restore_session)
-        saved = load_usage_from_dir(directory)
+        saved = load_usage_from_dir(restore_directory)
         for key in self.token_stats:
             if key in saved:
                 self.token_stats[key] += int(saved[key] or 0)
 
-    def _load_summary_if_restored(self, directory):
+    def _load_summary_if_restored(self, restore_directory):
         """Restore the high-level recorder and segment index for a restore.
 
         Prefers the saved ``summary_history.json`` so the recorder stays flat and
@@ -492,7 +511,8 @@ class AgentSession:
         rebuild a minimal recorder by scanning the restored messages for
         assistant turns, so navigation still works. Best-effort only.
         """
-        saved = load_summary_from_dir(directory)
+        saved = load_summary_from_dir(restore_directory)
+
         saved = [r for r in saved if isinstance(r, dict)]
         if saved:
             self.summary = saved
@@ -504,28 +524,6 @@ class AgentSession:
                 turn += 1
                 self.summary.append({"turn": turn, "what": "assistant",
                                      "history_file": 0, "index": i})
-
-    def _restore_from(self, directory, messages=None):
-        """Seed usage, recorder and messages for a restore under this id.
-
-        Shared by the constructor (for an explicit ``--restore-session`` /
-        ``--load-last-session``) and the interactive resume prompt. The caller
-        resolves and loads ``directory`` itself, then hands the loaded
-        ``messages`` here so all seeding lives in one place.
-
-        ``usage.json`` is layered *on top* of the in-memory totals (so a restore
-        under a brand-new session id accumulates cleanly), the recorder is
-        flattened across the segment boundary so ``/history`` / ``/reset`` stay
-        consistent, and ``self.messages`` becomes the restored snapshot.
-        Best-effort: a missing directory / unreadable files leave the session
-        unchanged (a fresh, empty history).
-        """
-        restored = messages if messages is not None else (
-            load_history_from_dir(directory) if directory else None)
-        self._restore_usage_if_available(directory)
-        self._load_summary_if_restored(directory)
-        if restored:
-            self.messages = restored
 
     def _record_turn(self, what, messages, history_index=None):
         """Append one entry to the high-level recorder.
@@ -645,37 +643,7 @@ class AgentSession:
                 f"Sub-agents enabled ({len(self.subagents_registry)} available: "
                 f"{', '.join(self.subagents_registry)}).", "info")
 
-    def _offer_resume_last_session(self):
-        """Offer to continue the most recent previous session, if one exists.
-
-        Only reached when the user did *not* already ask to resume a session
-        (``--load-last-session`` / ``--restore-session``), which resolve their
-        own before this and leave ``last_session_candidate`` unset. When a
-        candidate exists the user chooses between three outcomes:
-
-          * **Resume** -- splice the previous session's history into this one
-            (still under the brand-new id) and continue it, under a new id.
-          * **New** -- leave the conversation empty and start a fresh session.
-          * **Exit** -- stop here before any pointer is written or loop enters.
-
-        The choice is recorded by setting/clearing ``self.last_session_candidate``:
-        ``resume`` keeps it pointing at the previous session's directory (the
-        caller in :meth:`run` performs the restore); ``new`` clears it (nothing
-        to restore). Returns True when the user chose to exit so the caller
-        returns before writing any pointer or entering the loop.
-        """
-        if not self.last_session_candidate:
-            return False
-        choice = self._resume_choice()
-        if choice == "resume":
-            return False  # keep the candidate: run() restores it below.
-        # "new" -> clear the candidate (nothing to restore); "exit" -> clear
-        # and tell the caller to stop before writing a pointer / entering the
-        # loop.
-        self.last_session_candidate = None
-        return choice == "exit"
-
-    def _resume_choice(self):
+    def show_resume_choice(self):
         """Prompt for the resume choice and return its label.
 
         Returns one of ``"resume"``, ``"new"`` or ``"exit"``. The prompt
@@ -706,61 +674,28 @@ class AgentSession:
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
-        self.print_announcements()
-        print_welcome(self.allowed_dir, self.server_url, self.args,
-                      self.unique_id, self.cache_dir, self.model)
+        # Called in the beginning to init the session.
+        self.start_session()
 
-        # A previous session exists but the user did not explicitly ask to
-        # resume it. Offer them a choice; on "exit" we return here before
-        # writing any pointer or entering the loop, and we splice the
-        # restored history into this session if they pick "resume".
-        if self._offer_resume_last_session():
-            return
-        if self.last_session_candidate is not None:
-            restored_dir = self.last_session_candidate
-            self.last_session_candidate = None
-            restored = load_history_from_dir(restored_dir)
-            self._restore_from(restored_dir, restored)
-            self.loaded_last_session_dir = restored_dir
-
-        # Announce the session's unique id as an assistant-styled message so the
-        # user can see / copy the id this conversation is being saved under.
-        self._print_session_id()
-
-        # Record this session as the "latest" so a future --load-last-session can
-        # resume it without scanning the cache dir. This lives in the top-level
-        # loop's own directory (cache_dir/unique_id), and only the interactive
-        # run() writes it -- a sub-agent child drives via _drive_auto and would
-        # otherwise overwrite the pointer with its own buried path.
-        self._save_last_session_pointer()
-
-        # Report the outcome of --load-last-session up front, so the user sees
-        # whether we resumed an earlier conversation (under a brand-new id) or
-        # started fresh because no previous session was found.
-        if self.loaded_last_session_dir is not None:
-            self.console.note(
-                f"Loaded most recent session "
-                f"({os.path.basename(self.loaded_last_session_dir)}) and continuing "
-                f"it under a new session id.", "ok")
-        elif getattr(self.args, "load_last_session", False):
-            self.console.note(
-                "No previous session found to load; starting a fresh session.", "warn")
 
         # Hint at startup so the high-level history feature is discoverable:
         # /history browses the recorder, /history <n> inspects a turn, and
         # /reset <n> rewinds the conversation to that turn's state.
-        self.console.emit(
-            self.console.style(
-                "Tip: /history to browse the conversation, /history <n> to inspect a "
-                "turn, /reset <n> to rewind. Type /help for all commands.",
-                dim=True, fg="cyan"))
+        tip = ("Tip: /history to browse the conversation, /history <n> to inspect a "
+               "turn, /reset <n> to rewind. Type /help for all commands.")
+        if getattr(self.args, "plan", False):
+            tip = ("Tip: /plan to show the current goal + plan (plan mode), "
+                   "/history to browse the conversation, /history <n> to inspect a "
+                   "turn, /reset <n> to rewind. Type /help for all commands.")
+        self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
         # The --prompt value is a one-shot initial turn: it is sent verbatim and
         # then cleared, so later turns come from the user (manual mode) or are
         # produced automatically by the loop (auto mode).
         pending = initial_prompt
 
-        while True:
+        running = True
+        while running:
             try:
                 # 1) Get the user's turn: the one-shot preset, or a fresh line.
                 if pending is not None:
@@ -771,8 +706,9 @@ class AgentSession:
                     pending = None
                 else:
                     user_input = self._read_user_line()
-                    if user_input is None:  # quit / exit
-                        self._finish_goal_and_shutdown()
+                    if user_input is None or user_input.lower() in self.EXIT_COMMANDS:  # EOF / Ctrl-C at the prompt
+                        self.console.note("Thank you. Goodbye! Saving history...", "info")
+                        running = False
                         break
 
                     # Interactive slash commands are handled in place and never
@@ -780,29 +716,60 @@ class AgentSession:
                     # was such a command, so we just re-prompt (continue).
                     if user_input.startswith("/") and self._handle_command(user_input):
                         continue
-
-                # In plan mode, remember the user's latest instruction as the
-                # active goal so the loop (and plan-mode compaction) can track it
-                # even if the agent never writes it to disk itself.
-                self._capture_goal(user_input)
-
-                # 2) Hand the user turn to the model and act on its tool calls.
+                
                 self.messages.append({"role": "user", "content": user_input})
-                while True:
+
+                if self.plan_mode:
+                    self.console.note(
+                            "Generating plan for agent.", "info")
+                    self._record_goal_request(user_input)
+                    self._generate_plan_and_inject(user_input)
+                    self.console.note(
+                            "Plan generated.", "info")
+                running_turn = True
+                while running_turn:
+                    self.console.note(
+                            "Entering single turn loop.", "info")
+                    # actually stepping through the agentic steps.
                     should_continue = self._step()
                     self._persist()
-                    if not should_continue:
-                        break
-                    self.console.note(
-                        "Continuing with LLM calls until no more tool calls.", "info")
+                    if should_continue:
+                        self.console.note(
+                            "Continuing with LLM calls until no more tool calls.", "info")
+                    else:
+                        self.console.note(
+                            "LLM seems to have to an end of the task.", "info")
+
+                        if self.plan_mode:
+                            self.console.note(
+                                "Reviewing the plan, if everything is done.", "info")
+                            self._review_plan_completion() 
+                            should_continue = self._step()
+                            self._persist()
+
+                        # A response with no tool calls means the turn is over. This must
+                        # happen regardless of plan mode: previously the assignment sat inside
+                        # `if self.plan_mode`, so non-plan sessions never left the turn loop and
+                        # re-called the model forever.
+                        if not should_continue:
+                            running_turn = False  # escape the turn loop
+            
             except _Abort:
                 # Ctrl-C during a permission prompt already shut the session
                 # down; just unwind the loop quietly.
-                break
+                running = False
+
             except KeyboardInterrupt:
                 self.console.note("Interrupting: Mini Code Exiting...", "error")
+                self.shutdown()
+                running = False
                 # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
-                self._persist()
+            except Exception as e:
+                self.console.note(f"Exception {e}. Exiting...", "error")
+                self.shutdown()
+                running = False
+        self.console.note(
+            "EOF.", "info")
 
     def _print_session_id(self):
         """Print the session's unique id as a minimal "Assistant" turn.
@@ -814,15 +781,15 @@ class AgentSession:
         """
         self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
 
-    def _save_last_session_pointer(self):
-        """Record this session's directory in --allowed-dir/.mini.
+    # def _save_last_session_pointer(self):
+    #     """Record this session's directory in --allowed-dir/.mini.
 
-        Writes the .mini pointer that a later --load-last-session consults first
-        (see save_last_session_pointer). Best-effort: never raises, so a pointer
-        hiccup can never break the interactive session.
-        """
-        save_last_session_pointer(self.allowed_dir,
-                                  os.path.join(self.cache_dir, self.unique_id))
+    #     Writes the .mini pointer that a later --load-last-session consults first
+    #     (see save_last_session_pointer). Best-effort: never raises, so a pointer
+    #     hiccup can never break the interactive session.
+    #     """
+    #     save_last_session_pointer(self.allowed_dir,
+    #                               os.path.join(self.cache_dir, self.unique_id))
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
@@ -875,49 +842,123 @@ class AgentSession:
 
     # -- plan mode ---------------------------------------------------------
 
-    def _capture_goal(self, user_input):
-        """Seed CURRENT_GOAL.md with the user's latest instruction (plan mode).
-
-        The loop owns the goal (the user's last instruction); the agent owns the
-        plan (CURRENT_PLAN.md). Overwriting on every turn keeps the goal current.
-        Slash commands and the empty input are not real instructions, so they are
-        ignored. No-op when --plan is off.
+    def _record_goal_request(self, user_input):
+        """Record the user's latest request in the plan-mode tracking files.
         """
-        if not self.plan_mode or user_input is None:
-            return
         stripped = user_input.strip()
         if not stripped or stripped.startswith("/"):
             return
-        self.plan_manager.write_goal(user_input)
+        self.plan_manager.write_goal(stripped)
+
+    def _generate_plan_and_inject(self, current_instruction):
+        """Ask the model to author a plan for the current instruction.
+        """
+        plan_prompt_text = prompts.plan_prompt(self.messages, current_instruction)
+        plan_text = ""
+        try:
+            ui.console.note("Generating a plan for the current goal...", "info")
+            self.console.start_thinking("planning")
+            response, _, usage = utils.call_openai_server(
+                [{"role": "user", "content": plan_prompt_text}],
+                # The generated plan can be long: leave it unlimited (the server
+                # decides the cap) rather than capping the step-by-step authoring.
+                max_tokens=None,
+                temperature=0.0,
+                model=self.model,
+                server_url=self.server_url,
+                api_key=self.api_key,
+                timeout=self.args.llm_timeout,
+            )
+            self.console.stop_thinking()
+
+            accumulate_usage(self.token_stats, usage)
+            plan_text = response or ""
+        except Exception as exc:
+            ui.console.note("Could not generate a plan: %s" % exc, "warn")
+
+        self.plan_manager.write_plan(plan_text)
+        if plan_text and plan_text.strip():
+            self.messages.append({
+                "role": "user",
+                "content": "Current plan for the goal (from CURRENT_PLAN.md):\n%s" % plan_text.strip(),
+            })
 
     def _finish_goal_and_shutdown(self):
-        """Mark the active goal finished in CURRENT_PLAN.md, then quit/save."""
-        self._mark_current_goal_finished()
-        self.shutdown()
+        """Mark the active goal finished in CURRENT_PLAN.md, then quit/save.
 
-    def _mark_current_goal_finished(self):
-        """Append a \"goal finished\" entry to the plan document (plan mode).
-
-        Uses the goal the loop last recorded (self.plan_manager.goal); a no-op
-        when --plan is off, so it is safe to call unconditionally.
+        The goal is whatever the loop last recorded; if the loop never recorded
+        one we fall back to reading the goal file back so a one-shot --prompt
+        preset still marks its goal finished. A no-op in method behaviour when
+        --plan is off (PlanManager no-ops), so it is safe to call unconditionally.
         """
         self.plan_manager.mark_finished(self.plan_manager.goal)
+        self.shutdown()
+
+    def _review_plan_completion(self):
+        """Once the work looks done, review the plan's completion.
+        """
+        plan_prompt_text = prompts.plan_review_prompt(
+            self.messages, self.plan_manager.goal or "")
+        summary = ""
+        try:
+            ui.console.note("Reviewing the current plan...", "info")
+            self.console.start_thinking("reviewing plan")
+            response, _, usage = utils.call_openai_server(
+                [{"role": "user", "content": plan_prompt_text}],
+                max_tokens=1024,
+                temperature=0.0,
+                model=self.model,
+                server_url=self.server_url,
+                api_key=self.api_key,
+                timeout=self.args.llm_timeout,
+            )
+            self.console.stop_thinking()
+            accumulate_usage(self.token_stats, usage)
+            summary = response or ""
+        except Exception as exc:
+            ui.console.note("Could not review the plan: %s" % exc, "warn")
+
+        # Persist the review summary to the plan document and re-inject it so
+        # the model works from the review result.
+        self.plan_manager.write_plan_summary(summary)
+        if summary and summary.strip():
+            self.messages.append({
+                "role": "user",
+                "content": "Plan completion summary (from CURRENT_PLAN.md):\n%s"
+                % summary.strip(),
+            })
+
+        return True
+
+
+    def _handle_compaction(self, compacted):
+        """Re-inject goal + plan into the compacted messages (plan mode).
+
+        Thin plan-mode counterpart to the inlined plan handling inside
+        :meth:`maybe_compact`, which takes a ``plan_hook`` rather than the
+        owning session so it can stay a network-free module-level helper. The
+        loop wires in this method only when plan mode is on; it simply
+        re-injects the goal + plan via :meth:`_apply_plan_to_compacted`, which
+        also rewrites the tracking files to match.
+        """
+        self.messages = self._apply_plan_to_compacted(compacted)
 
     def _apply_plan_to_compacted(self, messages):
-        """Re-inject the running plan + current goal after a history compaction.
+        """Re-inject the current goal + plan after a history compaction.
 
         Compaction replaces the transcript with a summary, which would otherwise
-        drop the agent's plan and the goal the loop seeded. We read them back off
-        disk and append them as fresh user turns so the model keeps working
-        against the goal it is still trying to finish. The goal is appended last
-        so it reads as the most recent instruction the model should act on.
+        drop the goal the loop recorded and the plan it maintains. We read them
+        back off disk and append them as fresh user turns so the model keeps
+        working against the goal it is still trying to finish. The goal is
+        appended last so it reads as the most recent instruction the model
+        should act on.
         """
         plan_text = self.plan_manager.read_plan()
         goal_text = self.plan_manager.read_goal()
 
         # Recover the user's latest instruction from the pre-compaction tail, in
-        # case the loop had not seeded a goal file yet (e.g. the agent finished
-        # everything before ever writing CURRENT_GOAL.md).
+        # case the loop had not recorded a goal yet, so there is always a goal to
+        # restate after compaction.
         current_input = None
         for m in reversed(messages):
             if m.get("role") == "user":
@@ -937,29 +978,6 @@ class AgentSession:
         elif current_input:
             rebuilt.append({"role": "user", "content": current_input})
         return rebuilt
-
-    def _is_plan_file(self, name, tool_params):
-        """Whether a read/write targets a plan-mode file in the session dir.
-
-        Lets the agent maintain CURRENT_PLAN.md / CURRENT_GOAL.md even though the
-        session directory is usually outside --allowed-dir. Scoped tightly: plan
-        mode only, only read_file / write_file, only when the resolved path is a
-        plan file living directly in this session's directory.
-        """
-        if not self.plan_mode or name not in ("read_file", "write_file"):
-            return False
-        path = tool_params.get("file_path", "")
-        if not path:
-            return False
-        try:
-            resolved = os.path.realpath(path)
-        except (ValueError, TypeError):
-            return False
-        session = os.path.realpath(os.path.join(self.cache_dir, self.unique_id))
-        if os.path.dirname(resolved) != session:
-            return False
-        return os.path.basename(resolved) in (
-            plan_utils.PLAN_FILENAME, plan_utils.GOAL_FILENAME)
 
     def _is_report_file(self, name, tool_params):
         """Whether a write targets this session's own sub-agent report.md.
@@ -995,22 +1013,9 @@ class AgentSession:
         user is asked again rather than sending an empty turn to the model.
         """
         self.console.short_divider()
+
         user_input = self.console.read_line(style_line_prompt("You:"))
-        if user_input is None:  # EOF / Ctrl-C at the prompt
-            self.console.note("Thank you. Goodbye! Saving history...", "info")
-            return None
 
-        if user_input.lower() in self.EXIT_COMMANDS:
-            return None
-
-        if user_input == "/help":
-            print_help(self.allowed_dir, self.server_url, self.args,
-                       self.unique_id, self.cache_dir, self.model)
-            # Nothing to send to the model; ask again.
-            return self._read_user_line()
-
-        # A blank line carries no instruction: say so and re-prompt instead of
-        # appending an empty user turn and spending an LLM call on it.
         if not user_input.strip():
             self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
             return self._read_user_line()
@@ -1026,6 +1031,8 @@ class AgentSession:
           /history <n>       show the full messages recorded for turn <n>
           /reset [<n>]       rewind the conversation to the end of turn <n>
                              (no <n> rewinds to the most recent turn)
+          /plan              show the current goal + plan the loop maintains
+                             (plan mode only)
           /clear             clear the screen (keeps the conversation)
           /help              show the command help
 
@@ -1052,6 +1059,9 @@ class AgentSession:
         if cmd in self.CLEAR_COMMANDS:
             self._clear_and_show_last()
             return True
+        if cmd == "plan":
+            self._show_plan()
+            return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
 
@@ -1077,6 +1087,33 @@ class AgentSession:
                     f"No such turn {arg!r} (have 1..{len(self.summary)}).", "error")
                 return
         self._reset_history(target["turn"], target)
+
+    def _show_plan(self):
+        """Show the current plan/goal the loop maintains (``/plan`` command).
+
+        Plan mode keeps two human-readable tracking files in the session
+        directory (CURRENT_GOAL.md / CURRENT_PLAN.md) that the loop -- not the
+        agent -- author. Those files live outside ``--allowed-dir``, so the
+        model has no tool to read them back; the simplest way for the user to
+        inspect progress is this command, which renders the goal, the current
+        plan and the last completion review as one box, matching how
+        ``/history`` shows the transcript. A no-op (just a note) when --plan is
+        off, since the manager has nothing to read.
+        """
+        if not self.plan_mode:
+            self.console.note("Plan mode is not enabled (--plan).", "warn")
+            return
+        status = self.plan_manager.read_current_status()
+        if status is None:
+            self.console.note("No plan information available for this session.", "warn")
+            return
+        self.console.rule(title="Plan", char="═", fg="cyan")
+        self.console.status_box(
+            status.splitlines(),
+            title="Current goal + plan",
+            fg="green",
+            dim=True,
+        )
 
     def _clear_and_show_last(self):
         """Handle /clear: wipe the screen and re-print the last turn.
@@ -1108,7 +1145,7 @@ class AgentSession:
         # Show a "… calling tool" spinner (in-place, non-scrolling) while the
         # tool(s) execute, mirroring the thinking spinner that covers the LLM
         # call. Always stopped (finally) so it can never leak into the next turn.
-        self.console.start_tool_call()
+        
         try:
             for call in tool_calls:
                 self._run_one_tool_call(call)
@@ -1116,9 +1153,11 @@ class AgentSession:
             self.console.stop_tool_call()
 
     def _run_one_tool_call(self, call):
+
         call_id = call.get("id", "")
         name = call.get("function", {}).get("name", "")
         params_str = call.get("function", {}).get("arguments", "{}")
+        self.console.start_tool_call(tool_name=name)
 
         try:
             tool_params = json.loads(params_str)
@@ -1141,14 +1180,11 @@ class AgentSession:
                 f"Error: Unknown tool: {name}, params {params_str}")
             return
 
-        # 1) Sandbox: keep every filesystem tool inside --allowed-dir (plan mode
-        #    additionally lets the agent maintain CURRENT_PLAN.md /
-        #    CURRENT_GOAL.md in the session directory, which normally sits
-        #    outside --allowed-dir, so those writes are exempted).
+        # 1) Sandbox: keep every filesystem tool inside --allowed-dir. (In plan
+        #    mode the tracking files are maintained by the loop directly -- not
+        #    through agent tools -- so nothing here needs an exemption.)
         if not tool_paths_are_allowed(name, tool_params, self.allowed_dir):
-            if self._is_plan_file(name, tool_params):
-                pass  # allow the plan/goal files into the session directory
-            elif self._is_report_file(name, tool_params):
+            if self._is_report_file(name, tool_params):
                 pass  # allow a sub-agent's own report.md under the cache dir
             else:
                 self.console.note(
@@ -1253,14 +1289,13 @@ class AgentSession:
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
             self.args.llm_timeout, self.token_stats, self.history_index,
+            # getattr keeps argparse-like namespaces without the attribute
+            # (older callers / tests) working, falling back to the default.
+            max_messages=getattr(self.args, "max_messages", DEFAULT_MAX_MESSAGES),
+            plan_hook=self._handle_compaction if self.plan_mode else None, console=self.console
         )
         if did_compact:
             self.history_index = new_index
-            # In plan mode, re-inject the running plan + current goal so a
-            # compaction (which would otherwise drop them) keeps the model
-            # working against the goal it is still trying to finish.
-            if self.plan_mode:
-                self.messages = self._apply_plan_to_compacted(self.messages)
             # Snapshot the compacted messages into the new segment so its turns
             # are preserved, and record the summary as the first turn of it.
             save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
@@ -1299,6 +1334,9 @@ class AgentSession:
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
             self.token_stats["tool_calls"] += len(tool_calls)
+            # The model predicted more tool calls: once the work settles down a
+            # completion review is due again (finalized_plan).
+            self.finalized_plan = True
 
         if response_text:
             self._print_assistant(response_text)
