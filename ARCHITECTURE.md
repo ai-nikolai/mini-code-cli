@@ -21,7 +21,7 @@ works.
 | `config.py` | Process-wide defaults (cache location, model URL, timeouts, `max_messages`). Shared by every module to avoid import cycles. |
 | `prompts.py` | Builds the system prompt (tool list, allowed-dir note, plan-mode instructions) and the compaction/summary prompt. |
 | `tools.py` | The tool *functions* the model can call (`read_file`, `write_file`, `grep`, `glob`, `web_search`, `read_website`, `run_shell_command`) plus `util_get_tools` / `util_get_tools_dict` which introspect their signatures into an OpenAI-style tool schema. |
-| `persistence.py` | Everything about session histories on disk: `history_{n}.json` segments, the flat `summary_history.json` recorder, `usage.json`, and the restore/`find_last_session` helpers. Every loader is best-effort (never raises). |
+| `persistence.py` | Everything about session histories on disk: `history_{n}.json` segments, the flat `summary_history.json` recorder, per-segment `usage_{n}.json` + `total_usage.json`, and the restore/`find_last_session` helpers. Every loader is best-effort (never raises). |
 | `sandbox.py` | The `--allowed-dir` filesystem sandbox (`is_within_allowed_dir`, `tool_paths_are_allowed`), using `os.path.realpath` to defeat symlinks / `..`. |
 | `permissions.py` | Pure "does this tool call need a prompt?" helpers (`needs_permission`, `shell_forces_ask_permission`, `sudo_disables_prompts`). |
 | `runner.py` | `call_function_with_timeout` -- runs a tool with a hard wall-clock limit via `SIGALRM`. |
@@ -41,7 +41,10 @@ A session owns a folder under `cache_dir/{session_id}/` and keeps:
 * **`summary_history.json`** -- a flat, high-level *recorder*: one record per turn (the turn
   number, *what* happened, and which `history_{n}.json` + message index the turn lives in).
   This powers `/history`, `/history <n>` and `/reset <n>` without reading the full histories.
-* **`usage.json`** -- accumulated token usage.
+* **`usage_{n}.json`** -- token usage spent while segment *n* was live, so usage
+  survives a compaction (which starts a new segment).
+* **`total_usage.json`** -- the whole-session token usage, accumulated across
+  every still-available `usage_{n}.json`.
 
 ## 2. The sub-agent framework
 

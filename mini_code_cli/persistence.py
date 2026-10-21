@@ -15,7 +15,11 @@ A session owns a directory under ``cache_dir/{session_name}/`` and keeps:
     message index the turn lives in). It lets the user navigate and rewind the
     conversation without reading the full detailed histories.
 
-  * ``usage.json`` — the accumulated token usage for the session.
+  * ``usage_{n}.json`` — the token usage spent while segment *n* was live, so
+    usage survives a compaction (which starts a new segment).
+
+  * ``total_usage.json`` — the whole-session token usage, accumulated across
+    every still-available ``usage_{n}.json``.
 
 Every loader here is *best-effort*: a missing/garbled file must never break a
 restore, so each function returns a safe default (or ``None``) instead of
@@ -292,11 +296,42 @@ def load_summary_from_dir(directory):
 
 
 # ---------------------------------------------------------------------------
-# token usage (usage.json)
+# token usage (usage_{n}.json per segment, total_usage.json per session)
 # ---------------------------------------------------------------------------
+#
+# Usage is recorded per history *segment*, mirroring ``history_{n}.json``:
+# ``usage_{n}.json`` holds the tokens spent while segment *n* was the live one.
+# That matters because history compaction rolls the conversation over to a fresh
+# segment: a single ``usage.json`` could not say what the pre-compaction half of
+# the session cost, so per-segment files let usage survive a compaction.
+#
+# ``total_usage.json`` is the whole-session accumulator. It is written from the
+# running session total (which never decreases -- a rewind does not un-spend
+# tokens), and :func:`load_total_usage_from_dir` reconstructs it by summing
+# every still-available ``usage_{n}.json`` when the file is missing.
+
+USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "llm_calls", "tool_calls")
+
+
+def empty_usage():
+    """Return a fresh, all-zero usage dict (one key per :data:`USAGE_KEYS`)."""
+    return {key: 0 for key in USAGE_KEYS}
+
+
+def _coerce_usage(saved):
+    """Normalise a loaded JSON payload into a complete, int-valued usage dict."""
+    stats = empty_usage()
+    if isinstance(saved, dict):
+        for key in USAGE_KEYS:
+            try:
+                stats[key] = int(saved.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                stats[key] = 0
+    return stats
+
 
 def accumulate_usage(token_stats, usage):
-    """Add a single LLM call's token usage into the running session totals."""
+    """Add a single LLM call's token usage into the running totals."""
     if not usage:
         return
     token_stats["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
@@ -305,41 +340,81 @@ def accumulate_usage(token_stats, usage):
     token_stats["llm_calls"] += 1
 
 
-def save_usage(token_stats, cache_dir, session_name=""):
-    """Persist the accumulated token usage to the session folder."""
-    cache_dir = cache_dir or DEFAULT_CACHE_LOCATION
+def _segment_usage_path(directory, history_index):
+    return os.path.join(directory, f"usage_{int(history_index)}.json")
+
+
+def save_usage_segment(token_stats, cache_dir, session_name="", history_index=0):
+    """Persist one history segment's token usage to ``usage_{n}.json``."""
     d = history_dir(cache_dir, session_name)
-    usage_path = os.path.join(d, "usage.json")
-    with open(usage_path, "w", encoding="utf-8") as f:
+    path = _segment_usage_path(d, history_index)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(token_stats, f, indent=2)
-    return usage_path
+    return path
+
+
+def load_usage_segment(directory, history_index=0):
+    """Load one segment's usage (``usage_{n}.json``); zeros when absent.
+
+    Best-effort: a missing or malformed file yields an all-zero dict so a restore
+    never breaks on it.
+    """
+    if not directory:
+        return empty_usage()
+    try:
+        with open(_segment_usage_path(directory, history_index), "r", encoding="utf-8") as f:
+            return _coerce_usage(json.load(f))
+    except Exception:
+        return empty_usage()
+
+
+def save_total_usage(total_stats, cache_dir, session_name=""):
+    """Persist the whole-session token usage to ``total_usage.json``."""
+    d = history_dir(cache_dir, session_name)
+    path = os.path.join(d, "total_usage.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(total_stats, f, indent=2)
+    return path
 
 
 def load_usage_from_dir(directory):
-    """Load a session's accumulated token usage (``usage.json``), if present.
+    """Sum every still-available usage file in a session directory.
 
-    Best-effort: returns an empty-stats dict on any problem so a missing or
-    malformed usage file never breaks a restore.
+    That is all ``usage_{n}.json`` segments plus a legacy single ``usage.json``
+    (written by older versions), so restoring an old session still recovers its
+    totals. Best-effort: unreadable files are skipped, never raised.
     """
-    stats = {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "llm_calls": 0,
-        "tool_calls": 0,
-    }
+    stats = empty_usage()
     if not directory or not os.path.isdir(directory):
         return stats
-    path = os.path.join(directory, "usage.json")
-    if not os.path.isfile(path):
-        return stats
+    for fn in sorted(os.listdir(directory)):
+        if not (re.fullmatch(r"usage_\d+\.json", fn) or fn == "usage.json"):
+            continue
+        try:
+            with open(os.path.join(directory, fn), "r", encoding="utf-8") as f:
+                part = _coerce_usage(json.load(f))
+        except Exception:
+            continue
+        for key in USAGE_KEYS:
+            stats[key] += part[key]
+    return stats
+
+
+def load_total_usage_from_dir(directory):
+    """Load the whole-session totals (``total_usage.json``).
+
+    Falls back to summing the segment files when it is missing/unreadable, and
+    never reports less than the segments on disk record (a total may only grow).
+    """
+    if not directory or not os.path.isdir(directory):
+        return empty_usage()
+    segments = load_usage_from_dir(directory)
+    path = os.path.join(directory, "total_usage.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
-            saved = json.load(f)
-        if isinstance(saved, dict):
-            for key in stats:
-                if key in saved:
-                    stats[key] += int(saved[key] or 0)
+            stats = _coerce_usage(json.load(f))
     except Exception:
-        pass
+        return segments
+    for key in USAGE_KEYS:
+        stats[key] = max(stats[key], segments[key])
     return stats

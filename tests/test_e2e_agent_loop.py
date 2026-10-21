@@ -45,7 +45,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import ui, utils
+from mini_code_cli import persistence, ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
 from mini_code_cli.config import DEFAULT_MAX_MESSAGES
 from mini_code_cli.tools import grep as grep_tool
@@ -203,7 +203,10 @@ class PlainAutoModeTest(unittest.TestCase):
         # 4) The session was persisted under a fresh session id.
         session_dir = os.path.join(self.cache_dir, session.unique_id)
         self.assertIn("history_0.json", os.listdir(session_dir))
-        self.assertIn("usage.json", os.listdir(session_dir))
+        # Usage is recorded per segment, plus a whole-session total.
+        self.assertIn("usage_0.json", os.listdir(session_dir))
+        self.assertIn("total_usage.json", os.listdir(session_dir))
+        self.assertNotIn("usage.json", os.listdir(session_dir))
 
     def test_sandbox_blocks_file_outside_allowed_dir(self):
         """An end-to-end write outside --allowed-dir is rejected by the real sandbox."""
@@ -485,6 +488,83 @@ class CompactionTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# scenario 6b -- per-segment usage (usage_{n}.json + total_usage.json)
+# ---------------------------------------------------------------------------
+
+class PerSegmentUsageTest(unittest.TestCase):
+    """Usage is billed per segment so it survives a compaction.
+
+    ``usage_{n}.json`` records what segment *n* cost, and ``total_usage.json``
+    accumulates across every still-available segment, so a rollover (or a
+    restore after one) still reports the whole session's spend.
+    """
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp()
+        self.cache_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir, ignore_errors=True)
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
+
+    def test_usage_survives_a_compaction(self):
+        args = make_args(self.workdir, self.cache_dir)
+        args.max_messages = 2                       # any 3 messages trigger a rollover
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+        session.messages = [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+        stub = StubLLM([
+            ("A summary of the session.", [], USAGE),   # the compaction call
+            ("Hello.", [], USAGE),                      # this step's own call
+        ])
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            session._step()
+        session.shutdown()
+
+        session_dir = os.path.join(self.cache_dir, session.unique_id)
+        self.assertEqual(session.history_index, 1)      # history_0 -> history_1
+        self.assertIn("usage_0.json", os.listdir(session_dir))
+        self.assertIn("usage_1.json", os.listdir(session_dir))
+        self.assertIn("total_usage.json", os.listdir(session_dir))
+
+        seg0 = persistence.load_usage_segment(session_dir, 0)
+        seg1 = persistence.load_usage_segment(session_dir, 1)
+        # The compaction call was billed to the segment it closed; the step's own
+        # call was billed to the fresh one.
+        self.assertEqual(seg0["llm_calls"], 1)
+        self.assertEqual(seg1["llm_calls"], 1)
+        self.assertEqual(seg1["total_tokens"], USAGE["total_tokens"])
+        # The live segment counters hold only the current segment ...
+        self.assertEqual(session.token_stats, seg1)
+        # ... while the session total is the sum of both segments.
+        total = persistence.load_total_usage_from_dir(session_dir)
+        self.assertEqual(total["llm_calls"], 2)
+        self.assertEqual(total["total_tokens"], 2 * USAGE["total_tokens"])
+        self.assertEqual(total, session.total_usage)
+
+    def test_total_is_rebuilt_from_the_segments_when_its_file_is_missing(self):
+        session_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, session_dir, ignore_errors=True)
+        persistence.save_usage_segment(
+            {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7,
+             "llm_calls": 1, "tool_calls": 0}, os.path.dirname(session_dir),
+            os.path.basename(session_dir), 0)
+        persistence.save_usage_segment(
+            {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11,
+             "llm_calls": 1, "tool_calls": 2}, os.path.dirname(session_dir),
+            os.path.basename(session_dir), 1)
+
+        total = persistence.load_total_usage_from_dir(session_dir)
+        self.assertEqual(total["total_tokens"], 18)
+        self.assertEqual(total["llm_calls"], 2)
+        self.assertEqual(total["tool_calls"], 2)
+
+
+# ---------------------------------------------------------------------------
 # scenario 7 -- restoring a persisted session
 # ---------------------------------------------------------------------------
 
@@ -523,6 +603,8 @@ class RestoreSessionEndToEndTest(unittest.TestCase):
                          [m.get("content") for m in original.messages])
         self.assertEqual(restored.token_stats["total_tokens"],
                          original.token_stats["total_tokens"])
+        self.assertEqual(restored.total_usage["total_tokens"],
+                         original.total_usage["total_tokens"])
 
     def test_load_last_session_continues_the_previous_session(self):
         """--load-last-session: the whole point of the .mini pointer.

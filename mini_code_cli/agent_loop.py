@@ -47,11 +47,14 @@ from .config import (
 from .persistence import (
     save_history,
     save_summary,
-    save_usage,
+    save_usage_segment,
+    save_total_usage,
     load_history,
     load_history_from_dir,
     load_summary_from_dir,
-    load_usage_from_dir,
+    load_usage_segment,
+    load_total_usage_from_dir,
+    empty_usage,
     find_last_session_dir,
     save_last_session_pointer,
     accumulate_usage,
@@ -346,14 +349,12 @@ class AgentSession:
 
         self.plan_mode = bool(getattr(self.args, "plan", False))
 
-        # Token accounting for the whole session.
-        self.token_stats = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "llm_calls": 0,
-            "tool_calls": 0,
-        }
+        # Token accounting. ``token_stats`` covers the *current history
+        # segment* and is reset when compaction rolls over to a new one;
+        # ``total_usage`` is the whole-session accumulator and never decreases.
+        # Keeping the two apart is what lets usage survive a compaction.
+        self.token_stats = empty_usage()
+        self.total_usage = empty_usage()
 
         self.background_mode = background_mode
 
@@ -453,11 +454,13 @@ class AgentSession:
                 self.session_dir, enabled=self.plan_mode)
             self.summary = []
             self.history_index = 0
-            self._restore_usage_if_available(restore_directory)
             restored = load_history_from_dir(restore_directory) if restore_directory else None
 
             self.messages = restored if restored is not None else self._build_initial_messages()
+            # The recorder restore decides which segment we are on, so usage --
+            # which is stored per segment -- has to be restored after it.
             self._load_summary_if_restored(restore_directory)
+            self._restore_usage_if_available(restore_directory)
 
             # Continuing a session in place makes it the latest one again: keep
             # the pointer aimed at it so a later --load-last-session finds the
@@ -574,17 +577,41 @@ class AgentSession:
         return messages
 
     def _restore_usage_if_available(self, restore_directory):
-        """Seed this session's token totals from a sibling usage.json, if the
-        restored session had one, so the running summary stays continuous.
+        """Restore the per-segment and whole-session token totals.
 
-        Best-effort only: token accounting is loaded on top of (never in place
-        of) the in-memory totals, and any problem here is ignored silently so a
-        missing or malformed usage file can never break a restore.
+        ``token_stats`` comes from the segment we restored onto
+        (``usage_{history_index}.json``) and ``total_usage`` from
+        ``total_usage.json`` (falling back to the sum of all segments), so the
+        running summary stays continuous across a restore *and* across the
+        compaction that may have happened before it. Best-effort: any problem
+        leaves the totals at zero rather than breaking the restore.
         """
-        saved = load_usage_from_dir(restore_directory)
-        for key in self.token_stats:
-            if key in saved:
-                self.token_stats[key] += int(saved[key] or 0)
+        segment = load_usage_segment(restore_directory, self.history_index)
+        total = load_total_usage_from_dir(restore_directory)
+        # A restored segment can never have cost more than the recorded total.
+        for key in total:
+            total[key] = max(total[key], segment[key])
+        self.token_stats = segment
+        self.total_usage = total
+
+    def _record_usage(self, usage):
+        """Bill one LLM call to both the current segment and the session total."""
+        accumulate_usage(self.token_stats, usage)
+        accumulate_usage(self.total_usage, usage)
+
+    def _bill_compaction(self, segment_before):
+        """Carry the compaction call's spend over into the session total.
+
+        :func:`maybe_compact` is only handed the segment dict, so the tokens the
+        summariser spent land there and nowhere else. The rollover that follows
+        zeroes the segment counters, so without this the summarisation cost would
+        silently vanish from the session total. Deltas are per key because
+        :func:`accumulate_usage` only ever adds.
+        """
+        for key, before in segment_before.items():
+            delta = self.token_stats.get(key, 0) - before
+            if delta > 0:
+                self.total_usage[key] = self.total_usage.get(key, 0) + delta
 
     def _load_summary_if_restored(self, restore_directory):
         """Restore the high-level recorder and segment index for a restore.
@@ -969,7 +996,7 @@ class AgentSession:
             )
             self.console.stop_thinking()
 
-            accumulate_usage(self.token_stats, usage)
+            self._record_usage(usage)
             plan_text = response or ""
         except Exception as exc:
             ui.console.note("Could not generate a plan: %s" % exc, "warn")
@@ -1011,7 +1038,7 @@ class AgentSession:
                 timeout=self.args.llm_timeout,
             )
             self.console.stop_thinking()
-            accumulate_usage(self.token_stats, usage)
+            self._record_usage(usage)
             summary = response or ""
         except Exception as exc:
             ui.console.note("Could not review the plan: %s" % exc, "warn")
@@ -1380,8 +1407,11 @@ class AgentSession:
     def _persist(self):
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
         save_summary(self.summary, self.cache_dir, self.unique_id)
-        usage_path = save_usage(self.token_stats, self.cache_dir, self.unique_id)
-        self.console.note(f"Saved usage to: {usage_path}", "info")
+        usage_path = save_usage_segment(self.token_stats, self.cache_dir,
+                                        self.unique_id, self.history_index)
+        total_path = save_total_usage(self.total_usage, self.cache_dir, self.unique_id)
+        self.console.note(
+            f"Saved usage to: {usage_path} (session total: {total_path})", "info")
 
     def shutdown(self):
         """Persist and print a final summary (called on quit / exit)."""
@@ -1389,7 +1419,7 @@ class AgentSession:
         self.console.note(
             f"Saved session to {self.cache_dir}/{self.unique_id}/ "
             f"(history_0..{self.history_index}.json + summary_history.json).", "ok")
-        print_usage_summary(self.token_stats)
+        print_usage_summary(self.total_usage)
 
     # -- single LLM turn ---------------------------------------------------
 
@@ -1400,6 +1430,7 @@ class AgentSession:
         # Keep long sessions within the model's context window. Compaction
         # rolls the session over to a fresh history segment (history_index + 1)
         # and returns that bump so the recorder can stay flat across it.
+        segment_before = dict(self.token_stats)
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
             self.args.llm_timeout, self.token_stats, self.history_index,
@@ -1408,8 +1439,18 @@ class AgentSession:
             max_messages=getattr(self.args, "max_messages", DEFAULT_MAX_MESSAGES),
             plan_hook=self._handle_compaction if self.plan_mode else None, console=self.console
         )
+        # The compaction call itself was billed to the segment that is being
+        # closed, so fold its delta into the session total here (the rollover
+        # below zeroes the segment counters).
+        self._bill_compaction(segment_before)
+
         if did_compact:
+            # Close the old segment's usage file before moving on, so its spend
+            # is preserved on disk even though the next segment starts at zero.
+            save_usage_segment(self.token_stats, self.cache_dir, self.unique_id,
+                               self.history_index)
             self.history_index = new_index
+            self.token_stats = empty_usage()
             # Snapshot the compacted messages into the new segment so its turns
             # are preserved, and record the summary as the first turn of it.
             save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
@@ -1441,13 +1482,14 @@ class AgentSession:
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
-                "tool_calls": self.token_stats["tool_calls"],
+                "tool_calls": self.total_usage["tool_calls"],
             }
 
-        accumulate_usage(self.token_stats, usage)
+        self._record_usage(usage)
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
             self.token_stats["tool_calls"] += len(tool_calls)
+            self.total_usage["tool_calls"] += len(tool_calls)
             # The model predicted more tool calls: once the work settles down a
             # completion review is due again (finalized_plan).
             self.finalized_plan = True
@@ -1471,7 +1513,7 @@ class AgentSession:
         # Mirror the running tool-call total into this call's usage dict so the
         # per-call usage line reports the actual tool-call count (the server
         # does not, so usage.get("tool_calls") would always be 0 otherwise).
-        usage["tool_calls"] = self.token_stats["tool_calls"]
+        usage["tool_calls"] = self.total_usage["tool_calls"]
         # Print the usage line LAST, transiently, so it always sits at the very
         # bottom of the screen. That way the next step can clear it in place
         # (cursor up + wipe + reprint) instead of jumping up past the assistant
