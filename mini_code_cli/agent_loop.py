@@ -240,47 +240,71 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         return messages, False, history_index
 
     try:
-        ui.console.note(f"Compacting conversation history ({len(messages)} messages -> summary)...", "warn")
+        console.note(f"Compacting conversation history ({len(messages)} messages -> summary)...", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
-        console.start_thinking("compacting")
-        summary, _, compact_usage = utils.call_openai_server(
-            [{"role": "user", "content": summary_prompt}],
-            max_tokens=1024,
-            temperature=0.0,
-            model=model,
-            server_url=server_url,
-            api_key=api_key,
-            timeout=llm_timeout,
-        )
-        console.stop_thinking()
 
-        accumulate_usage(token_stats, compact_usage)
-        if summary:
-            system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-            compacted = []
-            if system_content:
-                compacted.append({"role": "system", "content": system_content})
-            compacted.append({
-                "role": "user",
-                "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
-            })
+        # The summariser sometimes answers with nothing at all. An empty summary
+        # must never be mistaken for a successful compaction: the caller would
+        # think the history had been shrunk while the over-long transcript was
+        # kept, and the rollover would be lost. Retry once, then give up loudly
+        # (keeping the messages and the segment index) so the user can see that
+        # compaction is not working -- previously this fell through silently and
+        # the over-cap transcript was retried, and paid for, on every step.
+        summary = ""
+        for attempt in (1, 2):
+            console.start_thinking("compacting")
+            try:
+                reply, _, compact_usage = utils.call_openai_server(
+                    [{"role": "user", "content": summary_prompt}],
+                    max_tokens=1024,
+                    temperature=0.0,
+                    model=model,
+                    server_url=server_url,
+                    api_key=api_key,
+                    timeout=llm_timeout,
+                )
+            finally:
+                console.stop_thinking()
 
-            # In plan mode, re-inject the running plan + current goal so a
-            # compaction (which would otherwise drop them) keeps the model
-            # working against the goal it is still trying to finish. The hook is
-            # wired in only when the caller runs under plan mode; otherwise
-            # compaction degrades to a plain summary.
-            if plan_hook is not None:
-                plan_hook(compacted)
-            
-            ui.console.note(f"History compacted to {len(compacted)} messages.", "warn")
-            # A new segment (history_index + 1) is started on compaction: the
-            # compacted messages are its snapshot, and every later turn appends
-            # to it. The caller records a single high-level 'summary' turn for
-            # this index so the recorder stays flat across the rollover.
-            return compacted, True, history_index + 1
+            accumulate_usage(token_stats, compact_usage)
+            summary = (reply or "").strip()
+            if summary:
+                break
+            if attempt == 1:
+                console.note("The summariser returned an empty summary; retrying once.", "warn")
+
+        if not summary:
+            console.note(
+                f"Could not compact history: the summariser returned an empty "
+                f"summary twice. Keeping all {len(messages)} messages "
+                f"(over the {max_messages}-message cap).", "warn")
+            return messages, False, history_index
+
+        system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+        compacted = []
+        if system_content:
+            compacted.append({"role": "system", "content": system_content})
+        compacted.append({
+            "role": "user",
+            "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
+        })
+
+        # In plan mode, re-inject the running plan + current goal so a
+        # compaction (which would otherwise drop them) keeps the model
+        # working against the goal it is still trying to finish. The hook is
+        # wired in only when the caller runs under plan mode; otherwise
+        # compaction degrades to a plain summary.
+        if plan_hook is not None:
+            plan_hook(compacted)
+
+        console.note(f"History compacted to {len(compacted)} messages.", "warn")
+        # A new segment (history_index + 1) is started on compaction: the
+        # compacted messages are its snapshot, and every later turn appends
+        # to it. The caller records a single high-level 'summary' turn for
+        # this index so the recorder stays flat across the rollover.
+        return compacted, True, history_index + 1
     except Exception as e:
-        ui.console.note(f"Failed to compact history: {e}", "error")
+        console.note(f"Failed to compact history: {e}", "error")
 
     return messages, False, history_index
 

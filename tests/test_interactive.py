@@ -535,11 +535,22 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         self.stats = {"prompt_tokens": 0, "completion_tokens": 0,
                       "total_tokens": 0, "llm_calls": 0, "tool_calls": 0}
 
-    def _compact(self, messages, reply, max_messages=2):
-        stub = StubLLM([(reply, [], USAGE)])
+    def console(self):
+        self._stream = io.StringIO()
+        return ui.Console(stream=self._stream, color=False, unicode=False, verbose=False)
+
+    def output(self):
+        return self._stream.getvalue()
+
+    def _compact(self, messages, replies, max_messages=2):
+        if isinstance(replies, str):
+            replies = [replies]
+        stub = StubLLM([(r, [], USAGE) for r in replies])
         with mock.patch.object(utils, "call_openai_server", new=stub):
-            return maybe_compact(messages, "http://localhost:1", "m", None, 30,
-                                 self.stats, max_messages=max_messages)
+            result = maybe_compact(messages, "http://localhost:1", "m", None, 30,
+                                   self.stats, max_messages=max_messages,
+                                   console=self.console())
+        return result, stub
 
     def test_compaction_prompt_tolerates_missing_content(self):
         """A tool-call-only turn (content None or absent) must not raise KeyError."""
@@ -553,23 +564,55 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         self.assertIn("system: S", text)
         self.assertIn("assistant:", text)               # rendered as empty
 
-    def test_empty_summary_does_not_roll_the_segment_over(self):
-        """Documented behaviour: no summary -> no rollover, history left as-is.
+    def test_empty_summary_is_retried_then_abandoned_without_rollover(self):
+        """No summary twice -> no rollover, transcript kept, both calls billed.
 
-        The model sometimes returns nothing; dropping the transcript on an empty
-        summary would silently destroy the conversation, so we keep it and report
-        ``did_compact=False``. The cost is that compaction is then retried every
-        step (see the recommendation to warn instead of failing quietly).
+        An empty summary must never be mistaken for a successful compaction: the
+        caller would think the history had shrunk while the over-long transcript
+        was kept and the segment index silently stayed behind. We retry once,
+        then give up -- keeping the messages and the index -- and say so.
         """
         messages = [{"role": "system", "content": "S"},
                     {"role": "user", "content": "q"},
                     {"role": "assistant", "content": "a"}]
-        out, did_compact, index = self._compact(messages, "")
+        (out, did_compact, index), stub = self._compact(messages, ["", ""])
 
         self.assertFalse(did_compact)
         self.assertEqual(index, 0)               # still history_0
         self.assertIs(out, messages)             # transcript preserved verbatim
-        self.assertEqual(self.stats["llm_calls"], 1)   # the attempt was still billed
+        self.assertEqual(len(stub.calls), 2)           # exactly one retry
+        self.assertEqual(self.stats["llm_calls"], 2)   # both attempts were billed
+        self.assertIn("Could not compact history", self.output())
+
+    def test_empty_summary_then_a_real_one_still_compacts(self):
+        """A single empty reply is recovered from by the retry."""
+        messages = [{"role": "system", "content": "S"},
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"}]
+        (out, did_compact, index), stub = self._compact(
+            messages, ["", "A short summary."])
+
+        self.assertTrue(did_compact)
+        self.assertEqual(index, 1)               # history_0 -> history_1
+        self.assertEqual(out[0], {"role": "system", "content": "S"})
+        self.assertIn("A short summary.", out[1]["content"])
+        self.assertEqual(len(stub.calls), 2)
+
+    def test_a_failing_summariser_call_keeps_the_transcript(self):
+        """A raised error must not lose the history or the segment index."""
+        messages = [{"role": "system", "content": "S"},
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"}]
+        boom = mock.Mock(side_effect=RuntimeError("connection refused"))
+        with mock.patch.object(utils, "call_openai_server", new=boom):
+            out, did_compact, index = maybe_compact(
+                messages, "http://localhost:1", "m", None, 30, self.stats,
+                max_messages=2, console=self.console())
+
+        self.assertFalse(did_compact)
+        self.assertEqual(index, 0)
+        self.assertIs(out, messages)
+        self.assertIn("Failed to compact history", self.output())
 
 
 if __name__ == "__main__":
