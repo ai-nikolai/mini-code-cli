@@ -1,22 +1,48 @@
 """mini_code_cli.tools -- the tool functions the agent loop can expose to the LLM.
 
-The plain functions in this module (``read_file``, ``grep``, ...) are the
-default tools. They can be discovered automatically (see
+The plain functions in this module (``read_file``, ``edit``, ``grep``, ...) are
+the default tools. They can be discovered automatically (see
 :func:`util_get_tools` / :func:`util_get_tools_dict`). A caller may also pass an
 explicit ``functions`` mapping so another feature (e.g. :mod:`mini_code_cli.skills`,
 whose tools already have ``allowed_dir`` bound) can reuse the schema/formatting.
+
+Every tool returns a string (never raises): the runner also shields the loop
+from exceptions, but a tool that reports its own, specific error tells the model
+what to do next, instead of an opaque "tool raised an error".
+
+The parameter sets are deliberately *small but useful*: the handful of knobs a
+model actually needs (a line range, a recursive search, an include filter, an
+exact-match edit) and nothing that would change existing behaviour when left
+out. All optional parameters have defaults, so an older call style keeps
+working unchanged.
 """
+import fnmatch
+import functools
 import glob as glob_module
+import inspect
+import json
+import os
+import re
 import subprocess
 import urllib.parse
 import urllib.request
-import json
-import inspect
-import functools
 
 # Default timeout (seconds) for a single tool invocation. Mirrors the CLI's
 # --tool-timeout default so a tool that is slow/hangs gets aborted.
 DEFAULT_TOOL_TIMEOUT = 120
+
+# How much of a fetched web page to hand back by default. A raw HTML page can
+# be megabytes, which would fill the context window in one call; the default is
+# generous but bounded, and read_website exposes it as ``max_chars``.
+DEFAULT_MAX_WEBPAGE_CHARS = 100_000
+
+# Matched grep lines longer than this are truncated (a minified JS/CSS file is
+# one line, and echoing it whole would drown the conversation).
+MAX_GREP_LINE_CHARS = 1_000
+
+# Directories that are never worth recursively searching: noise, huge, or
+# generated. Only used by grep's recursive walk.
+_SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules"}
 
 # A browser-like User-Agent. Many sites (e.g. Wikipedia's API) reject the
 # default "Python-urllib/..." client, so we identify as a normal browser.
@@ -25,6 +51,10 @@ _USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120 Safari/537.36"
 )
 
+
+# ---------------------------------------------------------------------------
+# parameter coercion helpers
+# ---------------------------------------------------------------------------
 
 def _coerce_timeout(value, default=DEFAULT_TOOL_TIMEOUT):
     """Best-effort: turn a tool-call ``timeout`` into a number of seconds.
@@ -50,53 +80,317 @@ def _coerce_timeout(value, default=DEFAULT_TOOL_TIMEOUT):
     return coerced if coerced > 0 else default
 
 
+def _coerce_int(value, default=0):
+    """Best-effort int coercion for model-supplied arguments (never raises)."""
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value, default=False):
+    """Best-effort bool coercion for model-supplied arguments.
+
+    ``bool("false")`` is ``True`` in Python, so a model that sends booleans as
+    strings (``"false"``, ``"no"``, ``"0"``) would silently flip the flag. This
+    reads those spellings correctly and never raises.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _coerce_text(value):
+    """Best-effort string coercion for file contents / search patterns."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def _fetch(url, timeout=DEFAULT_TOOL_TIMEOUT):
-    """GET `url` and return its decoded body, sending a browser User-Agent."""
-    request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    """GET `url` and return its decoded body, sending a browser User-Agent.
+
+    Undecodable bytes are replaced rather than raising, so a page with a stray
+    non-UTF-8 byte is still readable instead of failing the whole fetch.
+    """
+    request = urllib.request.Request(
+        url, headers={"User-Agent": _USER_AGENT, "Accept": "*/*"})
     with urllib.request.urlopen(request, timeout=_coerce_timeout(timeout)) as response:
-        return response.read().decode('utf-8')
+        return response.read().decode("utf-8", errors="replace")
 
 
-def read_file(file_path, *args, **kwargs):
-    """Read the contents of a file and return as a string. Param: file_path"""
+# ---------------------------------------------------------------------------
+# filesystem tools
+# ---------------------------------------------------------------------------
+
+def read_file(file_path, offset: int = 0, limit: int = 0, *args, **kwargs):
+    """Read the contents of a file and return as a string.
+
+    Param: file_path (required); offset (1-based first line to read, 0 = start
+    of the file); limit (maximum number of lines, 0 = to the end of the file).
+
+    Use offset/limit to page through a large file instead of reading it all.
+    A partial read is prefixed with a ``[lines X-Y of N]`` header.
+    """
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return f"Error: no such file: {file_path}"
+    except IsADirectoryError:
+        return (f"Error: {file_path} is a directory "
+                f"(use glob to list its files, or grep to search it)")
     except Exception as e:
         return f"Error: {e}"
 
+    offset = max(_coerce_int(offset, 0), 0)
+    limit = max(_coerce_int(limit, 0), 0)
+    if not offset and not limit:
+        return text
 
-def write_file(file_path, content, *args, **kwargs):
-    """Write content to a file. Overwrites if file exists. Param: file_path, content"""
+    lines = text.splitlines(keepends=True)
+    start = max(offset - 1, 0) if offset else 0
+    end = start + limit if limit else len(lines)
+    if start >= len(lines):
+        return (f"Error: offset {offset} is past the end of {file_path} "
+                f"({len(lines)} line(s)).")
+    chunk = "".join(lines[start:end])
+    header = f"[lines {start + 1}-{min(end, len(lines))} of {len(lines)}]\n"
+    return header + chunk
+
+
+def write_file(file_path, content, append: bool = False, create_dirs: bool = True,
+               *args, **kwargs):
+    """Write content to a file. Overwrites if it exists (unless append=True).
+
+    Param: file_path (required); content (required, the text to write);
+    append (bool, default false: add to the end instead of overwriting);
+    create_dirs (bool, default true: create missing parent directories).
+    """
+    content = _coerce_text(content)
+    append = _coerce_bool(append, False)
+    create_dirs = _coerce_bool(create_dirs, True)
     try:
-        with open(file_path, 'w', encoding='utf-8') as f:
+        if create_dirs:
+            parent = os.path.dirname(os.path.abspath(file_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        mode = "a" if append else "w"
+        with open(file_path, mode, encoding="utf-8") as f:
             f.write(content)
-        return f"Wrote to file: {file_path}"
+        verb = "Appended to" if append else "Wrote to"
+        return f"{verb} file: {file_path} ({len(content)} chars)"
+    except IsADirectoryError:
+        return f"Error: {file_path} is a directory, not a file."
     except Exception as e:
         return f"Error: {e}"
 
 
-def grep(pattern, file_path, *args, **kwargs):
-    """Search for a pattern in a file using grep and return matching lines. Param: pattern, file_path"""
+def edit(file_path, old_string, new_string, replace_all: bool = False,
+         *args, **kwargs):
+    """Replace an exact string in a text file. Prefer this over rewriting a whole file.
+
+    Param: file_path (required); old_string (required: the exact existing text
+    to find, including indentation); new_string (required: the replacement
+    text); replace_all (bool, default false: replace every occurrence instead
+    of requiring a unique match).
+
+    The match is literal (no regex). If old_string is missing, or matches more
+    than once without replace_all, the edit is refused and an error explains
+    what to do, so a wrong edit is never silently applied.
+    """
+    old_string = _coerce_text(old_string)
+    new_string = _coerce_text(new_string)
+    replace_all = _coerce_bool(replace_all, False)
+
+    if not old_string:
+        return ("Error: old_string must not be empty "
+                "(use write_file to create or overwrite a file).")
+    if old_string == new_string:
+        return "Error: old_string and new_string are identical; nothing to do."
+
     try:
-        result = subprocess.run(['grep', pattern, file_path], capture_output=True, text=True, check=False)
-        return result.stdout
+        # newline="" keeps CRLF files byte-faithful (no line-ending rewriting).
+        with open(file_path, "r", encoding="utf-8", newline="") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return f"Error: no such file: {file_path}"
+    except IsADirectoryError:
+        return f"Error: {file_path} is a directory, not a file."
     except Exception as e:
         return f"Error: {e}"
 
+    count = text.count(old_string)
+    if count == 0:
+        return (f"Error: old_string was not found in {file_path}. Read the file "
+                f"first and copy the exact text (including whitespace).")
+    if count > 1 and not replace_all:
+        return (f"Error: old_string matches {count} times in {file_path}, so the "
+                f"edit is ambiguous. Add more surrounding context to make it "
+                f"unique, or pass replace_all=True to replace every occurrence.")
 
-def glob(pattern, *args, **kwargs):
-    """Return list of file paths matching the given glob pattern. Param: pattern"""
+    updated = text.replace(old_string, new_string, -1 if replace_all else 1)
     try:
-        return glob_module.glob(pattern)
+        with open(file_path, "w", encoding="utf-8", newline="") as f:
+            f.write(updated)
     except Exception as e:
         return f"Error: {e}"
 
+    replaced = count if replace_all else 1
+    return f"Edited {file_path}: replaced {replaced} occurrence(s) of old_string."
+
+
+def _grep_files(path, recursive, include):
+    """Yield the files to search under ``path`` (sorted, noise dirs skipped).
+
+    Symbolic links are skipped. The sandbox validates the *directory* a search
+    is rooted in, so following a link could read a file from outside
+    ``--allowed-dir`` -- a link inside the allowed dir is the one way a walk
+    could escape it. Skipping links keeps the sandbox intact.
+    """
+    def wanted(full, name):
+        return (os.path.isfile(full) and not os.path.islink(full)
+                and (not include or fnmatch.fnmatch(name, include)))
+
+    if not recursive:
+        try:
+            names = sorted(os.listdir(path))
+        except OSError:
+            return
+        for name in names:
+            full = os.path.join(path, name)
+            if wanted(full, name):
+                yield full
+        return
+
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            if wanted(full, name):
+                yield full
+
+
+def grep(pattern, file_path, recursive: bool = False, include=None,
+         ignore_case: bool = False, line_numbers: bool = True,
+         max_results: int = 200, *args, **kwargs):
+    """Search a file or directory for a regular expression and return matching lines.
+
+    Param: pattern (required, a Python regular expression); file_path (required:
+    a file, or a directory to search); recursive (bool, default false: also
+    search sub-directories); include (optional glob for file names when
+    searching a directory, e.g. "*.py"); ignore_case (bool, default false);
+    line_numbers (bool, default true: prefix each match with its line number);
+    max_results (max matching lines to return, 0 = unlimited, default 200).
+
+    Directories that are pure noise (.git, __pycache__, node_modules, ...) are
+    skipped. Returns "No matches ..." when nothing matched, so an empty result
+    is never ambiguous.
+    """
+    pattern = _coerce_text(pattern)
+    recursive = _coerce_bool(recursive, False)
+    ignore_case = _coerce_bool(ignore_case, False)
+    line_numbers = _coerce_bool(line_numbers, True)
+    max_results = max(_coerce_int(max_results, 200), 0)
+
+    try:
+        regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+    except re.error as e:
+        return f"Error: invalid regular expression {pattern!r}: {e}"
+
+    path = _coerce_text(file_path) or "."
+    if os.path.isdir(path):
+        files = list(_grep_files(path, recursive, include))
+        if not files:
+            where = "recursively " if recursive else ""
+            return f"No files found to search {where}in {path}."
+        multiple = True
+    elif os.path.isfile(path):
+        files = [path]
+        multiple = False
+    else:
+        return f"Error: no such file or directory: {path}"
+
+    matches = []
+    truncated = False
+    for current in files:
+        try:
+            with open(current, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except (OSError, UnicodeError):
+            continue
+        if "\0" in text[:4096]:        # a binary file: not greppable
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not regex.search(line):
+                continue
+            if max_results and len(matches) >= max_results:
+                truncated = True
+                break
+            shown = line
+            if len(shown) > MAX_GREP_LINE_CHARS:
+                shown = shown[:MAX_GREP_LINE_CHARS] + "...[line truncated]"
+            prefix = ""
+            if multiple:
+                prefix += f"{current}:"
+            if line_numbers:
+                prefix += f"{line_number}:"
+            matches.append(prefix + shown)
+        if truncated:
+            break
+
+    if not matches:
+        scope = "recursively " if (recursive and os.path.isdir(path)) else ""
+        return f"No matches for {pattern!r} {scope}in {path}."
+    if truncated:
+        matches.append(f"...[stopped after {max_results} matching lines; "
+                       f"raise max_results to see more]")
+    return "\n".join(matches)
+
+
+def glob(pattern, root=None, *args, **kwargs):
+    """Return the file paths matching a glob pattern, one per line.
+
+    Param: pattern (required, a glob such as "**/*.py"; "**" matches nested
+    directories); root (optional base directory the pattern is resolved
+    against; default: the current working directory).
+    """
+    pattern = _coerce_text(pattern)
+    if not pattern:
+        return "Error: pattern must not be empty."
+    root = _coerce_text(root) or None
+    try:
+        full = pattern
+        if root and not os.path.isabs(pattern):
+            full = os.path.join(root, pattern)
+        matches = sorted(glob_module.glob(full, recursive=True))
+    except Exception as e:
+        return f"Error: {e}"
+
+    if not matches:
+        where = f" under {root}" if root else ""
+        return f"No files matched {pattern!r}{where}."
+    return "\n".join(matches)
+
+
+# ---------------------------------------------------------------------------
+# web tools
+# ---------------------------------------------------------------------------
 
 def web_search(query, *args, **kwargs):
     """Search the web for `query` and return a plain-text summary of results.
 
-    Param: query
+    Param: query (required)
 
     This is a best-effort, dependency-free lookup. It tries, in order:
 
@@ -110,6 +404,9 @@ def web_search(query, *args, **kwargs):
     newlines, or an "Error: ..." message).
     """
     results = []
+    query = _coerce_text(query)
+    if not query.strip():
+        return "Error: query must not be empty."
 
     # 1) DuckDuckGo autocomplete: fast, no-keyword related queries.
     try:
@@ -150,34 +447,71 @@ def web_search(query, *args, **kwargs):
     return '\n'.join(results) if results else "No results found."
 
 
-def read_website(url, *args, **kwargs):
+def read_website(url, timeout: int = DEFAULT_TOOL_TIMEOUT,
+                 max_chars: int = DEFAULT_MAX_WEBPAGE_CHARS, *args, **kwargs):
     """Fetch and return the text content of a given URL.
 
-    Param: url
+    Param: url (required); timeout (seconds before the fetch is aborted);
+    max_chars (maximum characters to return, 0 = unlimited, default 100000 --
+    a raw page can be enormous, so it is truncated rather than flooding the
+    context).
 
-    `timeout` (seconds) bounds how long the fetch may run before it is aborted,
-    mirroring the CLI's --tool-timeout so a slow or unresponsive site cannot
-    hang the agent loop.
+    Returns the page's raw text/HTML (tags included); it is not rendered.
     """
-    timeout = _coerce_timeout(kwargs.get("timeout", DEFAULT_TOOL_TIMEOUT))
+    url = _coerce_text(url)
+    if not url:
+        return "Error: url must not be empty."
+    max_chars = max(_coerce_int(max_chars, DEFAULT_MAX_WEBPAGE_CHARS), 0)
     try:
-        return _fetch(url, timeout=timeout)
+        text = _fetch(url, timeout=timeout)
     except Exception as e:
         return f"Error: {e}"
 
+    if max_chars and len(text) > max_chars:
+        total = len(text)
+        return (text[:max_chars]
+                + f"\n...[truncated: showing {max_chars} of {total} characters; "
+                  f"pass a larger max_chars (or 0) to see more]")
+    return text
 
-def run_shell_command(command, timeout=DEFAULT_TOOL_TIMEOUT, *args, **kwargs):
-    """Run a shell command and return its output. Param: command (string)"""
+
+# ---------------------------------------------------------------------------
+# shell
+# ---------------------------------------------------------------------------
+
+def run_shell_command(command, timeout: int = DEFAULT_TOOL_TIMEOUT, cwd=None,
+                      *args, **kwargs):
+    """Run a shell command and return its output.
+
+    Param: command (required, the shell command line); timeout (seconds before
+    the command is killed); cwd (optional working directory for the command).
+
+    Captures stdout and stderr; a non-zero exit code is reported so a failure
+    is visible rather than looking like empty success.
+    """
+    command = _coerce_text(command)
+    if not command.strip():
+        return "Error: command must not be empty."
+    cwd = _coerce_text(cwd) or None
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True,
-                                timeout=_coerce_timeout(timeout), check=False)
-        output = result.stdout
+                                timeout=_coerce_timeout(timeout), cwd=cwd, check=False)
+        output = result.stdout or ""
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr
-        return output
+        output = output.strip()
+        if result.returncode != 0:
+            output += f"\nEXIT CODE: {result.returncode}"
+        return output if output else f"Command produced no output (exit code {result.returncode})."
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {_coerce_timeout(timeout)} seconds: {command!r}"
     except Exception as e:
         return f"Error: {e}"
 
+
+# ---------------------------------------------------------------------------
+# schema generation
+# ---------------------------------------------------------------------------
 
 def _local_function_names():
     """Names of the real tool functions defined in this module (not util_/_)."""
@@ -240,7 +574,14 @@ def _schema_params(func):
         if param_name in bound_kwargs or param_name in positional_bound:
             # Already bound on the partial -- the LLM must not supply it.
             continue
-        param_type = _param_type(param.annotation)
+        annotation = param.annotation
+        if annotation is inspect.Parameter.empty and param.default is not inspect.Parameter.empty \
+                and param.default is not None:
+            # No annotation, but a typed default (e.g. ``timeout=120``): infer
+            # from it, so the schema advertises an integer/boolean instead of
+            # defaulting everything to "string".
+            annotation = type(param.default)
+        param_type = _param_type(annotation)
         properties[param_name] = {"type": param_type}
         if param.default == inspect.Parameter.empty:
             required.append(param_name)
@@ -264,7 +605,7 @@ def _callable_description(func, name):
 
 
 def util_get_tools(allowed_tools=None, forbidden_tools=None, functions=None):
-    """Return a JSON string describing tool functions for LLM usage.
+    """Return a list of OpenAI-style tool schemas describing the tool functions.
 
     By default scans this module's own tool functions. When ``functions`` is a
     {name: callable} mapping, those are described instead (in ``functions``
@@ -329,5 +670,4 @@ shell_tools = [
 ]
 
 if __name__ == "__main__":
-    print(util_get_tools())
-    # print(json.dumps(tools_dict, indent=4))
+    print(json.dumps(util_get_tools(), indent=2))

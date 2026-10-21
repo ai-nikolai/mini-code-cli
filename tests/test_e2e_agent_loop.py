@@ -27,8 +27,9 @@ Scenarios
                                   shell-safety DENY tier refuses a destructive
                                   command even when shell is enabled.
 * ``CompactionTest``          -- history compaction (the module-level helper):
-                                  no-op under the cap, summary + segment bump
-                                  over it, and plan mode's goal/plan re-injection.
+                                  no-op under the token budget, summary + segment
+                                  bump over it, and plan mode's goal/plan
+                                  re-injection.
 * ``RestoreSessionEndToEndTest`` -- a persisted session is restored *in place*
                                   (same id), including the legacy folder that has
                                   a history but no recorder file, and
@@ -45,9 +46,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import persistence, ui, utils
+from mini_code_cli import persistence, tools, ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
-from mini_code_cli.config import DEFAULT_MAX_MESSAGES
 from mini_code_cli.tools import grep as grep_tool
 from mini_code_cli.subagents import SubAgent, register, clear_registry
 
@@ -83,7 +83,6 @@ def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False):
         llm_timeout=30,
         tool_timeout=30,
         max_context_tokens=None,
-        max_messages=DEFAULT_MAX_MESSAGES,
         plan=plan,
         verbose=False,
     )
@@ -480,18 +479,19 @@ class CompactionTest(unittest.TestCase):
                 messages, "http://localhost:1", "test-model", None, 30,
                 self.stats, console=silent_console(), **kwargs)
 
-    def test_under_the_cap_is_a_noop(self):
+    def test_under_the_budget_is_a_noop(self):
         messages = self._messages(1)
-        out, did_compact, index = self._compact(messages, max_messages=50)
+        out, did_compact, index = self._compact(messages, token_limit=100_000)
 
         self.assertFalse(did_compact)
         self.assertIs(out, messages)          # same list, untouched
         self.assertEqual(index, 0)
         self.assertEqual(self.stats["llm_calls"], 0)   # no summarization call
 
-    def test_over_the_cap_summarises_and_starts_a_new_segment(self):
+    def test_over_the_budget_summarises_and_starts_a_new_segment(self):
         messages = self._messages(4)          # 9 messages
-        out, did_compact, index = self._compact(messages, max_messages=4)
+        out, did_compact, index = self._compact(
+            messages, token_limit=10, current_tokens=50)
 
         self.assertTrue(did_compact)
         self.assertEqual(index, 1)            # history_0 -> history_1
@@ -507,7 +507,7 @@ class CompactionTest(unittest.TestCase):
     def test_plan_hook_reinjects_goal_and_plan(self):
         messages = self._messages(4)
         out, did_compact, _ = self._compact(
-            messages, max_messages=4,
+            messages, token_limit=10, current_tokens=50,
             plan_hook=lambda msgs: msgs.append({"role": "user", "content": "GOAL + PLAN"}))
 
         self.assertTrue(did_compact)
@@ -536,7 +536,7 @@ class PerSegmentUsageTest(unittest.TestCase):
 
     def test_usage_survives_a_compaction(self):
         args = make_args(self.workdir, self.cache_dir)
-        args.max_messages = 2                       # any 3 messages trigger a rollover
+        args.max_context_tokens = 1                 # any non-empty history is "over"
         session = AgentSession(args, console=silent_console())
         session.start_session()
         session.messages = [
@@ -601,9 +601,9 @@ class TokenBudgetCompactionTest(unittest.TestCase):
     ``maybe_compact``'s policy is unit-tested in ``tests/test_tokens.py``; what
     matters here is the session-level wiring: the projected input size is handed
     to the trigger, a token-triggered rollover does the same bookkeeping a
-    message-triggered one did (new history segment, usage files, totals), and the
-    remembered server-reported prompt size is dropped so the rollover cannot
-    immediately re-fire.
+    message-triggered one used to do (new history segment, usage files, totals),
+    and the remembered server-reported prompt size is dropped so the rollover
+    cannot immediately re-fire. The message count is never consulted.
     """
 
     def setUp(self):
@@ -619,7 +619,12 @@ class TokenBudgetCompactionTest(unittest.TestCase):
         for key, value in overrides.items():
             setattr(args, key, value)
         session = AgentSession(args, console=silent_console())
-        session.start_session()
+        # A second session in the same --allowed-dir would otherwise find the
+        # .mini pointer the first one wrote and *ask* whether to resume. A test
+        # must never read stdin (that blocked the suite when run without a TTY),
+        # so answer the offer explicitly.
+        with mock.patch.object(AgentSession, "show_resume_choice", return_value="new"):
+            session.start_session()
         return session
 
     def _run_step(self, session, replies):
@@ -681,44 +686,47 @@ class TokenBudgetCompactionTest(unittest.TestCase):
         self.assertEqual(session.last_prompt_tokens, USAGE["prompt_tokens"])
         self.assertEqual(session.last_prompt_message_count, 2)
 
-    def test_many_short_messages_do_not_compact_on_their_own(self):
-        # 200 tiny turns sit far below any budget; with the message cap disabled
-        # there is nothing left to trigger a compaction. Previously the count
-        # alone would have compacted here.
-        session = self._session(max_messages=0, model="gpt-4o")
+    def test_many_short_messages_never_compact_on_their_own(self):
+        # 500 tiny turns sit far below any token budget. The number of messages
+        # is not a trigger any more, so nothing may happen here -- previously a
+        # message-count cap would have compacted a perfectly healthy history.
+        session = self._session(model="gpt-4o")
         session.messages = ([{"role": "system", "content": "S"}]
-                            + [{"role": "user", "content": "hi"}] * 200)
+                            + [{"role": "user", "content": "hi"}] * 500)
 
         stub = self._run_step(session, [("Done.", [], USAGE)])
 
         self.assertEqual(len(stub.calls), 1)        # no summariser call
         self.assertEqual(session.history_index, 0)
-        self.assertEqual(len(session.messages), 202)   # transcript untouched
+        self.assertEqual(len(session.messages), 502)   # transcript untouched
 
-    def test_the_message_cap_remains_a_secondary_guard(self):
-        # A huge number of tiny turns is still bounded even when the tokens fit.
-        session = self._session(max_messages=5, model="gpt-4o")
+    def test_compaction_ignores_a_max_messages_style_attribute(self):
+        # A leftover/legacy ``max_messages`` on the args namespace must have no
+        # effect: the wiring reads tokens only, so an over-large turn count is
+        # not compacted even when a namespace still carries the old attribute.
+        session = self._session(model="gpt-4o")
+        session.args.max_messages = 2
         session.messages = ([{"role": "system", "content": "S"}]
                             + [{"role": "user", "content": "hi"}] * 20)
 
-        stub = self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+        stub = self._run_step(session, [("Done.", [], USAGE)])
 
-        self.assertEqual(len(stub.calls), 2)
-        self.assertEqual(session.history_index, 1)
+        self.assertEqual(len(stub.calls), 1)
+        self.assertEqual(session.history_index, 0)
 
     def test_a_large_transcript_compacts_on_tokens_with_few_messages(self):
-        # Four messages, each ~10k tokens: over the default 32k fallback budget
-        # many times over, yet nowhere near any message cap.
+        # Four messages, each ~50k tokens: well over the fallback budget, and
+        # only four messages in total -- so this can only be a token trigger.
         session = self._session()                    # unknown model -> fallback
         session.messages = [{"role": "system", "content": "S"}] + [
-            {"role": "user", "content": "x" * 40_000} for _ in range(4)]
+            {"role": "user", "content": "x" * 200_000} for _ in range(4)]
 
         stub = self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
 
         self.assertEqual(len(stub.calls), 2)
         self.assertEqual(session.history_index, 1)
         self.assertLess(sum(len(m.get("content") or "")
-                            for m in session.messages), 4 * 40_000)
+                            for m in session.messages), 4 * 200_000)
 
     def test_the_server_reported_prompt_size_drives_the_trigger(self):
         # The transcript is tiny, but the server says the last prompt was huge:
@@ -918,6 +926,158 @@ class RestoreSessionEndToEndTest(unittest.TestCase):
         # The recorder was rebuilt: one assistant turn pointing at the tail.
         self.assertEqual([r["what"] for r in session.summary], ["assistant"])
         self.assertEqual(session.summary[0]["index"], 2)
+
+
+# ---------------------------------------------------------------------------
+# scenario 8 -- the tool set itself (edit + the richer common parameters)
+# ---------------------------------------------------------------------------
+
+class ToolBehaviourTest(unittest.TestCase):
+    """The new ``edit`` tool, the extended parameters, and their schemas."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+
+    def _write(self, name, text):
+        path = os.path.join(self.workdir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_read_file_offset_and_limit(self):
+        path = self._write("lines.txt", "one\ntwo\nthree\nfour\n")
+
+        self.assertEqual(tools.read_file(path), "one\ntwo\nthree\nfour\n")
+        partial = tools.read_file(path, offset=2, limit=2)
+        self.assertIn("two", partial)
+        self.assertIn("three", partial)
+        self.assertNotIn("one\n", partial)
+        self.assertNotIn("four", partial)
+        self.assertIn("[lines 2-3 of 4]", partial)
+        self.assertIn("Error", tools.read_file(path, offset=99))
+
+    def test_read_file_reports_a_missing_file(self):
+        self.assertTrue(tools.read_file(os.path.join(self.workdir, "nope")).startswith("Error"))
+
+    def test_edit_replaces_a_unique_match(self):
+        path = self._write("code.py", "def f():\n    return 1\n")
+
+        result = tools.edit(path, "return 1", "return 2")
+
+        self.assertIn("replaced 1 occurrence", result)
+        with open(path) as f:
+            self.assertEqual(f.read(), "def f():\n    return 2\n")
+
+    def test_edit_refuses_an_ambiguous_match(self):
+        path = self._write("dup.txt", "x = 1\nx = 1\n")
+
+        result = tools.edit(path, "x = 1", "x = 2")
+
+        self.assertIn("matches 2 times", result)
+        with open(path) as f:                     # nothing was written
+            self.assertEqual(f.read(), "x = 1\nx = 1\n")
+
+    def test_edit_replace_all_is_explicit(self):
+        path = self._write("dup.txt", "x = 1\nx = 1\n")
+
+        self.assertIn("replaced 2 occurrence", tools.edit(path, "x = 1", "x = 2",
+                                                          replace_all=True))
+        with open(path) as f:
+            self.assertEqual(f.read(), "x = 2\nx = 2\n")
+
+    def test_edit_refuses_a_missing_or_empty_old_string(self):
+        path = self._write("f.txt", "hello\n")
+
+        self.assertIn("was not found", tools.edit(path, "goodbye", "hi"))
+        self.assertIn("must not be empty", tools.edit(path, "", "hi"))
+
+    def test_edit_works_end_to_end_and_is_sandboxed(self):
+        path = self._write("target.txt", "before\n")
+        edit_call = tool_call("c1", "edit",
+                              {"file_path": path, "old_string": "before",
+                               "new_string": "after"})
+        stub = StubLLM([
+            ("", [edit_call], USAGE),
+            ("Done.", [], USAGE),
+        ])
+        session = AgentSession(make_args(self.workdir, tempfile.mkdtemp()),
+                               console=silent_console())
+        run_loop(session, "Edit target.txt.", stub)
+
+        with open(path) as f:
+            self.assertEqual(f.read(), "after\n")
+
+        # Outside --allowed-dir it is refused, exactly like the other file tools.
+        from mini_code_cli.sandbox import tool_paths_are_allowed
+        outside = os.path.join(tempfile.gettempdir(), "elsewhere.txt")
+        self.assertFalse(tool_paths_are_allowed(
+            "edit", {"file_path": outside}, self.workdir))
+        self.assertTrue(tool_paths_are_allowed(
+            "edit", {"file_path": path}, self.workdir))
+
+    def test_the_schema_exposes_the_new_tool_and_common_parameters(self):
+        schema = {t["function"]["name"]: t["function"]
+                  for t in tools.util_get_tools()}
+
+        self.assertIn("edit", schema)
+        edit_params = schema["edit"]["parameters"]
+        self.assertEqual(set(edit_params["required"]),
+                         {"file_path", "old_string", "new_string"})
+        self.assertEqual(edit_params["properties"]["replace_all"]["type"], "boolean")
+
+        # Common, non-breaking knobs are offered ...
+        self.assertIn("offset", schema["read_file"]["parameters"]["properties"])
+        self.assertIn("limit", schema["read_file"]["parameters"]["properties"])
+        for name in ("recursive", "include", "ignore_case", "line_numbers"):
+            self.assertIn(name, schema["grep"]["parameters"]["properties"])
+        self.assertIn("root", schema["glob"]["parameters"]["properties"])
+        self.assertIn("max_chars", schema["read_website"]["parameters"]["properties"])
+        self.assertIn("cwd", schema["run_shell_command"]["parameters"]["properties"])
+
+    def test_a_malformed_tool_call_is_reported_not_fatal(self):
+        # The model sent a JSON list instead of an object. That used to raise
+        # AttributeError (tool_params.get) and end the session; now it is fed
+        # back as an ordinary tool error and the loop keeps going.
+        bad_call = {"id": "c1", "function": {"name": "read_file", "arguments": "[1, 2]"}}
+        cache_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cache_dir, ignore_errors=True)
+        stub = StubLLM([
+            ("", [bad_call], USAGE),
+            ("Recovered.", [], USAGE),
+        ])
+        session = AgentSession(make_args(self.workdir, cache_dir),
+                               console=silent_console())
+        run_loop(session, "Read something.", stub)
+
+        tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertIn("must be a JSON object", tool_msgs[0]["content"])
+        self.assertEqual(session._last_assistant_text(), "Recovered.")
+
+    def test_grep_is_recursive_with_an_include_filter(self):
+        os.makedirs(os.path.join(self.workdir, "sub"))
+        self._write("a.py", "needle\n")
+        self._write(os.path.join("sub", "b.py"), "needle\n")
+        self._write(os.path.join("sub", "c.txt"), "needle\n")
+
+        flat = tools.grep("needle", self.workdir)
+        self.assertIn("a.py", flat)
+        self.assertNotIn("b.py", flat)              # not recursive by default
+
+        found = tools.grep("needle", self.workdir, recursive=True, include="*.py")
+        self.assertIn("b.py", found)
+        self.assertNotIn("c.txt", found)            # filtered out
+        self.assertIn("No matches", tools.grep("absent-needle", self.workdir))
+
+    def test_glob_resolves_against_a_root(self):
+        self._write("one.py", "")
+        self._write("two.txt", "")
+
+        found = tools.glob("*.py", root=self.workdir)
+        self.assertIn("one.py", found)
+        self.assertNotIn("two.txt", found)
+
 
 
 

@@ -43,7 +43,6 @@ from .config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_TOOL_TIMEOUT,
     DEFAULT_HTTP_TIMEOUT,
-    DEFAULT_MAX_MESSAGES,
     compaction_budget,
 )
 from .persistence import (
@@ -129,7 +128,6 @@ def parse_args():
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
     parser.add_argument("--max-context-tokens", type=int, default=None, help="Input-token budget before the conversation is compacted into a summary. This is the primary compaction trigger: it is compared against the projected size of the next request (the server-reported prompt tokens, plus an estimate for whatever was appended since) plus the output reserve (--max-tokens, or a default). Unset (default): derived from the model's context window minus the output reserve and a safety margin, falling back to a conservative window for unknown models. Lower it to compact sooner.")
-    parser.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES, help=f"Secondary compaction guard: also compact once the history holds more than this many messages, even if the tokens fit. Set 0 to disable. default={DEFAULT_MAX_MESSAGES}")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --subagents, --shell, --automode, --sudo")
@@ -219,23 +217,18 @@ def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_nam
 # history compaction
 # ---------------------------------------------------------------------------
 
-def _compaction_trigger(messages, token_limit, reserved_output_tokens,
-                        current_tokens, max_messages):
+def _compaction_trigger(messages, token_limit, reserved_output_tokens, current_tokens):
     """Decide whether the history is too big, and say why.
 
-    Token pressure is the real trigger: an over-full *context window* makes the
+    Token pressure is the *only* trigger: an over-full context window makes the
     next request fail outright, and it is the number of tokens -- not the number
     of turns -- that decides that. A handful of large tool outputs can fill a
     window that a hundred short exchanges would not, so counting messages is a
-    poor proxy for it.
+    poor proxy for it (and compacts perfectly healthy conversations).
 
     The projection adds ``reserved_output_tokens`` to the current input size,
     because the reply has to fit in the same window: a request that leaves no
     room to answer is already too big.
-
-    ``max_messages`` is kept as a cheap secondary guard (a transcript of
-    thousands of tiny turns is slow and expensive even when it fits), and is
-    skipped entirely when unset.
 
     Returns ``(triggered, reason)``; ``reason`` is a short human-readable string
     for the console note when it fires.
@@ -250,30 +243,27 @@ def _compaction_trigger(messages, token_limit, reserved_output_tokens,
         if projected > limit:
             return True, (f"{projected} tokens in, {reserve} reserved for the reply "
                           f"> {limit} budget")
-    if max_messages and len(messages) > int(max_messages):
-        return True, f"{len(messages)} messages > {int(max_messages)} cap"
     return False, ""
 
 
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
-                  current_tokens=None, max_messages=None, plan_hook=None, console=None):
+                  current_tokens=None, plan_hook=None, console=None):
     """Compact the conversation history once it no longer fits the context window.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
     The trigger is the *projected input size* of the next request -- the estimate
     for ``messages`` (or ``current_tokens``, a better number the caller already
     has) plus ``reserved_output_tokens`` headroom for the reply -- compared
-    against ``token_limit``. Compaction is then done by asking the LLM to
-    summarize the history and replacing the old turns with that summary, keeping
-    the original system prompt as the first message. The compaction call itself
-    is a single, tool-free request, so it cannot trigger further tool calls or
-    recurse into compaction.
+    against ``token_limit``. Nothing else triggers compaction: in particular the
+    number of messages is not a criterion. Compaction is then done by asking the
+    LLM to summarize the history and replacing the old turns with that summary,
+    keeping the original system prompt as the first message. The compaction call
+    itself is a single, tool-free request, so it cannot trigger further tool
+    calls or recurse into compaction.
 
-    ``token_limit=None`` disables the token guard (callers that only want the
-    legacy message cap), and ``max_messages=None`` disables the message cap (the
-    default: tokens are the real limit). See :func:`_compaction_trigger` for how
-    the two interact.
+    ``token_limit=None`` disables the guard entirely (a no-op, useful to callers
+    that only sometimes enable compaction). See :func:`_compaction_trigger`.
 
     ``plan_hook`` is an optional callable the caller supplies only when running
     under plan mode (in practice ``AgentSession._handle_compaction``). After the
@@ -292,7 +282,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         console = ui.console
 
     triggered, reason = _compaction_trigger(
-        messages, token_limit, reserved_output_tokens, current_tokens, max_messages)
+        messages, token_limit, reserved_output_tokens, current_tokens)
     if not triggered:
         # No compaction: keep the same segment (history_index) and signal the
         # caller with (messages, did_compact=False, unchanged_index). Returning
@@ -1322,10 +1312,11 @@ class AgentSession:
         normally sits outside --allowed-dir. This exempts that single, known file
         so the sub-agent can actually write it (otherwise the sandbox would block
         the write and the parent would never receive the report). Scoped tightly:
-        only when this is a child session (report_path set), only read_file /
-        write_file, and only when the resolved path is exactly the report file.
+        only when this is a child session (report_path set), only the file tools
+        (read_file / write_file / edit), and only when the resolved path is
+        exactly the report file.
         """
-        if not self.report_path or name not in ("read_file", "write_file"):
+        if not self.report_path or name not in ("read_file", "write_file", "edit"):
             return False
         path = tool_params.get("file_path", "")
         if not path:
@@ -1348,21 +1339,22 @@ class AgentSession:
             # any loop that reaches here unwinds instead of hanging.
             return None
 
-        self.console.short_divider()
+        # A loop, not recursion: holding Enter used to recurse once per blank
+        # line, so a long run of empty input could exhaust the interpreter stack.
+        while True:
+            self.console.short_divider()
 
-        user_input = self.console.read_line(
-            self.console.style("You:", bold=True, fg="cyan") + " ")
+            user_input = self.console.read_line(
+                self.console.style("You:", bold=True, fg="cyan") + " ")
 
-        # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
-        # must not be dereferenced here (a piped or closed stdin would
-        # otherwise crash the loop instead of exiting cleanly).
-        if user_input is None:
-            return None
-        if not user_input.strip():
+            # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
+            # must not be dereferenced here (a piped or closed stdin would
+            # otherwise crash the loop instead of exiting cleanly).
+            if user_input is None:
+                return None
+            if user_input.strip():
+                return user_input
             self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
-            return self._read_user_line()
-
-        return user_input
 
     def _handle_command(self, user_input):
         """Handle an interactive slash command before it reaches the LLM.
@@ -1498,17 +1490,34 @@ class AgentSession:
 
     def _run_one_tool_call(self, call):
 
+        call = call or {}
+        # ``or {}`` (not merely a default) because a malformed server response can
+        # carry an explicit ``"function": null``; indexing through that used to
+        # raise AttributeError and kill the whole session instead of reporting a
+        # bad tool call back to the model.
+        function = call.get("function") or {}
         call_id = call.get("id", "")
-        name = call.get("function", {}).get("name", "")
-        params_str = call.get("function", {}).get("arguments", "{}")
+        name = function.get("name", "") or ""
+        params_str = function.get("arguments", "{}")
         self.console.start_tool_call(tool_name=name)
 
         try:
             tool_params = json.loads(params_str)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             self.console.note(f"Error parsing arguments for tool {name}", "error")
             self._append_tool_result(call_id,
-                f"Error: Unknown tool: {name}, params {params_str}")
+                f"Error: the arguments for tool {name} were not valid JSON "
+                f"({params_str!r}). Pass a JSON object of named parameters.")
+            return
+
+        # The arguments must be a JSON object (a model occasionally emits a bare
+        # list/string). Treat that as a normal tool error rather than crashing on
+        # ``tool_params.get(...)`` below.
+        if not isinstance(tool_params, dict):
+            self.console.note(f"Tool {name} was called with non-object arguments.", "error")
+            self._append_tool_result(call_id,
+                f"Error: the arguments for tool {name} must be a JSON object of "
+                f"named parameters, got {type(tool_params).__name__}.")
             return
 
         # Sub-agent: delegate the task to a sub-agent (which spins up its own
@@ -1657,10 +1666,8 @@ class AgentSession:
             token_limit=self.compaction_budget.token_limit,
             reserved_output_tokens=self.compaction_budget.reserved_output_tokens,
             current_tokens=projected,
-            # getattr keeps argparse-like namespaces without the attribute
-            # (older callers / tests) working, falling back to the default.
-            max_messages=getattr(self.args, "max_messages", DEFAULT_MAX_MESSAGES),
-            plan_hook=self._handle_compaction if self.plan_mode else None, console=self.console
+            plan_hook=self._handle_compaction if self.plan_mode else None,
+            console=self.console,
         )
         # The compaction call itself was billed to the segment that is being
         # closed, so fold its delta into the session total here (the rollover

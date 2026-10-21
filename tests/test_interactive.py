@@ -542,13 +542,16 @@ class CompactionEdgeCaseTest(unittest.TestCase):
     def output(self):
         return self._stream.getvalue()
 
-    def _compact(self, messages, replies, max_messages=2):
+    def _compact(self, messages, replies, token_limit=1):
+        # A 1-token budget means any non-empty transcript is "over budget", which
+        # is how a real context overflow behaves -- only sooner. Compaction is
+        # token-triggered only; the message count is not a criterion.
         if isinstance(replies, str):
             replies = [replies]
         stub = StubLLM([(r, [], USAGE) for r in replies])
         with mock.patch.object(utils, "call_openai_server", new=stub):
             result = maybe_compact(messages, "http://localhost:1", "m", None, 30,
-                                   self.stats, max_messages=max_messages,
+                                   self.stats, token_limit=token_limit,
                                    console=self.console())
         return result, stub
 
@@ -607,7 +610,7 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         with mock.patch.object(utils, "call_openai_server", new=boom):
             out, did_compact, index = maybe_compact(
                 messages, "http://localhost:1", "m", None, 30, self.stats,
-                max_messages=2, console=self.console())
+                token_limit=1, console=self.console())
 
         self.assertFalse(did_compact)
         self.assertEqual(index, 0)

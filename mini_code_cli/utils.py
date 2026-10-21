@@ -1,5 +1,6 @@
 import requests
 import json
+import sys
 
 
 def oneline(text, limit=None):
@@ -69,12 +70,13 @@ def determine_vllm_model(server_url, api_key=None, timeout=120):
         result = response.json().get('data', [{}])[0]
         return result.get("id", "")
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling OpenAI Server...: {e}")
+    except requests.exceptions.RequestException:
+        # Silent by design: this is a best-effort probe, and the caller already
+        # warns the user (see AgentSession._resolve_model). Printing here used to
+        # scribble over the session banner.
         return None
 
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"Error processing response: {e}")
+    except (json.JSONDecodeError, KeyError, IndexError):
         return None
 
 
@@ -192,28 +194,28 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         }, reasoning_content
 
     except requests.exceptions.RequestException as e:
-        print(f"HTTP Error: {e}")
+        print(f"HTTP Error: {e}", file=sys.stderr)
         # Only probe the response further if we actually got one back. A
         # request-level failure (timeout, connection refused, DNS) leaves
         # ``response`` as None, and there is nothing to inspect then.
         if response is not None:
             try:
                 # Print the status code / raw body to see the detailed error.
-                print(f"Status Code: {response.status_code}")
-                print(f"Response Body: {response.text}")
+                print(f"Status Code: {response.status_code}", file=sys.stderr)
+                print(f"Response Body: {response.text}", file=sys.stderr)
                 # If the response is JSON, parse and pretty-print it.
                 try:
                     error_details = response.json()
-                    print("Parsed Error Details:")
-                    print(json.dumps(error_details, indent=2))
+                    print("Parsed Error Details:", file=sys.stderr)
+                    print(json.dumps(error_details, indent=2), file=sys.stderr)
                 except json.JSONDecodeError:
-                    print("Response body is not valid JSON.")
+                    print("Response body is not valid JSON.", file=sys.stderr)
             except Exception as e:
-                print(f"Problem with (error) response: {e}")
+                print(f"Problem with (error) response: {e}", file=sys.stderr)
         return None, None, None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"Error processing response: {e}")
+        print(f"Error processing response: {e}", file=sys.stderr)
         return None, None, None, None
     except Exception as e:  # noqa: BLE001 -- a network/parse hiccup must not crash the loop
-        print(f"Unexpected error calling OpenAI server: {e}")
+        print(f"Unexpected error calling OpenAI server: {e}", file=sys.stderr)
         return None, None, None, None

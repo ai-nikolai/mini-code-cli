@@ -185,7 +185,11 @@ def plan_prompt(messages, current_instruction):
     ``messages`` is the full conversation list; ``current_instruction`` is the
     latest user turn.
     """
-    conversation = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+    # .get() (not msg['content']) for the same reason as compaction_prompt: a
+    # tool-call-only assistant turn has no content key, and a KeyError here
+    # would silently drop plan-mode authoring for the rest of the session.
+    conversation = "\n".join(
+        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
     prompt = f"""
 You are planning how to complete the current user instruction. Using the
 full conversation so far, author a concrete, step-by-step plan for accomplishing
@@ -228,7 +232,10 @@ def plan_review_prompt(messages, goal):
     ``messages`` is the full conversation list (used to see what was done);
     ``goal`` is the current user instruction, used as the bar to judge against.
     """
-    conversation = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
+    # .get(): a tool-call-only assistant turn has content None / no key (see
+    # compaction_prompt); indexing it here would abort the review.
+    conversation = "\n".join(
+        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
     prompt = f"""
 You are reviewing the current plan now that you have (apparently) finished
 acting. Using the full conversation so far, decide which tasks of the plan are

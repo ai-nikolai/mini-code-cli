@@ -8,9 +8,10 @@ covered in :mod:`tests.test_e2e_agent_loop` (``TokenBudgetCompactionTest``).
 The thing being tested is a *policy*: compaction used to fire on
 ``len(messages) > max_messages``, which is a poor proxy for "will the next
 request fit in the context window" -- ten large tool outputs can overflow a
-window that two hundred short turns would not. Now the trigger is the projected
+window that two hundred short turns would not. The trigger is now the projected
 input size plus the headroom kept for the reply, compared against a budget
-derived from the model's own window.
+derived from the model's own window -- and nothing else. The message count is
+not consulted at all, so a long, cheap conversation is never compacted early.
 """
 
 import unittest
@@ -291,7 +292,7 @@ class CompactionTriggerTest(unittest.TestCase):
     def test_a_large_transcript_under_the_budget_does_not_compact(self):
         messages = long_messages(200, 8)            # 200 turns, all tiny
         out, did_compact, index = self._compact(
-            messages, token_limit=100_000, max_messages=None)
+            messages, token_limit=100_000)
 
         self.assertFalse(did_compact)
         self.assertIs(out, messages)
@@ -331,7 +332,7 @@ class CompactionTriggerTest(unittest.TestCase):
         self.assertEqual(budget.source, "default")
 
         # A transcript comfortably over the fallback budget compacts ...
-        over = long_messages(4, 40_000)             # ~40k tokens > ~21k
+        over = long_messages(4, 200_000)            # ~200k tokens > the budget
         _, did_compact, _ = self._compact(
             over, token_limit=budget.token_limit,
             reserved_output_tokens=budget.reserved_output_tokens)
@@ -343,30 +344,21 @@ class CompactionTriggerTest(unittest.TestCase):
             reserved_output_tokens=budget.reserved_output_tokens)
         self.assertFalse(did_compact)
 
-    def test_no_guard_at_all_never_compacts(self):
-        # token_limit=None and max_messages=None: the legacy "no trigger" call
-        # shape, which must stay a no-op so external callers keep working.
+    def test_no_limit_never_compacts(self):
+        # token_limit=None: the "guard disabled" call shape, which must stay a
+        # no-op however large the transcript is.
         _, did_compact, _ = self._compact(long_messages(50, 40_000))
         self.assertFalse(did_compact)
 
-    # -- the message cap as a secondary guard -----------------------------
-
-    def test_the_message_cap_still_fires_on_its_own(self):
-        messages = long_messages(20, 8)
+    def test_the_message_count_is_never_a_trigger(self):
+        # Thousands of tiny turns, comfortably inside a huge token budget: the
+        # old message cap would have compacted this; tokens alone must not.
         _, did_compact, index = self._compact(
-            messages, token_limit=10_000_000, max_messages=5)
-        self.assertTrue(did_compact)
-        self.assertEqual(index, 1)
+            long_messages(5_000, 8), token_limit=10_000_000)
 
-    def test_the_message_cap_is_skipped_when_unset(self):
-        _, did_compact, _ = self._compact(
-            long_messages(20, 8), token_limit=10_000_000, max_messages=None)
         self.assertFalse(did_compact)
-
-    def test_the_message_cap_can_be_disabled_with_zero(self):
-        _, did_compact, _ = self._compact(
-            long_messages(20, 8), token_limit=10_000_000, max_messages=0)
-        self.assertFalse(did_compact)
+        self.assertEqual(index, 0)
+        self.assertEqual(self.stats["llm_calls"], 0)      # no summariser call
 
     # -- unchanged behaviour ----------------------------------------------
 

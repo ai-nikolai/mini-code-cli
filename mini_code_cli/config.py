@@ -18,12 +18,11 @@ DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOOL_TIMEOUT = 120     # seconds before a single tool call is aborted
 DEFAULT_HTTP_TIMEOUT = 500     # seconds before an LLM HTTP request is aborted
 
-# History compaction is triggered by how full the *context window* is, not by
-# how many messages the transcript holds (a handful of tool outputs can overflow
-# a window that a hundred short turns would not). ``DEFAULT_MAX_MESSAGES`` is
-# kept as a secondary guard so a pathological run of thousands of tiny turns is
-# still bounded, and for backwards compatibility with external callers.
-DEFAULT_MAX_MESSAGES = 150
+# History compaction is triggered by how full the *context window* is -- and by
+# nothing else. The number of messages is deliberately NOT a trigger: it is a
+# poor proxy for what makes a request fail (a handful of large tool outputs can
+# overflow a window that a hundred short turns would not), and a message-count
+# cap compacts healthy conversations early for no reason.
 
 
 # ---------------------------------------------------------------------------

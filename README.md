@@ -49,17 +49,34 @@ mini-code --enable-shell --auto-mode --agent-md "./skill.md" --allowed-dir "./" 
 - load-last-session: instead of starting a fresh conversation, automatically continue your most recently active session from the default cache dir. It resumes under a brand-new session id, so the original session is never overwritten. An explicit `--restore-session` (a specific path) takes precedence if both are given. The "most recent" session is resolved in two steps: at the end of every interactive session, its path is recorded in a tiny `.mini/last_session.json` pointer inside the `--allowed-dir`, and `--load-last-session` consults that pointer first; only if there is no pointer (e.g. a fresh allowed dir, or the `--skills` feature disabled) does it fall back to the timestamp heuristic (the session whose history was modified most recently). The `.mini` pointer is the same directory the `--skills` feature uses, but it is a single dedicated file, so the two never clash.
 - **Interactive session offer:** if a previous session exists in the cache dir but you did **not** explicitly ask to resume one (i.e. neither `--load-last-session` nor `--restore-session` was passed), the prompt asks what you'd like to do before the conversation starts: 1) **Resume** the previous session (splice its history in under a brand-new session id and continue it), 2) **Start a new** session (empty history), or 3) **Exit** (start nothing). Ctrl-C / EOF at the offer is treated as a graceful exit. This is distinct from `--load-last-session`, which silently resumes the most recent session without asking.
 - plan: `--plan` enables **plan mode**. The loop keeps two human-readable tracking files in the session directory: `CURRENT_GOAL.md` (the user's latest instruction) and `CURRENT_PLAN.md` (a step-by-step plan the loop generates for the active goal, marked finished once the goal is done). These files are authored by the *loop*, not the agent (they live outside `--allowed-dir`), and you can inspect them anytime with `/plan` (only meaningful in plan mode). After the work looks done, plan mode reviews the plan's completion and re-queues any outstanding tasks before returning to you. Plan mode also changes how history compaction works: after the history is compacted to a summary, the current `CURRENT_PLAN.md` and the user's last instruction (`CURRENT_GOAL.md`) are re-injected into the messages so the agent keeps working against the same goal. When the session ends, the active goal is marked finished in `CURRENT_PLAN.md`.
+- max-context-tokens: the input-token budget that triggers **history compaction**. Compaction is decided by **tokens only** — never by the number of messages — because it is the tokens that make a request overflow the model's context window (a few large tool outputs can fill a window that hundreds of short turns would not). The size of the next request is projected from the server-reported `prompt_tokens` plus an estimate for whatever was appended since, plus the output reserve (`--max-tokens`). Unset (default) derives the limit from the model's context window minus the output reserve and a safety margin; lower it to compact sooner, raise it to compact later. There is no message-count cap to configure.
 
 ### Available tools
 
 The agent can call a small set of tools, all of which live in `mini_code_cli/tools.py`:
 
-- **`read_file` / `write_file`** — read a file or write/overwrite one.
-- **`grep`** — search a file for a pattern.
-- **`glob`** — list files matching a glob pattern.
+Each tool exposes only the parameters a model actually needs; every optional parameter
+has a default, so leaving it out keeps the previous behaviour.
+
+- **`read_file`** — read a file. `offset` (1-based first line) and `limit` (max lines) page
+  through large files instead of loading them whole.
+- **`write_file`** — write/overwrite a file. `append` adds to the end instead of
+  overwriting; `create_dirs` (default true) creates missing parent directories.
+- **`edit`** — replace an **exact string** in a file (`file_path`, `old_string`,
+  `new_string`, optional `replace_all`). It refuses an edit when `old_string` is missing
+  or matches more than once (unless `replace_all=true`), so a wrong edit is never applied
+  silently. Prefer this over rewriting a whole file.
+- **`grep`** — search a file or a directory with a regular expression. `recursive`,
+  `include` (e.g. `"*.py"`), `ignore_case`, `line_numbers` (default true) and
+  `max_results`. Noise directories (`.git`, `__pycache__`, `node_modules`, ...) are skipped.
+- **`glob`** — list files matching a glob pattern (one per line, `**` supported), optionally
+  resolved against a `root` directory.
 - **`web_search`** — best-effort web lookup: returns popular related queries (DuckDuckGo autocomplete) plus a short extract from the top Wikipedia match. Never raises; always returns a string.
-- **`read_website`** — fetch the raw text/HTML of a URL (bounded by `--tool-timeout`).
-- **`run_shell_command`** — run a shell command (only when `--enable-shell` is set). Every command is passed through the shell-safety classifier described above.
+- **`read_website`** — fetch the raw text/HTML of a URL (bounded by `--tool-timeout`); `max_chars` caps how much of a huge page is returned.
+- **`run_shell_command`** — run a shell command (only when `--enable-shell` is set). `cwd`
+  sets the working directory and `timeout` the wall clock; stdout, stderr and a non-zero
+  exit code are all reported. Every command is passed through the shell-safety classifier
+  described above.
 
 ### Sub-agents
 
@@ -71,10 +88,12 @@ Enable it and the available sub-agents appear in the help (`/help`):
 mini-code --enable-subagents
 ```
 
-Two worked examples ship out of the box:
+Four worked examples ship out of the box:
 
 - **`research`** -- read-only web research. Given a topic it searches the web, reads a few sources and returns a concise, sourced summary. It can only use `web_search` / `read_website` -- never the filesystem or shell -- so it is safe even without a sandbox. Accepts an optional `sources` hint (e.g. `"wikipedia.org only"`).
 - **`planner`** -- drafts/refines a clear step-by-step plan for a goal and returns it. Always runs in plan mode.
+- **`software_engineer`** -- write, edit, refactor, fix or test code: it can read/write/edit files and run shell commands (tests, builds) to verify the work.
+- **`generic`** -- a general-purpose helper for tasks that do not fit a narrower agent.
 
 The `tools`, `enable_shell` and `max_steps` knobs are always intersected with the parent's own permissions, so a sub-agent can never do anything the main agent could not. Sub-agents also compose with `--plan` mode: each sub-agent keeps its own `CURRENT_PLAN.md` / `CURRENT_GOAL.md` in its own session folder.
 
@@ -108,42 +127,94 @@ Write an agent.md file for me that helps an LLM write efficient triton kernels, 
 mini-code --help
 ```
 ```
+usage: agent_loop.py [-h] [--url URL] [--max-tokens MAX_TOKENS]
+                     [--temperature TEMPERATURE] [--model MODEL]
+                     [--api-key API_KEY] [--cache-dir CACHE_DIR]
+                     [--restore-session RESTORE_SESSION] [-l]
+                     [--system-prompt SYSTEM_PROMPT] [-a]
+                     [--agent-md AGENT_MD] [--prompt PROMPT]
+                     [--ask-permission] [--sudo] [--allowed-dir ALLOWED_DIR]
+                     [-s] [-g] [--skills] [--llm-timeout LLM_TIMEOUT]
+                     [--tool-timeout TOOL_TIMEOUT]
+                     [--max-context-tokens MAX_CONTEXT_TOKENS] [-p] [--all]
+                     [--all-last] [--verbose]
+
 Agent loop for interacting with a language model
 
 options:
   -h, --help            show this help message and exit
   --url URL             API host, default=http://0.0.0.0:30000
   --max-tokens MAX_TOKENS
-                        Maximum tokens for LLM response, default=None
+                        Maximum tokens for a single LLM response (the reply
+                        budget), default=None. Also used as the output
+                        headroom reserved when deriving the compaction limit
+                        from the model's context window.
   --temperature TEMPERATURE
                         Temperature for LLM, default=1.0
   --model MODEL         Model name, default=None
-  --api-key API_KEY     API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.
+  --api-key API_KEY     API key for authentication. If not set, it tries to
+                        find it in env variable: MINI_CODE_API_KEY.
   --cache-dir CACHE_DIR
-                        The cache dir for the session histories. default=~/.cache/mini_code/sessions/
+                        The cache dir for the session histories.
+                        default=~/.cache/mini_code/sessions/
   --restore-session RESTORE_SESSION
-                        The location of a previous session to continue. (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)
-  --load-last-session   Load the most recent previous session from the cache dir and continue it (under a new session id), instead of starting fresh. --restore-session takes precedence if also given.
+                        The location of a previous session to continue. (e.g. 
+                        ~/.cache/mini_code/sessions/1792028090823027-
+                        a9d77653/)
+  -l, --load-last-session
+                        Continue the most recent previous session recorded in
+                        the --allowed-dir .mini pointer, in place and without
+                        the resume prompt, instead of starting fresh.
+                        --restore-session takes precedence if also given.
   --system-prompt SYSTEM_PROMPT
                         Replace system prompt, with a custom system prompt.
-  -a, --auto-mode       Whether to run the agent in `auto-mode'. Or default: `manual-mode'.
-  --agent-md AGENT_MD   If the agent should use an agent-md file... (it will added after system message.)
+  -a, --auto-mode       Whether to run the agent in `auto-mode'. Or default:
+                        `manual-mode'.
+  --agent-md AGENT_MD   If the agent should use an agent-md file... (it will
+                        added after system message.)
   --prompt PROMPT       An initial prompt from the user...
-  --ask-permission      Ask for permission before any tool call. (Shell ALLOW-tier commands skip the prompt; DENY is blocked.)
-  --sudo                DANGEROUS: never ask for permission. Every non-destructive tool call and shell command runs automatically without confirmation. Destructive (DENY-tier) commands are still refused.
+  --ask-permission      Ask for permission before any tool call.
+  --sudo                DANGEROUS: never ask for permission. Every non-
+                        destructive tool call and shell command runs
+                        automatically without confirmation. Destructive (DENY-
+                        tier) commands are still refused.
   --allowed-dir ALLOWED_DIR
                         Allowed directory for file operations, default='./'
   -s, --enable-shell    Allow shell execution. default= False
-  --enable-subagents    Allow the agent to delegate work to sub-agents (exposed as extra tools). default= False
+  -g, --enable-subagents
+                        Allow the agent to delegate work to sub-agents
+                        (exposed as extra tools). default= False
+  --skills              Enable the skills feature: a local .mini directory
+                        (inside --allowed-dir) of skill.md files, skill sub-
+                        dirs, a high-level SKILLS.md summary, and executable
+                        Python scripts, exposed to the agent as
+                        list_skills/read_skill/create_skill/run_skill tools.
+                        default= False
   --llm-timeout LLM_TIMEOUT
-                        HTTP timeout in seconds for LLM requests (reasoning models can be slow). default=500
+                        HTTP timeout in seconds for LLM requests (reasoning
+                        models can be slow). default=500
   --tool-timeout TOOL_TIMEOUT
                         Timeout in seconds for a single tool call. default=120
-  --plan                Enable plan mode: the agent keeps a CURRENT_PLAN.md
+  --max-context-tokens MAX_CONTEXT_TOKENS
+                        Input-token budget before the conversation is
+                        compacted into a summary. This is the primary
+                        compaction trigger: it is compared against the
+                        projected size of the next request (the server-
+                        reported prompt tokens, plus an estimate for whatever
+                        was appended since) plus the output reserve (--max-
+                        tokens, or a default). Unset (default): derived from
+                        the model's context window minus the output reserve
+                        and a safety margin, falling back to a conservative
+                        window for unknown models. Lower it to compact sooner.
+  -p, --plan            Enable plan mode: the agent keeps a CURRENT_PLAN.md
                         (its step-by-step plan, marked finished when the goal
                         is done) and CURRENT_GOAL.md (the user's latest
                         instruction) in the session directory. Also changes
                         how history compaction works.
+  --all                 Enable: --plan, --subagents, --shell, --automode,
+                        --sudo
+  --all-last            Enable: --plan, --subagents, --shell, --automode,
+                        --sudo, --load-last-session
   --verbose             Print the full, detailed output. Without it (default),
                         only user/assistant turns, token usage and tool calls
                         are shown.
@@ -170,18 +241,29 @@ The project ships with a small standard-library test suite (no extra dependencie
 python3 -m unittest discover -s tests -p "test_*.py"
 
 # ...or run a single test file:
-python3 tests/test_tools.py
-python3 tests/test_sandboxing.py
-python3 tests/test_agent_loop.py
-python3 tests/test_shell_safety.py
+python3 tests/test_tokens.py
+python3 tests/test_e2e_agent_loop.py
+python3 tests/test_interactive.py
+python3 tests/test_subagents.py
 ```
 
 The tests focus on the parts of the agent that are easy to get wrong and worth guarding:
 
-- **`test_sandboxing.py`** — the `--allowed-dir` sandbox. Verifies that child paths are allowed, while `..` traversal and sibling paths outside the allowed directory are rejected.
-- **`test_tools.py`** — the tool functions. Confirms they *return* their results/errors (instead of printing), that `run_shell_command` captures stderr and honors a timeout, and that the generated tool schema exposes the expected parameters.
-- **`test_agent_loop.py`** — agent-loop behaviour. Confirms that enabling the shell forces per-command permission prompts, that memory compaction is correctly wired (accepts token accounting), and that token-usage formatting handles servers that report no usage.
-- **`test_shell_safety.py`** — the shell command classifier. Confirms commands are sorted into the three tiers correctly: destructive commands (`rm -rf /`, `dd of=/dev/...`, `mkfs.*`, fork bombs) are **DENY**, risky ones (`rm file`, `sudo`, `curl | sh`, redirects to `/etc/...`) are **ASK**, and safe ones (`ls`, `cat`, `git status`) are **ALLOW**.
+- **`test_e2e_agent_loop.py`** — the whole loop, driven the way a user drives it
+  (`AgentSession(args).run(...)`), with only the LLM stubbed: real tools run on disk, the
+  `--allowed-dir` sandbox is exercised end to end, plan mode's tracking files are written,
+  sub-agent delegation runs a nested loop, history compaction rolls the segment over
+  (keeping per-segment usage), sessions restore in place, and the `edit` tool / richer
+  tool schemas are covered.
+- **`test_tokens.py`** — the compaction *policy*: the model → context-window table, the
+  budget resolution (explicit / model / conservative fallback), the token estimator, and
+  the trigger itself — which fires on projected tokens (+ the reply reserve) and **never**
+  on the message count.
+- **`test_interactive.py`** — the shell-safety classifier (DENY / ASK / ALLOW tiers) and
+  compaction edge cases (an empty summary is retried, then abandoned without losing the
+  transcript; a failing summariser call never corrupts the segment).
+- **`test_subagents.py`** — sub-agent delegation, isolation of the child session, the
+  `report.md` channel and the intersection of child permissions with the parent's.
 
 This keeps the tool honest as it grows, and makes it safe to experiment with riskier features (like `--enable-shell`) without regressions.
 

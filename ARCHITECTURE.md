@@ -18,9 +18,9 @@ works.
 | Module | Responsibility |
 | --- | --- |
 | `agent_loop.py` | CLI entry point (`main`, `parse_args`), the `AgentSession` loop, history compaction, plan-mode hooks, sub-agent delegation wiring. Re-exports helpers for backward compatibility. |
-| `config.py` | Process-wide defaults (cache location, model URL, timeouts, `max_messages`). Shared by every module to avoid import cycles. |
+| `config.py` | Process-wide defaults (cache location, model URL, timeouts) plus the model context-window table and the token-based compaction budget (`compaction_budget`). History compaction is triggered by tokens only -- there is no message-count limit. Shared by every module to avoid import cycles. |
 | `prompts.py` | Builds the system prompt (tool list, allowed-dir note, plan-mode instructions) and the compaction/summary prompt. |
-| `tools.py` | The tool *functions* the model can call (`read_file`, `write_file`, `grep`, `glob`, `web_search`, `read_website`, `run_shell_command`) plus `util_get_tools` / `util_get_tools_dict` which introspect their signatures into an OpenAI-style tool schema. |
+| `tools.py` | The tool *functions* the model can call (`read_file`, `write_file`, `edit`, `grep`, `glob`, `web_search`, `read_website`, `run_shell_command`) plus `util_get_tools` / `util_get_tools_dict` which introspect their signatures into an OpenAI-style tool schema. Every tool returns a string and never raises; optional parameters (a line range for `read_file`, `recursive`/`include` for `grep`, `root` for `glob`, `replace_all` for `edit`, `cwd` for the shell, ...) all have safe defaults, and the schema type is inferred from a parameter's annotation *or* its default so integer/boolean knobs are not advertised as strings. |
 | `persistence.py` | Everything about session histories on disk: `history_{n}.json` segments, the flat `summary_history.json` recorder, per-segment `usage_{n}.json` + `total_usage.json`, and the restore/`find_last_session` helpers. Every loader is best-effort (never raises). |
 | `sandbox.py` | The `--allowed-dir` filesystem sandbox (`is_within_allowed_dir`, `tool_paths_are_allowed`), using `os.path.realpath` to defeat symlinks / `..`. |
 | `permissions.py` | Pure "does this tool call need a prompt?" helpers (`needs_permission`, `shell_forces_ask_permission`, `sudo_disables_prompts`). |
@@ -184,7 +184,11 @@ small:
 
 * **New tools** live only in `tools.py` (and show up in the schema automatically via
   `util_get_tools`, which introspects the signature). The sandbox stays correct because
-  `_FILE_TOOL_PATH_ARGS` in `sandbox.py` enumerates every path-bearing argument.
+  `_FILE_TOOL_PATH_ARGS` in `sandbox.py` enumerates every path-bearing argument -- so a new
+  path-bearing parameter (like `glob`'s `root` or the shell's `cwd`) must be added there too.
+* **Compaction** is decided in `agent_loop._compaction_trigger` from the projected input
+  tokens plus the reply reserve against `config.compaction_budget`; the message count is
+  deliberately not consulted.
 * **New permissions behaviour** lives in `permissions.py` and `shell_safety_utils.py`.
 * **New persistence shapes** live in `persistence.py` (best-effort loaders throughout).
 * **New sub-agents** live in `subagents/` (see §2.4).
