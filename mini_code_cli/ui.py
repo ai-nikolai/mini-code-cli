@@ -29,6 +29,8 @@ import shutil
 import sys
 import threading
 
+from .utils import oneline
+
 # --- ANSI SGR codes ---------------------------------------------------------
 _RESET = "\033[0m"
 _STYLE_CODES = {
@@ -351,11 +353,8 @@ class Console:
 
     @staticmethod
     def _oneline(text, limit=None):
-        one = " ".join(line.strip() for line in str(text).splitlines())
-        one = " ".join(one.split())
-        if limit is not None and len(one) > limit:
-            return one[:limit] + "..."
-        return one
+        """Collapse ``text`` to one line (delegates to :func:`utils.oneline`)."""
+        return oneline(text, limit)
 
     # -- semantic renderers -------------------------------------------------
     def banner(self, title, lines, fg="cyan"):

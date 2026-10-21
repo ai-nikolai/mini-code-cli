@@ -31,6 +31,7 @@ from . import prompts
 from . import shell_safety_utils
 from . import tools
 from . import utils
+from .utils import oneline
 from . import ui
 from . import subagents
 from . import skills
@@ -1299,7 +1300,7 @@ class AgentSession:
         subagent = self.subagents_registry[name]
         task = tool_params.get("task", "")
         max_steps = tool_params.get("max_steps")
-        self.console.note(f"Delegating to sub-agent '{name}' (task: {_oneline(task, 80)})", "info")
+        self.console.note(f"Delegating to sub-agent '{name}' (task: {oneline(task, 80)})", "info")
         try:
             result = subagent.run(task, parent=self, max_steps=max_steps)
             self.console.note(f"Sub-agent '{name}' finished.", "ok")
@@ -1453,12 +1454,6 @@ class _Abort(Exception):
 # ---------------------------------------------------------------------------
 # module-level helpers kept for readability / backward compatibility
 # ---------------------------------------------------------------------------
-
-def _oneline(text, limit):
-    one = " ".join(line.strip() for line in str(text).splitlines())
-    one = " ".join(one.split())
-    return one[:limit] + "..." if len(one) > limit else one
-
 
 def print_usage_summary(token_stats):
     ui.console.usage_summary(token_stats)

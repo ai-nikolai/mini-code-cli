@@ -40,6 +40,7 @@ import os
 import types
 
 from .. import ui
+from ..utils import oneline
 
 
 class SubAgent:
@@ -330,9 +331,3 @@ class SubAgent:
                 f"({getattr(child, 'steps_taken', None)} model calls); its work may be "
                 f"incomplete. Delegate again with a larger max_steps to continue.")
         return "\n".join(parts)
-
-
-def _oneline(text, limit):
-    one = " ".join(line.strip() for line in str(text).splitlines())
-    one = " ".join(one.split())
-    return one[:limit] + "..." if len(one) > limit else one

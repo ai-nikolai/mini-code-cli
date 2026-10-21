@@ -2,6 +2,26 @@ import requests
 import json
 
 
+def oneline(text, limit=None):
+    """Collapse ``text`` onto a single line, optionally truncated to ``limit``.
+
+    Multi-line tool output, file contents and model replies are pointless (and
+    disruptive) in a one-line status message, so they are flattened: every line
+    is stripped, the lines are joined with single spaces, and runs of whitespace
+    collapse. When ``limit`` is given the result is truncated with a trailing
+    ellipsis if it does not fit.
+
+    This is the single implementation used by the console renderers, the agent
+    loop and the sub-agent runner (it previously existed three times, so the
+    three call sites could drift apart).
+    """
+    one = " ".join(line.strip() for line in str(text).splitlines())
+    one = " ".join(one.split())
+    if limit is not None and len(one) > limit:
+        return one[:limit] + "..."
+    return one
+
+
 def _coerce_usage_int(value):
     """Best-effort: coerce a raw usage field to a non-negative int.
 

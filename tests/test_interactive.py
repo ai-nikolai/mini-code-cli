@@ -6,6 +6,7 @@ These cover the parts of the CLI a user drives directly rather than the model:
     ``/plan``, ``/clear``) -- handled in place, so they never reach the LLM;
   * the ``.mini`` latest-session pointer: its readers, its writer, and the
     rule that a real session records it while a background (sub-agent) one does not;
+  * the shared ``oneline`` helper (one implementation, three callers);
   * the shell-safety classifier, as a table across all three tiers;
   * two compaction regressions: a message without ``content`` must not break
     the summary prompt, and an empty summary must not roll the segment over.
@@ -288,6 +289,45 @@ class PointerWrittenBySessionsTest(_SessionCase):
 
         self.assertEqual(persistence.find_last_session_dir(self.workdir),
                          os.path.abspath(original.session_dir))
+
+
+# ---------------------------------------------------------------------------
+# the shared one-line helper
+# ---------------------------------------------------------------------------
+
+class OnelineTest(unittest.TestCase):
+    """``utils.oneline`` is the single implementation behind three call sites."""
+
+    def test_flattens_newlines_and_whitespace(self):
+        self.assertEqual(utils.oneline("alpha\nbeta\r\n  gamma  "), "alpha beta gamma")
+        self.assertEqual(utils.oneline("a\t\tb"), "a b")
+        self.assertEqual(utils.oneline("   "), "")
+
+    def test_no_limit_keeps_the_whole_line(self):
+        text = "x" * 500
+        self.assertEqual(utils.oneline(text), text)
+
+    def test_limit_truncates_with_an_ellipsis(self):
+        self.assertEqual(utils.oneline("abcdefghij", 4), "abcd...")
+        self.assertEqual(utils.oneline("abc", 4), "abc")     # fits: untouched
+
+    def test_accepts_non_string_input(self):
+        self.assertEqual(utils.oneline(None), "None")
+        self.assertEqual(utils.oneline(42), "42")
+
+    def test_the_duplicate_definitions_are_gone(self):
+        """No module re-implements it: agent_loop / subagents import, ui delegates."""
+        from mini_code_cli import agent_loop
+        from mini_code_cli.subagents import base as subagent_base
+
+        self.assertFalse(hasattr(agent_loop, "_oneline"))
+        self.assertFalse(hasattr(subagent_base, "_oneline"))
+        self.assertIs(subagent_base.oneline, utils.oneline)
+
+    def test_the_console_renderer_delegates(self):
+        console = ui.Console(stream=io.StringIO(), color=False, unicode=False)
+        self.assertEqual(console._oneline("a\nb", 3), utils.oneline("a\nb", 3))
+        self.assertEqual(console._oneline("a\nb"), "a b")
 
 
 # ---------------------------------------------------------------------------
