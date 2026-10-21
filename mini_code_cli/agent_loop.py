@@ -223,6 +223,14 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     owning session -- keeps ``maybe_compact`` a small, module-level, network-free
     helper that the test-suite can import and exercise directly.
     """
+    # ``console`` defaults to None so callers may omit it, but every branch below
+    # reports through a console. Falling back to the shared one keeps the
+    # documented signature usable -- without this a bare maybe_compact() call hit
+    # "'NoneType' object has no attribute 'start_thinking'" inside the try block,
+    # which the except then swallowed as a failed compaction.
+    if console is None:
+        console = ui.console
+
     if len(messages) <= max_messages:
         # No compaction: keep the same segment (history_index) and signal the
         # caller with (messages, did_compact=False, unchanged_index). Returning
@@ -332,8 +340,21 @@ class AgentSession:
         self.restore_session = getattr(self.args, "restore_session", None) #specific session
         
     def start_session(self):
-        """Loads existing session, detects existing session and asks or starts a new session."""
+        """Loads existing session, detects existing session and asks or starts a new session.
+
+        A *background* session (a sub-agent's, see ``background_mode``) short
+        circuits the detection entirely: it neither consults the ``.mini`` resume
+        pointer nor offers the interactive resume prompt, so it always begins a
+        fresh isolated session. That is what makes delegation safe to run
+        unattended -- there is a single place that decides this, rather than
+        every caller having to remember.
+        """
         loading_success = False
+        if self.background_mode and not self.restore_session:
+            # Unattended: no pointer lookup, no resume prompt, no user input.
+            self.start_new_session()
+            return
+
         if self.restore_session:
             try:
                 restore_directory = _restore_dir(self.restore_session)        
@@ -815,14 +836,21 @@ class AgentSession:
         child_plan = PlanManager(os.path.join(self.cache_dir, self.unique_id), enabled=True)
         child_plan.write_goal(initial_task)
         steps = 0
+        # How the run ended, so the caller can explain a truncated answer
+        # instead of reporting "no output" (the common case when the cap is hit
+        # mid-tool-call, where there is no final assistant text at all).
+        self.stop_reason = "finished"
+        self.steps_taken = 0
         try:
             while True:
                 should_continue = self._step()
                 self._persist()
                 steps += 1
+                self.steps_taken = steps
                 if max_steps and steps >= max_steps:
                     self.console.note(
                         f"Sub-agent reached max_steps ({max_steps}); stopping.", "warn")
+                    self.stop_reason = "max_steps"
                     break
                 if not should_continue:
                     break
@@ -1012,6 +1040,11 @@ class AgentSession:
         An empty (blank) line is not a real instruction, so it is ignored and the
         user is asked again rather than sending an empty turn to the model.
         """
+        if self.background_mode:
+            # Nothing may block on input in an unattended session: report EOF so
+            # any loop that reaches here unwinds instead of hanging.
+            return None
+
         self.console.short_divider()
 
         user_input = self.console.read_line(style_line_prompt("You:"))
@@ -1209,6 +1242,17 @@ class AgentSession:
         # 3) Permission prompt. Either the user asked for prompts on every call,
         #    or the shell-safety classifier flagged this command as risky (ASK).
         if needs_permission(self.args, shell_cmd, tier):
+            if self.background_mode:
+                # A sub-agent has no human to ask (and forwarding the prompt to
+                # the parent would hang an unattended parent). Refuse instead of
+                # running: background mode never widens what the session may do.
+                self.console.note(
+                    f"Background session: refusing {name} (would need permission).", "warn")
+                self._append_tool_result(call_id,
+                    f"Refused: tool {name} requires user confirmation, which is not "
+                    f"available in this unattended (background) session. Use a "
+                    f"non-interactive alternative.")
+                return
             ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
             if not ok:
                 self._append_tool_result(call_id,

@@ -61,12 +61,25 @@ class SubAgent:
     enable_shell = False
     #: Default cap on LLM calls the sub-agent may make (None = unbounded).
     max_steps = None
+    #: Whether the nested session runs unattended ("background mode").
+    #:
+    #: This is the guarantee that a sub-agent never needs a human: a background
+    #: session goes straight to a fresh session in :meth:`AgentSession
+    #: .start_session` -- it never consults the ``.mini`` resume pointer, never
+    #: shows the resume prompt, never reads a "You:" line, and auto-denies (so
+    #: it cannot hang on) any tool call that would otherwise ask for permission.
+    #: Override per instance with the ``background_mode`` option, or per subclass
+    #: by setting the class attribute; set it False only for a sub-agent you
+    #: intend to run interactively.
+    background_mode = True
 
     def __init__(self, **options):
         # Options accepted by every sub-agent. Subclasses read extra keys from
         # self.options as they please.
         self.options = dict(options)
         self.max_steps = options.get("max_steps", self.max_steps)
+        self.background_mode = bool(
+            options.get("background_mode", self.background_mode))
 
     # -- identity ----------------------------------------------------------
 
@@ -179,6 +192,13 @@ class SubAgent:
         from the child's final answer and any ``report.md`` it wrote. Best
         effort: any failure degrades to an Error string rather than raising, so
         a broken sub-agent cannot take down the main session.
+
+        The nested session runs in *background mode* (see
+        :attr:`background_mode`): it starts a fresh isolated session without
+        consulting the ``.mini`` resume pointer, never shows the resume prompt,
+        never reads a "You:" line, and auto-denies any tool call that would
+        otherwise ask a human for permission. A sub-agent is therefore safe to
+        delegate to from an unattended parent.
         """
         from .. import agent_loop  # local import to avoid an import cycle
 
@@ -198,16 +218,22 @@ class SubAgent:
         child_console = ui.Console(stream=io.StringIO(), color=False, unicode=False, verbose=False,
                                    parent_console=parent.console)
         try:
-            child = agent_loop.AgentSession(child_args, console=child_console)
+            child = agent_loop.AgentSession(
+                child_args, console=child_console,
+                background_mode=self.background_mode)
             # A child session is built in two stages: __init__ only wires config,
-            # and start_new_session() is what creates its session dir, recorder
-            # and initial ``messages``. _drive_auto() appends to ``messages`` and
-            # persists, so without this the nested run crashes with
-            # "'AgentSession' object has no attribute 'messages'". We call
-            # start_new_session() (not start_session()) deliberately: a sub-agent
-            # must always begin a fresh, isolated session and never inherit a
-            # resumable session from the parent's --allowed-dir pointer.
-            child.start_new_session()
+            # and start_session() is what creates its session dir, recorder and
+            # initial ``messages``. _drive_auto() appends to ``messages`` and
+            # persists, so this must happen first -- otherwise the nested run
+            # crashes with "'AgentSession' object has no attribute 'messages'".
+            #
+            # start_session() (not start_new_session()) is called deliberately so
+            # the *unattended* guarantee is exercised on the real path: in
+            # background mode it skips the ``.mini`` resume-pointer lookup and the
+            # interactive resume prompt and goes straight to a fresh, isolated
+            # session. A sub-agent therefore never inherits the parent's
+            # --restore-session/--load-last-session and never blocks on a prompt.
+            child.start_session()
             # The child writes its report into its own session dir. Read it
             # back from there: ``self._report_path(parent)`` is *exactly* the
             # path the system prompt (built at system_prompt() time) told the
@@ -295,6 +321,14 @@ class SubAgent:
             parts.append(f"\nReport ({report_path}):\n{report}")
         if not parts:
             parts.append(f"Sub-agent '{self.display_name}' produced no output.")
+        # Explain a truncated run instead of leaving the parent to guess: when the
+        # step cap is hit mid-tool-call there is no final assistant text, so
+        # without this the parent would just see "produced no output".
+        if getattr(child, "stop_reason", None) == "max_steps":
+            parts.append(
+                f"Note: the sub-agent stopped after reaching its max_steps cap "
+                f"({getattr(child, 'steps_taken', None)} model calls); its work may be "
+                f"incomplete. Delegate again with a larger max_steps to continue.")
         return "\n".join(parts)
 
 
