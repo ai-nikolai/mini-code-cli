@@ -142,8 +142,8 @@ class NoUserInputTest(SubAgentTestCase):
         background = AgentSession(args, console=silent_console(), background_mode=True)
         with mock.patch.object(AgentSession, "show_resume_choice",
                                side_effect=AssertionError("prompted")), \
-             mock.patch.object(AgentSession, "_detect_last_session",
-                               side_effect=AssertionError("consulted the .mini pointer")):
+             mock.patch("mini_code_cli.agent_loop.find_last_session_dir",
+                        side_effect=AssertionError("consulted the .mini pointer")):
             background.start_session()
 
         self.assertNotEqual(background.unique_id, "old_session")

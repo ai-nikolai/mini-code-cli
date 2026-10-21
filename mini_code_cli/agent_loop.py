@@ -123,7 +123,7 @@ def parse_args():
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations, default='./'")
     parser.add_argument("-s", "--enable-shell", action="store_true", help="Allow shell execution. default= False")
     parser.add_argument("-g","--enable-subagents", action="store_true", help="Allow the agent to delegate work to sub-agents (exposed as extra tools). default= False")
-    parser.add_argument("--skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
+    parser.add_argument("--skills", dest="enable_skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
     parser.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES, help=f"History length (in messages) before the conversation is compacted into a summary. Lower it to compact sooner on small context windows. default={DEFAULT_MAX_MESSAGES}")
@@ -143,7 +143,7 @@ def parse_args():
         args.enable_shell = True
         args.sudo = True
         args.auto_mode = True
-        args.skills = True
+        args.enable_skills = True
     
     if args.all_last:
         args.load_last_session = True
@@ -155,56 +155,35 @@ def parse_args():
 # banners / helpers
 # ---------------------------------------------------------------------------
 
-def style_line_prompt(text):
-    """A short, styled inline prompt (used for the 'You:' line)."""
-    return ui.console.style(text, bold=True, fg="cyan") + " "
-
-
-def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
+def print_help(args):
+    """Print the interactive command list (``/help``)."""
     ui.console.rule("help", fg="cyan")
-    if not args.auto_mode:
-        help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
+    if args.auto_mode:
+        help_message = ("Auto-mode: the agent keeps calling the LLM until no "
+                        "further tool calls are possible.")
     else:
-        help_message = "Auto-mode: the agent keeps calling the LLM until no further tool calls are possible."
+        help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
     ui.console.emit(ui.console.style(help_message, dim=True, fg="cyan"))
     ui.console.emit(ui.console.style("History / navigation commands:", bold=True, fg="cyan"))
-    ui.console.emit("  /history         list the conversation (turn number, what happened, where)")
-    ui.console.emit("  /history <n>      show the full messages recorded for turn n")
-    ui.console.emit("  /plan             show the current goal + plan (plan mode only)")
-    ui.console.emit("  /reset [<n>]      rewind to the end of turn n (drops everything after it)")
-    ui.console.emit("  /clear            clear the screen (keeps the conversation history)")
-    ui.console.emit("  /help             show this help")
-    ui.console.emit("  /quit, /exit      save the session and exit")
-    if args.enable_subagents or args.verbose:
+    for command, description in (
+        ("/history", "list the conversation (turn number, what happened, where)"),
+        ("/history <n>", "show the full messages recorded for turn n"),
+        ("/plan", "show the current goal + plan (plan mode only)"),
+        ("/reset [<n>]", "rewind to the end of turn n (drops everything after it)"),
+        ("/clear", "clear the screen (keeps the conversation history)"),
+        ("/help", "show this help"),
+        ("/quit, /exit", "save the session and exit"),
+    ):
+        ui.console.emit(f"  {command:16} {description}")
+    if getattr(args, "enable_subagents", False) or args.verbose:
         ui.console.emit(ui.console.style("Sub-agents:", bold=True, fg="cyan"))
         for sa in subagents.get_registry().values():
             ui.console.emit(f"  {sa.name:16} {sa.description}")
-    if args.enable_skills or args.verbose:
+    if getattr(args, "enable_skills", False) or args.verbose:
         ui.console.emit(ui.console.style("Skills:", bold=True, fg="cyan"))
         for name in skills.SKILL_TOOL_NAMES:
             ui.console.emit(f"  {name:16} (from the local .mini directory)")
     ui.console.rule(char="═", fg="cyan")
-
-
-def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None):
-    """Render the startup info banner through the UI."""
-    version = __import__('mini_code_cli').__version__
-
-    if getattr(args, "sudo", False):
-        permission_mode = "SUDO MODE: no permission prompts (DENY commands still blocked)."
-    elif args.ask_permission:
-        permission_mode = "All tool calls require permission."
-    else:
-        permission_mode = "Tool calls execute without asking."
-    agent_mode = "Agent is in manual-mode." if not args.auto_mode else "Agent is in auto-mode."
-    shell_mode = "Shell disabled." if not args.enable_shell else "Shell enabled."
-
-    ui.console.welcome(version, unique_id, cache_dir, allowed_dir,
-                       server_url, model_name, permission_mode, agent_mode, shell_mode)
-
-
-def _make_tool_call_note(console, count):
-    console.note(f"LLM is trying to call {count} tool(s).", "info")
 
 
 # ---------------------------------------------------------------------------
@@ -366,52 +345,64 @@ class AgentSession:
         self.load_last_session = bool(getattr(self.args, "load_last_session", False))
         
     def start_session(self):
-        """Loads existing session, detects existing session and asks or starts a new session.
+        """Restore a previous session when there is one, else start fresh.
 
         A *background* session (a sub-agent's, see ``background_mode``) short
         circuits the detection entirely: it neither consults the ``.mini`` resume
         pointer nor offers the interactive resume prompt, so it always begins a
         fresh isolated session. That is what makes delegation safe to run
-        unattended -- there is a single place that decides this, rather than
-        every caller having to remember.
+        unattended -- there is a single place that decides this.
         """
-        loading_success = False
         if self.background_mode and not self.restore_session:
-            # Unattended: no pointer lookup, no resume prompt, no user input.
             self.start_new_session()
             return
 
         if self.restore_session:
+            if self._try_restore(resolve_session_dir(self.restore_session, self.cache_dir)):
+                return
+        elif not self.background_mode:
+            # Resolving or offering the resume must never stop the CLI from
+            # starting: any hiccup there is reported and we start fresh.
             try:
-                restore_directory = resolve_session_dir(self.restore_session, self.cache_dir)        
-                loading_success = self.restore_previous_session(restore_directory)
+                detected = find_last_session_dir(self.allowed_dir)
+                if detected and self._resume_previous(detected):
+                    return
             except Exception as e:
-                pass
-            
-        else:
-            try:
-                detected = self._detect_last_session()
-                if detected and not self.background_mode and self.load_last_session:
-                    self.console.note("Continuing the last session (--load-last-session).", "warn")
-                    restore_directory = resolve_session_dir(detected, self.cache_dir)
-                    loading_success = self.restore_previous_session(restore_directory)
-                elif detected and not self.background_mode:
-                    answer = self.show_resume_choice()
-                    if answer == "resume":
-                        self.console.note("Resuming the session.", "warn")
-                        restore_directory = resolve_session_dir(detected, self.cache_dir)     
-                        loading_success = self.restore_previous_session(restore_directory)
-                    elif answer == "exit":
-                        self.console.note("User chose to exit! Exiting.", "warn")
-                        raise SystemExit("") # Exit gracefully instead of crashing
-                    else:
-                        self.console.note("Will start with new session!", "warn")
+                self.console.note(f"Could not resume the previous session: {e}", "warn")
+        self.start_new_session()
 
-            except Exception as e:
-                pass
-                   
-        if not loading_success:
-            self.start_new_session()
+    def _try_restore(self, restore_directory):
+        """Restore a session in place, returning whether it worked.
+
+        A restore failure is not fatal: the caller falls back to a fresh session,
+        so a corrupt or half-written folder never blocks the CLI from starting.
+        """
+        try:
+            return bool(self.restore_previous_session(restore_directory))
+        except Exception:
+            return False
+
+    def _resume_previous(self, detected):
+        """Continue the detected session if the user wants to; True if restored.
+
+        ``--load-last-session`` makes that explicit, so it continues without
+        asking (a piped/non-TTY stdin would otherwise answer the offer with EOF
+        and exit without doing anything). Otherwise the interactive offer
+        decides, and "exit" leaves the CLI without starting a session.
+        """
+        if self.load_last_session:
+            self.console.note("Continuing the last session (--load-last-session).", "warn")
+            return self._try_restore(resolve_session_dir(detected, self.cache_dir))
+
+        answer = self.show_resume_choice()
+        if answer == "exit":
+            self.console.note("User chose to exit! Exiting.", "warn")
+            raise SystemExit("")
+        if answer != "resume":
+            self.console.note("Will start with new session!", "warn")
+            return False
+        self.console.note("Resuming the session.", "warn")
+        return self._try_restore(resolve_session_dir(detected, self.cache_dir))
 
     def start_new_session(self):
         """A function to start a new session."""
@@ -475,16 +466,6 @@ class AgentSession:
             self.plan_manager = None
             return False
 
-
-    def _detect_last_session(self):
-        """Resolve the most recent previous session dir, once.
-
-        There is deliberately NO timestamp/mtime fallback over the cache dir: a
-        previous session is restored only via the ``.mini`` pointer (an explicit
-        record of the session the user last worked in). Returns the path, or None.
-        Called at most once per session (see __init__).
-        """
-        return find_last_session_dir(self.allowed_dir)
 
     def _resolve_model(self, args):
         """Pick the model id: the one the user named, else the server's default.
@@ -683,8 +664,8 @@ class AgentSession:
         that turn, or None if the segment could not be loaded (never raises: a
         missing or moved segment must not crash navigation).
         """
-        directory = os.path.join(self.cache_dir, self.unique_id)
-        segment_path = os.path.join(directory, f"history_{record.get('history_file', 0)}.json")
+        segment_path = os.path.join(
+            self.session_dir, f"history_{record.get('history_file', 0)}.json")
         try:
             with open(segment_path, "r", encoding="utf-8") as f:
                 segment = json.load(f)
@@ -717,44 +698,6 @@ class AgentSession:
             f"{int(record.get('index', 0))}).", "ok")
         self.console.note("Continuing: new turns will append to this state.", "info")
 
-    def _warn_sudo(self):
-        """Print a prominent red warning about --sudo mode.
-
-        --sudo means the agent will never stop to ask before acting, so the user
-        is effectively handing over unattended control of their machine (within
-        the DENY-tier limits). We render it as a red box so it stands out on any
-        real terminal (it degrades to a plain ASCII box when colour is off).
-        """
-        self.console.print_box(
-            [
-                "SUDO MODE: the agent will NEVER ask for permission.",
-                "All tool calls and shell commands run automatically and unattended.",
-                "Only clearly-destructive (DENY-tier) commands are still refused.",
-                "You are responsible for everything it does on this machine.",
-            ],
-            title="DANGER",
-            fg="red",
-        )
-
-    def print_announcements(self):
-        """Print the info / warning banners that depend on the CLI flags."""
-        if self.api_key:
-            self.console.announce_api_key(present=True)
-        else:
-            self.console.announce_api_key(present=False)
-
-        if shell_forces_ask_permission(self.args):
-            self.console.announce_shell()
-
-        # --sudo hands the agent unattended control, so make that impossible to miss.
-        if sudo_disables_prompts(self.args):
-            self._warn_sudo()
-
-        if self.enable_subagents:
-            self.console.note(
-                f"Sub-agents enabled ({len(self.subagents_registry)} available: "
-                f"{', '.join(self.subagents_registry)}).", "info")
-
     def show_resume_choice(self):
         """Prompt for the resume choice and return its label.
 
@@ -786,112 +729,85 @@ class AgentSession:
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
-        # Called in the beginning to init the session.
         self.start_session()
-
-
-        # Hint at startup so the high-level history feature is discoverable:
-        # /history browses the recorder, /history <n> inspects a turn, and
-        # /reset <n> rewinds the conversation to that turn's state.
-        tip = ("Tip: /history to browse the conversation, /history <n> to inspect a "
-               "turn, /reset <n> to rewind. Type /help for all commands.")
-        if getattr(self.args, "plan", False):
-            tip = ("Tip: /plan to show the current goal + plan (plan mode), "
-                   "/history to browse the conversation, /history <n> to inspect a "
-                   "turn, /reset <n> to rewind. Type /help for all commands.")
-        self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
+        self._emit_tip()
 
         # The --prompt value is a one-shot initial turn: it is sent verbatim and
         # then cleared, so later turns come from the user (manual mode) or are
         # produced automatically by the loop (auto mode).
         pending = initial_prompt
-
-        running = True
-        while running:
-            try:
-                # 1) Get the user's turn: the one-shot preset, or a fresh line.
+        try:
+            while True:
+                user_input = pending if pending is not None else self._read_user_line()
+                if user_input is None or user_input.lower() in self.EXIT_COMMANDS:
+                    self.console.note("Thank you. Goodbye! Saving history...", "info")
+                    break
                 if pending is not None:
                     self.console.rule(title="Preset prompt", char="=", fg="cyan")
                     self.console.short_divider()
-                    self.console.turn("You", pending, accent="cyan")
-                    user_input = pending
+                    self.console.turn("You", user_input, accent="cyan")
                     pending = None
-                else:
-                    user_input = self._read_user_line()
-                    if user_input is None or user_input.lower() in self.EXIT_COMMANDS:  # EOF / Ctrl-C at the prompt
-                        self.console.note("Thank you. Goodbye! Saving history...", "info")
-                        running = False
-                        break
+                # Interactive slash commands are handled in place and never
+                # reach the LLM.
+                if user_input.startswith("/") and self._handle_command(user_input):
+                    continue
+                self._run_turn(user_input)
+        except _Abort:
+            # Ctrl-C during a permission prompt already saved the session.
+            return
+        except KeyboardInterrupt:
+            self.console.note("Interrupting: Mini Code Exiting...", "error")
+        except Exception as e:
+            self.console.note(f"Exception {e}. Exiting...", "error")
+        self.shutdown()
 
-                    # Interactive slash commands are handled in place and never
-                    # reach the LLM. _handle_command returns True when the input
-                    # was such a command, so we just re-prompt (continue).
-                    if user_input.startswith("/") and self._handle_command(user_input):
-                        continue
-                
-                self.messages.append({"role": "user", "content": user_input})
+    def _emit_tip(self):
+        """Point at the history/navigation commands once, at startup."""
+        tip = ("Tip: /history to browse the conversation, /history <n> to inspect a "
+               "turn, /reset <n> to rewind. Type /help for all commands.")
+        if self.plan_mode:
+            tip = ("Tip: /plan to show the current goal + plan (plan mode), "
+                   "/history to browse the conversation, /history <n> to inspect a "
+                   "turn, /reset <n> to rewind. Type /help for all commands.")
+        self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
-                if self.plan_mode:
-                    self.console.note(
-                            "Generating plan for agent.", "info")
-                    self._record_goal_request(user_input)
-                    self._generate_plan_and_inject(user_input)
-                    self.console.note(
-                            "Plan generated.", "info")
-                running_turn = True
-                while running_turn:
-                    self.console.note(
-                            "Entering single turn loop.", "info")
-                    # actually stepping through the agentic steps.
-                    should_continue = self._step()
-                    self._persist()
-                    if should_continue:
-                        self.console.note(
-                            "Continuing with LLM calls until no more tool calls.", "info")
-                    else:
-                        self.console.note(
-                            "LLM seems to have to an end of the task.", "info")
+    def _run_turn(self, user_input):
+        """Run one user turn: record it, step until the model stops, then review.
 
-                        if self.plan_mode:
-                            self.console.note(
-                                "Reviewing the plan, if everything is done.", "info")
-                            self._review_plan_completion() 
-                            should_continue = self._step()
-                            self._persist()
-
-                        # A response with no tool calls means the turn is over. This must
-                        # happen regardless of plan mode: previously the assignment sat inside
-                        # `if self.plan_mode`, so non-plan sessions never left the turn loop and
-                        # re-called the model forever.
-                        if not should_continue:
-                            running_turn = False  # escape the turn loop
-            
-            except _Abort:
-                # Ctrl-C during a permission prompt already shut the session
-                # down; just unwind the loop quietly.
-                running = False
-
-            except KeyboardInterrupt:
-                self.console.note("Interrupting: Mini Code Exiting...", "error")
-                self.shutdown()
-                running = False
-                # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
-            except Exception as e:
-                self.console.note(f"Exception {e}. Exiting...", "error")
-                self.shutdown()
-                running = False
-        self.console.note(
-            "EOF.", "info")
-
-    def _print_session_id(self):
-        """Print the session's unique id as a minimal "Assistant" turn.
-
-        Instead of a banner/header the id is rendered as an assistant-styled
-        (green) turn carrying *only* the id in brackets, so the user can see /
-        copy the id this conversation is being saved under without the noise of
-        the extra "saved under" line.
+        A step that makes no tool calls ends the turn. In plan mode the loop then
+        asks the model to review the plan and takes one more step, so the review
+        can drive further work. The extra step happens *outside* the plan-mode
+        branch's result: a reply with no tool calls must always end the turn,
+        otherwise non-plan sessions re-call the model forever.
         """
-        self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
+        self.messages.append({"role": "user", "content": user_input})
+
+        if self.plan_mode:
+            self.console.note("Generating plan for agent.", "info")
+            self._record_goal_request(user_input)
+            self._generate_plan_and_inject(user_input)
+            self.console.note("Plan generated.", "info")
+
+        while True:
+            should_continue = self._step()
+            self._persist()
+            if should_continue:
+                self.console.note(
+                    "Continuing with LLM calls until no more tool calls.", "info")
+                continue
+            self.console.note("LLM seems to have to an end of the task.", "info")
+            if not self.plan_mode:
+                return
+            self.console.note("Reviewing the plan, if everything is done.", "info")
+            self._review_plan_completion()
+            self._persist()
+            # One more step so the review can drive further work. Persist before
+            # deciding so the review step's messages are recorded even when it
+            # ends the turn (a no-tool-call reply must never be left unsaved).
+            should_continue = self._step()
+            self._persist()
+            if not should_continue:
+                return
 
     def _save_last_session_pointer(self):
         """Record this session's directory in --allowed-dir/.mini.
@@ -981,7 +897,7 @@ class AgentSession:
         plan_prompt_text = prompts.plan_prompt(self.messages, current_instruction)
         plan_text = ""
         try:
-            ui.console.note("Generating a plan for the current goal...", "info")
+            self.console.note("Generating a plan for the current goal...", "info")
             self.console.start_thinking("planning")
             response, _, usage = utils.call_openai_server(
                 [{"role": "user", "content": plan_prompt_text}],
@@ -999,7 +915,7 @@ class AgentSession:
             self._record_usage(usage)
             plan_text = response or ""
         except Exception as exc:
-            ui.console.note("Could not generate a plan: %s" % exc, "warn")
+            self.console.note(f"Could not generate a plan: {exc}", "warn")
 
         self.plan_manager.write_plan(plan_text)
         if plan_text and plan_text.strip():
@@ -1026,7 +942,7 @@ class AgentSession:
             self.messages, self.plan_manager.goal or "")
         summary = ""
         try:
-            ui.console.note("Reviewing the current plan...", "info")
+            self.console.note("Reviewing the current plan...", "info")
             self.console.start_thinking("reviewing plan")
             response, _, usage = utils.call_openai_server(
                 [{"role": "user", "content": plan_prompt_text}],
@@ -1041,7 +957,7 @@ class AgentSession:
             self._record_usage(usage)
             summary = response or ""
         except Exception as exc:
-            ui.console.note("Could not review the plan: %s" % exc, "warn")
+            self.console.note(f"Could not review the plan: {exc}", "warn")
 
         # Persist the review summary to the plan document and re-inject it so
         # the model works from the review result.
@@ -1120,14 +1036,9 @@ class AgentSession:
         if not path:
             return False
         try:
-            resolved = os.path.realpath(path)
+            return os.path.realpath(path) == os.path.realpath(self.report_path)
         except (ValueError, TypeError):
             return False
-        try:
-            expected = os.path.realpath(self.report_path)
-        except (ValueError, TypeError):
-            return False
-        return resolved == expected
 
     # -- interactive input -------------------------------------------------
 
@@ -1144,7 +1055,8 @@ class AgentSession:
 
         self.console.short_divider()
 
-        user_input = self.console.read_line(style_line_prompt("You:"))
+        user_input = self.console.read_line(
+            self.console.style("You:", bold=True, fg="cyan") + " ")
 
         if not user_input.strip():
             self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
@@ -1177,14 +1089,16 @@ class AgentSession:
         cmd, arg = parts[0].lower(), parts[1] if len(parts) > 1 else ""
 
         if cmd == "history":
-            self._inspect_history(arg) if arg else self._show_history()
+            if arg:
+                self._inspect_history(arg)
+            else:
+                self._show_history()
             return True
         if cmd in ("reset", "rewind"):
             self._do_reset(arg)
             return True
         if cmd == "help":
-            print_help(self.allowed_dir, self.server_url, self.args,
-                       self.unique_id, self.cache_dir, self.model)
+            print_help(self.args)
             return True
         if cmd in self.CLEAR_COMMANDS:
             self._clear_and_show_last()
@@ -1271,7 +1185,7 @@ class AgentSession:
     # -- tool execution ----------------------------------------------------
 
     def _run_tool_calls(self, tool_calls):
-        _make_tool_call_note(self.console, len(tool_calls))
+        self.console.note(f"LLM is trying to call {len(tool_calls)} tool(s).", "info")
         # Show a "… calling tool" spinner (in-place, non-scrolling) while the
         # tool(s) execute, mirroring the thinking spinner that covers the LLM
         # call. Always stopped (finally) so it can never leak into the next turn.
@@ -1313,15 +1227,15 @@ class AgentSession:
         # 1) Sandbox: keep every filesystem tool inside --allowed-dir. (In plan
         #    mode the tracking files are maintained by the loop directly -- not
         #    through agent tools -- so nothing here needs an exemption.)
-        if not tool_paths_are_allowed(name, tool_params, self.allowed_dir):
-            if self._is_report_file(name, tool_params):
-                pass  # allow a sub-agent's own report.md under the cache dir
-            else:
-                self.console.note(
-                    f"File operation not allowed outside allowed directory: {self.allowed_dir}", "error")
-                self._append_tool_result(call_id,
-                    f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
-                return
+        if (not tool_paths_are_allowed(name, tool_params, self.allowed_dir)
+                and not self._is_report_file(name, tool_params)):
+            # The one exemption is a sub-agent's own report.md, which lives under
+            # the cache dir (outside --allowed-dir) so the parent can read it.
+            self.console.note(
+                f"File operation not allowed outside allowed directory: {self.allowed_dir}", "error")
+            self._append_tool_result(call_id,
+                f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
+            return
 
         # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
         shell_cmd = None
@@ -1419,7 +1333,7 @@ class AgentSession:
         self.console.note(
             f"Saved session to {self.cache_dir}/{self.unique_id}/ "
             f"(history_0..{self.history_index}.json + summary_history.json).", "ok")
-        print_usage_summary(self.total_usage)
+        self.console.usage_summary(self.total_usage)
 
     # -- single LLM turn ---------------------------------------------------
 
@@ -1541,10 +1455,6 @@ class _Abort(Exception):
 # ---------------------------------------------------------------------------
 # module-level helpers kept for readability / backward compatibility
 # ---------------------------------------------------------------------------
-
-def print_usage_summary(token_stats):
-    ui.console.usage_summary(token_stats)
-
 
 def main():
     args = parse_args()
