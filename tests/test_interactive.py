@@ -4,7 +4,8 @@ These cover the parts of the CLI a user drives directly rather than the model:
 
   * the slash commands (``/history``, ``/history <n>``, ``/reset [<n>]``,
     ``/plan``, ``/clear``) -- handled in place, so they never reach the LLM;
-  * the ``.mini`` latest-session pointer readers (what restore is built on);
+  * the ``.mini`` latest-session pointer: its readers, its writer, and the
+    rule that a real session records it while a background (sub-agent) one does not;
   * the shell-safety classifier, as a table across all three tiers;
   * two compaction regressions: a message without ``content`` must not break
     the summary prompt, and an empty summary must not roll the segment over.
@@ -184,18 +185,109 @@ class LatestSessionPointerTest(_SessionCase):
         self.assertIsNone(persistence.load_last_session_pointer(None))
         self.assertIsNone(persistence.find_last_session_dir(""))
 
-    def test_nothing_in_the_package_writes_the_pointer(self):
-        """Documents a real gap: the pointer is read but never written.
+    # -- the write half: save_last_session_pointer -------------------------
 
-        ``save_last_session_pointer`` is commented out and has no caller, so
-        ``--load-last-session`` / the resume offer can never actually trigger in
-        a real run -- ``find_last_session_dir`` always returns None because no
-        run ever records a pointer. Pinned here so the dead feature is visible
-        rather than silently "working", and so re-enabling the writer is a
-        deliberate, test-visible change.
-        """
-        self.assertFalse(hasattr(persistence, "save_last_session_pointer"))
-        self.assertFalse(hasattr(AgentSession, "_save_last_session_pointer"))
+    def test_writer_records_the_session_dir(self):
+        session_dir = os.path.join(self.cache_dir, "sessW")
+        os.makedirs(session_dir, exist_ok=True)
+
+        path = persistence.save_last_session_pointer(self.workdir, session_dir)
+
+        self.assertEqual(path, os.path.join(self.pointer_dir(),
+                                            persistence.LAST_SESSION_FILENAME))
+        self.assertTrue(os.path.isfile(path))
+        self.assertEqual(persistence.find_last_session_dir(self.workdir),
+                         os.path.abspath(session_dir))
+
+    def test_writer_stores_an_absolute_path_and_timestamp(self):
+        session_dir = os.path.join(self.cache_dir, "sessW")
+        os.makedirs(session_dir, exist_ok=True)
+        persistence.save_last_session_pointer(self.workdir, session_dir)
+
+        with open(os.path.join(self.pointer_dir(),
+                              persistence.LAST_SESSION_FILENAME)) as f:
+            payload = json.load(f)
+        self.assertTrue(os.path.isabs(payload["session_dir"]))
+        self.assertIsInstance(payload["recorded_at"], float)
+
+    def test_writer_leaves_no_temp_file_behind(self):
+        session_dir = os.path.join(self.cache_dir, "sessW")
+        os.makedirs(session_dir, exist_ok=True)
+        persistence.save_last_session_pointer(self.workdir, session_dir)
+
+        leftovers = [n for n in os.listdir(self.pointer_dir()) if ".tmp." in n]
+        self.assertEqual(leftovers, [])
+
+    def test_writer_is_safe_without_a_session_or_dir(self):
+        self.assertIsNone(persistence.save_last_session_pointer(self.workdir, None))
+        self.assertIsNone(persistence.save_last_session_pointer(None, self.cache_dir))
+
+    def test_writer_overwrites_a_previous_pointer(self):
+        first = os.path.join(self.cache_dir, "first")
+        second = os.path.join(self.cache_dir, "second")
+        os.makedirs(first, exist_ok=True)
+        os.makedirs(second, exist_ok=True)
+
+        persistence.save_last_session_pointer(self.workdir, first)
+        persistence.save_last_session_pointer(self.workdir, second)
+
+        self.assertEqual(persistence.find_last_session_dir(self.workdir),
+                         os.path.abspath(second))
+
+    def test_writer_warns_instead_of_raising_when_the_store_is_unusable(self):
+        """A best-effort write: a broken .mini path warns, never raises."""
+        blocker = os.path.join(self.workdir, persistence.SKILLS_DIRNAME)
+        with open(blocker, "w") as f:      # a *file* where the dir should be
+            f.write("not a directory")
+
+        console = self.console()
+        with mock.patch.object(persistence.ui, "console", console):
+            self.assertIsNone(
+                persistence.save_last_session_pointer(self.workdir, self.cache_dir))
+        self.assertIn("latest-session pointer", self.output())
+
+
+# ---------------------------------------------------------------------------
+# the pointer is written by real sessions, and only when it should be
+# ---------------------------------------------------------------------------
+
+class PointerWrittenBySessionsTest(_SessionCase):
+    """A real run records the pointer; a background (sub-agent) run does not."""
+
+    def test_a_new_session_records_the_pointer(self):
+        session = self.build_session(turns=1)
+        self.assertEqual(persistence.find_last_session_dir(self.workdir),
+                         os.path.abspath(session.session_dir))
+
+    def test_a_restored_session_keeps_the_pointer_on_it(self):
+        original = self.build_session(turns=1)
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.restore_session = original.session_dir
+        restored = AgentSession(args, console=self.console())
+        restored.start_session()
+
+        self.assertEqual(restored.unique_id, original.unique_id)
+        self.assertEqual(persistence.find_last_session_dir(self.workdir),
+                         os.path.abspath(original.session_dir))
+
+    def test_a_background_session_never_records_the_pointer(self):
+        """Delegating must not hijack the user's next --load-last-session."""
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console(), background_mode=True)
+        session.start_session()
+
+        self.assertIsNone(persistence.find_last_session_dir(self.workdir))
+
+    def test_a_background_session_leaves_an_existing_pointer_alone(self):
+        original = self.build_session(turns=1)
+
+        child = AgentSession(make_args(self.workdir, self.cache_dir),
+                             console=self.console(), background_mode=True)
+        child.start_session()
+
+        self.assertEqual(persistence.find_last_session_dir(self.workdir),
+                         os.path.abspath(original.session_dir))
 
 
 # ---------------------------------------------------------------------------

@@ -31,7 +31,9 @@ Scenarios
                                   over it, and plan mode's goal/plan re-injection.
 * ``RestoreSessionEndToEndTest`` -- a persisted session is restored *in place*
                                   (same id), including the legacy folder that has
-                                  a history but no recorder file.
+                                  a history but no recorder file, and
+                                  ``--load-last-session`` continues whatever the
+                                  ``.mini`` pointer names without asking.
 """
 
 import argparse
@@ -521,6 +523,69 @@ class RestoreSessionEndToEndTest(unittest.TestCase):
                          [m.get("content") for m in original.messages])
         self.assertEqual(restored.token_stats["total_tokens"],
                          original.token_stats["total_tokens"])
+
+    def test_load_last_session_continues_the_previous_session(self):
+        """--load-last-session: the whole point of the .mini pointer.
+
+        Session A runs one real turn, which records A in --allowed-dir/.mini.
+        Session B is then built with --load-last-session (and no
+        --restore-session): it must continue A *in place* -- same id, same
+        messages -- rather than start a fresh session, and must not ask.
+        """
+        original = self._run_one_turn()
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.load_last_session = True
+        resumed = AgentSession(args, console=silent_console())
+        with mock.patch.object(AgentSession, "show_resume_choice",
+                               side_effect=AssertionError("asked despite --load-last-session")):
+            resumed.start_session()
+
+        self.assertEqual(resumed.unique_id, original.unique_id)
+        self.assertEqual(resumed.session_dir, original.session_dir)
+        self.assertEqual([m.get("content") for m in resumed.messages],
+                         [m.get("content") for m in original.messages])
+        self.assertEqual(resumed.token_stats["total_tokens"],
+                         original.token_stats["total_tokens"])
+
+    def test_load_last_session_without_a_pointer_starts_fresh(self):
+        """No pointer recorded yet: nothing to continue, so start clean."""
+        args = make_args(self.workdir, self.cache_dir)
+        args.load_last_session = True
+        session = AgentSession(args, console=silent_console())
+        with mock.patch.object(AgentSession, "show_resume_choice",
+                               side_effect=AssertionError("offered a resume for a missing session")):
+            session.start_session()
+
+        self.assertIsNotNone(session.unique_id)
+        self.assertEqual(len(session.messages), 1)          # just the system prompt
+        self.assertEqual(session.messages[0]["role"], "system")
+
+    def test_load_last_session_pointer_survives_a_second_run(self):
+        """The pointer keeps naming the live session across runs."""
+        first = self._run_one_turn()
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.load_last_session = True
+        second = AgentSession(args, console=silent_console())
+        second.start_session()
+
+        from mini_code_cli import persistence
+        self.assertEqual(persistence.find_last_session_dir(self.workdir),
+                         os.path.abspath(first.session_dir))
+        self.assertEqual(second.unique_id, first.unique_id)
+
+    def test_restore_session_takes_precedence_over_the_flag(self):
+        """--restore-session wins when both are given."""
+        original = self._run_one_turn()
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.load_last_session = True
+        args.restore_session = original.session_dir
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+
+        self.assertEqual(session.unique_id, original.unique_id)
 
     def test_legacy_folder_without_recorder_is_restored(self):
         """A history_*.json without summary_history.json still restores.

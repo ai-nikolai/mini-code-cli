@@ -110,30 +110,42 @@ def _last_session_dir_store(allowed_dir):
         return None
 
 
-# def save_last_session_pointer(allowed_dir, session_dir):
-#     """Record ``session_dir`` as the latest session in ``allowed_dir/.mini``.
+def save_last_session_pointer(allowed_dir, session_dir):
+    """Record ``session_dir`` as the latest session in ``allowed_dir/.mini``.
 
-#     Writes a tiny JSON file (the absolute path plus a timestamp) so a later
-#     --load-last-session run can resume the most recent session without scanning
-#     the cache dir. Best-effort: never raises, returns the written path or None.
-#     """
-#     if not session_dir:
-#         return None
-#     store = _last_session_dir_store(allowed_dir)
-#     if store is None:
-#         return None
-#     payload = {
-#         "session_dir": os.path.abspath(session_dir),
-#         "recorded_at": time.time(),
-#     }
-#     path = os.path.join(store, LAST_SESSION_FILENAME)
-#     try:
-#         with open(path, "w", encoding="utf-8") as f:
-#             json.dump(payload, f, indent=2)
-#         return path
-#     except OSError as e:
-#         ui.console.note(f"Could not record latest-session pointer: {e}", "warn")
-#         return None
+    Writes a tiny JSON file (the absolute path plus a timestamp) so a later
+    ``--load-last-session`` run can resume the most recent session without
+    scanning the cache dir. This is the *write* half of the pointer that
+    :func:`find_last_session_dir` reads; without it the reader always saw an
+    empty store and ``--load-last-session`` could never fire.
+
+    Written atomically (temp file + ``os.replace``) so a reader never observes a
+    half-written pointer. Best-effort: never raises, returns the written path or
+    None.
+    """
+    if not session_dir:
+        return None
+    store = _last_session_dir_store(allowed_dir)
+    if store is None:
+        return None
+    path = os.path.join(store, LAST_SESSION_FILENAME)
+    payload = {
+        "session_dir": os.path.abspath(session_dir),
+        "recorded_at": time.time(),
+    }
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, path)
+        return path
+    except OSError as e:
+        ui.console.note(f"Could not record latest-session pointer: {e}", "warn")
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return None
 
 
 def load_last_session_pointer(allowed_dir):

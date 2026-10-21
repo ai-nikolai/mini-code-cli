@@ -52,7 +52,7 @@ from .persistence import (
     load_summary_from_dir,
     load_usage_from_dir,
     find_last_session_dir,
-    # save_last_session_pointer,
+    save_last_session_pointer,
     accumulate_usage,
     generate_unique_id,
     _restore_dir,
@@ -105,7 +105,7 @@ def parse_args():
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
     parser.add_argument("--restore-session", type=str, help="The location of a previous session to continue. (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)")
-    parser.add_argument("-l","--load-last-session", action="store_true", help="Load the most recent previous session from the cache dir and continue it (under a new session id), instead of starting fresh. --restore-session takes precedence if also given.")
+    parser.add_argument("-l","--load-last-session", action="store_true", help="Continue the most recent previous session recorded in the --allowed-dir .mini pointer, in place and without the resume prompt, instead of starting fresh. --restore-session takes precedence if also given.")
 
     # Agent behaviour related
     parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
@@ -338,6 +338,11 @@ class AgentSession:
         self.background_mode = background_mode
 
         self.restore_session = getattr(self.args, "restore_session", None) #specific session
+        # --load-last-session is an explicit *instruction* to continue the session
+        # recorded in --allowed-dir/.mini, so it resumes without the interactive
+        # offer (a piped/non-TTY stdin would otherwise answer that offer with EOF
+        # and exit without doing anything). --restore-session still wins.
+        self.load_last_session = bool(getattr(self.args, "load_last_session", False))
         
     def start_session(self):
         """Loads existing session, detects existing session and asks or starts a new session.
@@ -365,7 +370,11 @@ class AgentSession:
         else:
             try:
                 detected = self._detect_last_session()
-                if detected and not self.background_mode:
+                if detected and not self.background_mode and self.load_last_session:
+                    self.console.note("Continuing the last session (--load-last-session).", "warn")
+                    restore_directory = _restore_dir(detected)
+                    loading_success = self.restore_previous_session(restore_directory)
+                elif detected and not self.background_mode:
                     answer = self.show_resume_choice()
                     if answer == "resume":
                         self.console.note("Resuming the session.", "warn")
@@ -399,6 +408,10 @@ class AgentSession:
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
         save_summary(self.summary, self.cache_dir, self.unique_id)
 
+        # Record this session in --allowed-dir/.mini so a later
+        # --load-last-session (or the interactive resume offer) can find it.
+        self._save_last_session_pointer()
+
 
     def restore_previous_session(self, restore_directory):
         """A function to restore from a directory.
@@ -425,6 +438,11 @@ class AgentSession:
 
             self.messages = restored if restored is not None else self._build_initial_messages()
             self._load_summary_if_restored(restore_directory)
+
+            # Continuing a session in place makes it the latest one again: keep
+            # the pointer aimed at it so a later --load-last-session finds the
+            # conversation the user is actually working in.
+            self._save_last_session_pointer()
 
             return True
 
@@ -802,15 +820,21 @@ class AgentSession:
         """
         self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
 
-    # def _save_last_session_pointer(self):
-    #     """Record this session's directory in --allowed-dir/.mini.
+    def _save_last_session_pointer(self):
+        """Record this session's directory in --allowed-dir/.mini.
 
-    #     Writes the .mini pointer that a later --load-last-session consults first
-    #     (see save_last_session_pointer). Best-effort: never raises, so a pointer
-    #     hiccup can never break the interactive session.
-    #     """
-    #     save_last_session_pointer(self.allowed_dir,
-    #                               os.path.join(self.cache_dir, self.unique_id))
+        Writes the .mini pointer that a later --load-last-session (or the resume
+        offer) reads via :func:`persistence.find_last_session_dir`. Best-effort:
+        never raises, so a pointer hiccup can never break the session.
+
+        Skipped for *background* sessions: a sub-agent's isolated child session
+        must never become the user's "last session", or delegating once would
+        silently redirect the user's next --load-last-session into a throwaway
+        sub-agent folder.
+        """
+        if self.background_mode or not self.allowed_dir:
+            return
+        save_last_session_pointer(self.allowed_dir, self.session_dir)
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
