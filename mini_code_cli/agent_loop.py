@@ -315,15 +315,16 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         for attempt in (1, 2):
             console.start_thinking("compacting")
             try:
-                reply, _, compact_usage = utils.call_openai_server(
-                    [{"role": "user", "content": summary_prompt}],
-                    max_tokens=1024,
-                    temperature=0.0,
-                    model=model,
-                    server_url=server_url,
-                    api_key=api_key,
-                    timeout=llm_timeout,
-                )
+                reply, _, compact_usage, _ = utils.unpack_llm_result(
+                    utils.call_openai_server(
+                        [{"role": "user", "content": summary_prompt}],
+                        max_tokens=1024,
+                        temperature=0.0,
+                        model=model,
+                        server_url=server_url,
+                        api_key=api_key,
+                        timeout=llm_timeout,
+                    ))
             finally:
                 console.stop_thinking()
 
@@ -1174,17 +1175,23 @@ class AgentSession:
         try:
             self.console.note("Generating a plan for the current goal...", "info")
             self.console.start_thinking("planning")
-            response, _, usage = utils.call_openai_server(
-                [{"role": "user", "content": plan_prompt_text}],
-                # The generated plan can be long: leave it unlimited (the server
-                # decides the cap) rather than capping the step-by-step authoring.
-                max_tokens=None,
-                temperature=0.0,
-                model=self.model,
-                server_url=self.server_url,
-                api_key=self.api_key,
-                timeout=self.args.llm_timeout,
-            )
+            # The loop's own bookkeeping requests (plan authoring / review /
+            # compaction) are single user turns with no ``tools``, so the
+            # server's thinking-mode rule does not require any assistant
+            # reasoning text here; the field is simply not forwarded.
+            response, _, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": plan_prompt_text}],
+                    # The generated plan can be long: leave it unlimited (the
+                    # server decides the cap) rather than capping the
+                    # step-by-step authoring.
+                    max_tokens=None,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                ))
             self.console.stop_thinking()
 
             self._record_usage(usage)
@@ -1224,15 +1231,16 @@ class AgentSession:
         try:
             self.console.note("Reviewing the current plan...", "info")
             self.console.start_thinking("reviewing plan")
-            response, _, usage = utils.call_openai_server(
-                [{"role": "user", "content": plan_prompt_text}],
-                max_tokens=1024,
-                temperature=0.0,
-                model=self.model,
-                server_url=self.server_url,
-                api_key=self.api_key,
-                timeout=self.args.llm_timeout,
-            )
+            response, _, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": plan_prompt_text}],
+                    max_tokens=1024,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                ))
             self.console.stop_thinking()
             self._record_usage(usage)
             self._note_prompt_size(usage, len(self.messages))
@@ -1686,19 +1694,20 @@ class AgentSession:
         # many messages the reported prompt_tokens describe.
         sent_message_count = len(self.messages)
         self.console.start_thinking()
-        response_text, tool_calls, usage = utils.call_openai_server(
-            self.messages,
-            max_tokens=self.args.max_tokens,
-            temperature=self.args.temperature,
-            model=self.model,
-            server_url=self.server_url,
-            tools=self.llm_tools,
-            api_key=self.api_key,
-            timeout=self.args.llm_timeout,
-        )
+        response_text, tool_calls, usage, reasoning_content = utils.unpack_llm_result(
+            utils.call_openai_server(
+                self.messages,
+                max_tokens=self.args.max_tokens,
+                temperature=self.args.temperature,
+                model=self.model,
+                server_url=self.server_url,
+                tools=self.llm_tools,
+                api_key=self.api_key,
+                timeout=self.args.llm_timeout,
+            ))
         self.console.stop_thinking()
 
-        # A failed LLM call returns (None, None, None): treat it as "nothing
+        # A failed LLM call returns (None, None, None, None): treat it as "nothing
         # happened this step" so the loop degrades gracefully (records a note
         # and re-prompts) instead of crashing.
         if usage is None:
@@ -1723,15 +1732,27 @@ class AgentSession:
         if response_text:
             self._print_assistant(response_text)
 
+        # Append the assistant turn exactly as the server returned it. The
+        # thinking-mode ``reasoning_content`` belongs on this message and must
+        # be sent back verbatim on every later request that carries ``tools``:
+        # DeepSeek V3.2+ rejects the follow-up with HTTP 400
+        # ("The `reasoning_content` in the thinking mode must be passed back to
+        # the API") when an earlier assistant turn dropped it. It is stored but
+        # never rendered -- it is the model's private scratchpad, not the reply,
+        # so ``_print_assistant`` is still fed only ``response_text``.
+        # The field is added *only* when the server actually returned it (an
+        # empty string counts: that is what such a model returns when it did no
+        # reasoning), so non-thinking models and older transcripts keep exactly
+        # the message shape they had before.
+        assistant_message = {"role": "assistant", "content": response_text}
         if tool_calls:
-            self.messages.append({
-                "role": "assistant",
-                "content": response_text,
-                "tool_calls": tool_calls,
-            })
+            assistant_message["tool_calls"] = tool_calls
+        if reasoning_content is not None:
+            assistant_message["reasoning_content"] = reasoning_content
+        self.messages.append(assistant_message)
+
+        if tool_calls:
             self._run_tool_calls(tool_calls)
-        else:
-            self.messages.append({"role": "assistant", "content": response_text})
 
         if not response_text and not made_tool_calls:
             self.console.note("Warning: no response was given by the LLM.", "error")

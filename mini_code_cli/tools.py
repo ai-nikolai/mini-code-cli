@@ -26,10 +26,34 @@ _USER_AGENT = (
 )
 
 
+def _coerce_timeout(value, default=DEFAULT_TOOL_TIMEOUT):
+    """Best-effort: turn a tool-call ``timeout`` into a number of seconds.
+
+    Models do not always respect the schema's ``integer`` type and routinely
+    send ``"30"`` (a string) or ``None`` instead of ``30``. Passing that
+    straight to :func:`subprocess.run` / :func:`urllib.request.urlopen` fails
+    deep inside the stdlib with an opaque
+    ``unsupported operand type(s) for +: 'float' and 'str'``, so a perfectly
+    good tool call would be reported back to the model as a crash. Coercing
+    here keeps the failure (if any) about the *command*, not about its type.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return value if value > 0 else default
+    try:
+        coerced = float(str(value).strip().rstrip("sSmM"))
+    except (TypeError, ValueError):
+        return default
+    return coerced if coerced > 0 else default
+
+
 def _fetch(url, timeout=DEFAULT_TOOL_TIMEOUT):
     """GET `url` and return its decoded body, sending a browser User-Agent."""
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=_coerce_timeout(timeout)) as response:
         return response.read().decode('utf-8')
 
 
@@ -135,7 +159,7 @@ def read_website(url, *args, **kwargs):
     mirroring the CLI's --tool-timeout so a slow or unresponsive site cannot
     hang the agent loop.
     """
-    timeout = kwargs.get("timeout", DEFAULT_TOOL_TIMEOUT)
+    timeout = _coerce_timeout(kwargs.get("timeout", DEFAULT_TOOL_TIMEOUT))
     try:
         return _fetch(url, timeout=timeout)
     except Exception as e:
@@ -145,7 +169,8 @@ def read_website(url, *args, **kwargs):
 def run_shell_command(command, timeout=DEFAULT_TOOL_TIMEOUT, *args, **kwargs):
     """Run a shell command and return its output. Param: command (string)"""
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout, check=False)
+        result = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                timeout=_coerce_timeout(timeout), check=False)
         output = result.stdout
         if result.stderr:
             output += "\nSTDERR:\n" + result.stderr

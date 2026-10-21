@@ -78,6 +78,32 @@ def determine_vllm_model(server_url, api_key=None, timeout=120):
         return None
 
 
+def unpack_llm_result(result):
+    """Split a :func:`call_openai_server` result into its four fields.
+
+    Returns ``(content, tool_calls, usage, reasoning_content)``. The reasoning
+    text needs its own slot (rather than being folded into ``content``) because
+    thinking-mode models require it to be passed back verbatim, yet it must
+    never be shown to the user as the assistant's reply.
+
+    Legacy callers and test stubs that still return the old 3-tuple
+    ``(content, tool_calls, usage)`` keep working: a short tuple simply yields
+    ``reasoning_content=None``, and a non-tuple (e.g. ``None``) yields four
+    ``None``s. This lives here so every caller unpacks the same way.
+    """
+    if result is None:
+        return None, None, None, None
+    try:
+        parts = tuple(result)
+    except TypeError:
+        return result, None, None, None
+    content = parts[0] if len(parts) > 0 else None
+    tool_calls = parts[1] if len(parts) > 1 else None
+    usage = parts[2] if len(parts) > 2 else None
+    reasoning_content = parts[3] if len(parts) > 3 else None
+    return content, tool_calls, usage, reasoning_content
+
+
 def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="default",
                        server_url=None, api_key=None, tools=None, timeout=300):
     """Query an OpenAI-compatible server (local or remote) using ``requests``.
@@ -88,9 +114,19 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
     Reasoning models can take a while to produce a response, so the default is
     deliberately high.
 
-    Returns ``(content, tool_calls, usage)``. On any failure it prints a
-    diagnostic and returns ``(None, None, None)`` so the caller can degrade
-    gracefully instead of crashing.
+    Returns ``(content, tool_calls, usage, reasoning_content)``. On any failure
+    it prints a diagnostic and returns ``(None, None, None, None)`` so the
+    caller can degrade gracefully instead of crashing; use
+    :func:`unpack_llm_result` to unpack either shape.
+
+    ``reasoning_content`` is the chain-of-thought text that thinking-mode
+    servers (DeepSeek V3.2+ ``deepseek-reasoner``, ...) return alongside
+    ``content``. It is returned separately -- never merged into ``content`` --
+    because it must be preserved verbatim and sent back on the *assistant*
+    message: for requests that carry ``tools``, the API rejects the follow-up
+    request with HTTP 400 ("The `reasoning_content` in the thinking mode must
+    be passed back to the API") if any earlier assistant turn dropped it. It is
+    also not user-visible output, so the console never renders it.
     """
     url = f"{server_url}/v1/chat/completions"
 
@@ -131,6 +167,14 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         result = response.json().get("choices", [{}])[0].get("message", {})
         content = result.get("content", "")
         tool_calls = result.get("tool_calls", [])
+        # Thinking-mode servers return the chain of thought next to ``content``.
+        # Keep it verbatim (including an empty string, which is what such a
+        # model returns when it produced no reasoning) and keep it *distinct*
+        # from the reply. ``None`` means "this server/model did not return the
+        # field" -- in that case the caller omits it rather than inventing a
+        # value, since a fabricated reasoning_content would be sent back as if
+        # the model had produced it.
+        reasoning_content = result.get("reasoning_content")
 
         # Token usage, when the server reports it (many local servers do not).
         usage = response.json().get("usage", {}) or {}
@@ -145,7 +189,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-        }
+        }, reasoning_content
 
     except requests.exceptions.RequestException as e:
         print(f"HTTP Error: {e}")
@@ -166,10 +210,10 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
                     print("Response body is not valid JSON.")
             except Exception as e:
                 print(f"Problem with (error) response: {e}")
-        return None, None, None
+        return None, None, None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         print(f"Error processing response: {e}")
-        return None, None, None
+        return None, None, None, None
     except Exception as e:  # noqa: BLE001 -- a network/parse hiccup must not crash the loop
         print(f"Unexpected error calling OpenAI server: {e}")
-        return None, None, None
+        return None, None, None, None

@@ -49,14 +49,20 @@ def estimate_message_tokens(message):
     """Estimate the tokens one chat message contributes to a request.
 
     Counts the content, the JSON of any ``tool_calls`` (a tool call's arguments
-    can be far larger than its content) and the name / tool-call-id fields,
-    plus the fixed per-message overhead. Any non-dict input counts as 0.
+    can be far larger than its content), any thinking-mode ``reasoning_content``
+    (which the server concatenates back into the context on requests that carry
+    ``tools``, so it really is prompt weight) and the name / tool-call-id
+    fields, plus the fixed per-message overhead. Any non-dict input counts as 0.
     """
     if not isinstance(message, dict):
         return 0
 
     total = MESSAGE_OVERHEAD_TOKENS
     total += estimate_text_tokens(message.get("content"))
+    # A thinking-mode turn keeps its chain of thought on the assistant message
+    # and re-sends it (see utils.call_openai_server), so it occupies prompt
+    # space in every later request that carries tools.
+    total += estimate_text_tokens(message.get("reasoning_content"))
 
     tool_calls = message.get("tool_calls")
     if tool_calls:
