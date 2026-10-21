@@ -75,6 +75,9 @@ MODEL_CONTEXT_WINDOWS = {
     "deepseek-r1": 65_536,
     "deepseek-coder": 65_536,
     "deepseek": 32_768,
+    "deepseek-flash": 250_000,
+    "deepseek-pro": 250_000,
+    "deepseek-v4": 250_000,
     # -- Mistral ----------------------------------------------------------
     "mixtral": 32_768,
     "mistral": 32_768,
@@ -89,10 +92,17 @@ MODEL_CONTEXT_WINDOWS = {
     "phi-3": 131_072,
     "gemma-2": 8_192,
     "gemma": 8_192,
+    # -- other local families ---------------------------------------------
+    "ornith-ai/Ornith-1.5-397B-FP8" : 250_000,
+    "ornith-ai/Ornith-1.5-397B" : 250_000,
+    "ornith-ai/Ornith-1.5-35B-A3B-FP8" : 250_000,
+    "ornith-ai/Ornith-1.5-35B-A3B" : 250_000,
+    "ornith-ai/Ornith-1.5-122B-FP8" : 250_000,
+    "ornith-ai/Ornith-1.5-122B" : 250_000,
 }
 
 # Used when the model is unknown / unnamed. Conservative on purpose.
-DEFAULT_CONTEXT_TOKENS = 32_768
+DEFAULT_CONTEXT_TOKENS = 125_000
 
 # How much of the window to keep free for the *reply*. A reply that gets
 # truncated mid-tool-call is useless, so this is reserved up front: a request is

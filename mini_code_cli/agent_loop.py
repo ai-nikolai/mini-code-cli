@@ -189,6 +189,32 @@ def print_help(args):
     ui.console.rule(char="═", fg="cyan")
 
 
+def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None,
+                  console=None):
+    """Render the startup info banner through the UI.
+
+    Everything the session was configured with (where it saves, which server and
+    model it talks to, and -- most importantly -- whether tools run unattended)
+    is summarised in one box before the first prompt, so a surprising setting is
+    visible immediately instead of only being discoverable via /help.
+    """
+    from . import __version__ as version
+
+    if getattr(args, "sudo", False):
+        permission_mode = "SUDO MODE: no permission prompts (DENY commands still blocked)."
+    elif getattr(args, "ask_permission", False):
+        permission_mode = "All tool calls require permission."
+    else:
+        permission_mode = "Tool calls execute without asking."
+    auto_mode = bool(getattr(args, "auto_mode", False))
+    agent_mode = "Agent is in auto-mode." if auto_mode else "Agent is in manual-mode."
+    shell_mode = "Shell disabled." if not getattr(args, "enable_shell", False) else "Shell enabled."
+
+    (console or ui.console).welcome(version, unique_id, cache_dir, allowed_dir,
+                                    server_url, model_name, permission_mode,
+                                    agent_mode, shell_mode)
+
+
 # ---------------------------------------------------------------------------
 # history compaction
 # ---------------------------------------------------------------------------
@@ -844,6 +870,62 @@ class AgentSession:
             f"{int(record.get('index', 0))}).", "ok")
         self.console.note("Continuing: new turns will append to this state.", "info")
 
+    def _warn_sudo(self):
+        """Print a prominent red warning about --sudo mode.
+
+        --sudo means the agent will never stop to ask before acting, so the user
+        is effectively handing over unattended control of their machine (within
+        the DENY-tier limits). We render it as a red box so it stands out on any
+        real terminal (it degrades to a plain ASCII box when colour is off).
+        """
+        self.console.print_box(
+            [
+                "SUDO MODE: the agent will NEVER ask for permission.",
+                "All tool calls and shell commands run automatically and unattended.",
+                "Only clearly-destructive (DENY-tier) commands are still refused.",
+                "You are responsible for everything it does on this machine.",
+            ],
+            title="DANGER",
+            fg="red",
+        )
+
+    def print_welcome(self):
+        """Render the startup banner for this session."""
+        print_welcome(self.allowed_dir, self.server_url, self.args,
+                      self.unique_id, self.cache_dir, self.model,
+                      console=self.console)
+
+    def print_announcements(self):
+        """Print the info / warning banners that depend on the CLI flags.
+
+        All of these use the ``ok`` / ``warn`` levels (never ``info``) so they
+        still reach the user in the quiet, default (non-verbose) view: a missing
+        API key, unrestricted shell execution and --sudo are exactly the things
+        that must not be hidden behind --verbose.
+        """
+        self.console.announce_api_key(present=bool(self.api_key))
+
+        if shell_forces_ask_permission(self.args):
+            self.console.announce_shell()
+
+        # --sudo hands the agent unattended control, so make that impossible to miss.
+        if sudo_disables_prompts(self.args):
+            self._warn_sudo()
+
+        if self.enable_subagents:
+            self.console.note(
+                f"Sub-agents enabled ({len(self.subagents_registry)} available: "
+                f"{', '.join(self.subagents_registry)}).", "ok")
+
+    def _print_session_id(self):
+        """Print the session's unique id as a minimal "Assistant" turn.
+
+        The id is rendered as an assistant-styled (green) turn carrying *only*
+        the id in brackets, so the user can see / copy the id this conversation
+        is being saved under without adding another line to the banner.
+        """
+        self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
+
     def show_resume_choice(self):
         """Prompt for the resume choice and return its label.
 
@@ -876,6 +958,13 @@ class AgentSession:
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
         self.start_session()
+        # Startup output, in a fixed order: the banner (what this session is),
+        # the flag-dependent warnings (API key / shell / --sudo -- the ones that
+        # change how much the agent may do unattended), the id this conversation
+        # is saved under, and finally the command tip.
+        self.print_welcome()
+        self.print_announcements()
+        self._print_session_id()
         self._emit_tip()
 
         # The --prompt value is a one-shot initial turn: it is sent verbatim and
@@ -1227,6 +1316,11 @@ class AgentSession:
         user_input = self.console.read_line(
             self.console.style("You:", bold=True, fg="cyan") + " ")
 
+        # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
+        # must not be dereferenced here (a piped or closed stdin would
+        # otherwise crash the loop instead of exiting cleanly).
+        if user_input is None:
+            return None
         if not user_input.strip():
             self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
             return self._read_user_line()
