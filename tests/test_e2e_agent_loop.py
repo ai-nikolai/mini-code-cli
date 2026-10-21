@@ -82,6 +82,7 @@ def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False):
         skills=False,
         llm_timeout=30,
         tool_timeout=30,
+        max_context_tokens=None,
         max_messages=DEFAULT_MAX_MESSAGES,
         plan=plan,
         verbose=False,
@@ -284,6 +285,32 @@ class PlanModeEndToEndTest(unittest.TestCase):
         # Clean termination with a final assistant turn.
         self.assertIn("2", session._last_assistant_text())
         self.assertEqual(session.token_stats["tool_calls"], 1)
+
+        # --- billing: plan mode must not lose its planning calls ------------
+        # Five model calls, so five billed LLM calls: the plan generation and the
+        # completion review are ordinary (tool-free) requests and each costs one.
+        # They used to be invisible here -- the usage line is only printed by
+        # _step -- so this pins that they are actually charged.
+        self.assertEqual(session.token_stats["llm_calls"], len(stub.calls))
+        self.assertEqual(session.token_stats["llm_calls"], 5)
+        self.assertEqual(session.token_stats["total_tokens"],
+                         len(stub.calls) * USAGE["total_tokens"])
+        # The session total agrees, and no compaction happened in this run so the
+        # single live segment *is* the whole session's spend.
+        self.assertEqual(session.total_usage["llm_calls"], 5)
+        self.assertEqual(session.total_usage, session.token_stats)
+        self.assertEqual(session.history_index, 0)
+        # The two planning calls really are billed to the live segment on disk.
+        session_dir = os.path.join(self.cache_dir, session.unique_id)
+        seg0 = persistence.load_usage_segment(session_dir, 0)
+        self.assertEqual(seg0["llm_calls"], 5)
+        self.assertEqual(seg0, session.token_stats)
+        total = persistence.load_total_usage_from_dir(session_dir)
+        self.assertEqual(total["llm_calls"], 5)
+        self.assertEqual(total["total_tokens"], 5 * USAGE["total_tokens"])
+        # The last request's prompt size is remembered from the server's report,
+        # which is what the token-based compaction trigger works from.
+        self.assertEqual(session.last_prompt_tokens, USAGE["prompt_tokens"])
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +589,200 @@ class PerSegmentUsageTest(unittest.TestCase):
         self.assertEqual(total["total_tokens"], 18)
         self.assertEqual(total["llm_calls"], 2)
         self.assertEqual(total["tool_calls"], 2)
+
+
+# ---------------------------------------------------------------------------
+# scenario 6c -- token-based compaction (the real trigger)
+# ---------------------------------------------------------------------------
+
+class TokenBudgetCompactionTest(unittest.TestCase):
+    """The agent loop compacts on *context size*, not on the turn count.
+
+    ``maybe_compact``'s policy is unit-tested in ``tests/test_tokens.py``; what
+    matters here is the session-level wiring: the projected input size is handed
+    to the trigger, a token-triggered rollover does the same bookkeeping a
+    message-triggered one did (new history segment, usage files, totals), and the
+    remembered server-reported prompt size is dropped so the rollover cannot
+    immediately re-fire.
+    """
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp()
+        self.cache_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir, ignore_errors=True)
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
+
+    def _session(self, **overrides):
+        args = make_args(self.workdir, self.cache_dir)
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+        return session
+
+    def _run_step(self, session, replies):
+        stub = StubLLM(replies)
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            session._step()
+        return stub
+
+    def test_the_budget_is_resolved_from_the_model(self):
+        session = self._session(model="gpt-4o")
+        self.assertEqual(session.compaction_budget.source, "model")
+        self.assertEqual(session.compaction_budget.context_window, 128_000)
+        self.assertLess(session.compaction_budget.token_limit, 128_000)
+
+        # --max-context-tokens overrides it outright.
+        explicit = self._session(max_context_tokens=4_242)
+        self.assertEqual(explicit.compaction_budget.token_limit, 4_242)
+        self.assertEqual(explicit.compaction_budget.source, "explicit")
+
+    def test_a_token_triggered_compaction_rolls_the_segment(self):
+        # A budget of 1 token means the very first step is over it -- which is
+        # how a real overflow behaves, only sooner.
+        session = self._session(max_context_tokens=1)
+        stub = self._run_step(session, [
+            ("A summary of the work so far.", [], USAGE),   # the compaction call
+            ("Done.", [], USAGE),                           # the step's own call
+        ])
+        session.shutdown()
+
+        self.assertEqual(len(stub.calls), 2)
+        self.assertEqual(session.history_index, 1)          # history_0 -> history_1
+        # The transcript really was replaced by the summary turn.
+        self.assertIn("A summary of the work so far.", session.messages[1]["content"])
+
+        session_dir = os.path.join(self.cache_dir, session.unique_id)
+        for name in ("history_0.json", "history_1.json",
+                     "usage_0.json", "usage_1.json", "total_usage.json"):
+            with self.subTest(file=name):
+                self.assertIn(name, os.listdir(session_dir))
+
+        # The summariser is billed to the segment it closes; the step's own call
+        # to the fresh one. The session total spans both.
+        self.assertEqual(persistence.load_usage_segment(session_dir, 0)["llm_calls"], 1)
+        self.assertEqual(persistence.load_usage_segment(session_dir, 1)["llm_calls"], 1)
+        total = persistence.load_total_usage_from_dir(session_dir)
+        self.assertEqual(total["llm_calls"], 2)
+        self.assertEqual(total["total_tokens"], 2 * USAGE["total_tokens"])
+        self.assertEqual(total, session.total_usage)
+
+    def test_the_stale_prompt_report_is_dropped_after_a_rollover(self):
+        session = self._session(max_context_tokens=1)
+        session.last_prompt_tokens = 12_345
+        session.last_prompt_message_count = len(session.messages)
+
+        self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+
+        # Keeping the pre-compaction report would describe a transcript that no
+        # longer exists, and would immediately re-trigger compaction next step.
+        self.assertEqual(session.last_prompt_tokens, USAGE["prompt_tokens"])
+        self.assertEqual(session.last_prompt_message_count, 2)
+
+    def test_many_short_messages_do_not_compact_on_their_own(self):
+        # 200 tiny turns sit far below any budget; with the message cap disabled
+        # there is nothing left to trigger a compaction. Previously the count
+        # alone would have compacted here.
+        session = self._session(max_messages=0, model="gpt-4o")
+        session.messages = ([{"role": "system", "content": "S"}]
+                            + [{"role": "user", "content": "hi"}] * 200)
+
+        stub = self._run_step(session, [("Done.", [], USAGE)])
+
+        self.assertEqual(len(stub.calls), 1)        # no summariser call
+        self.assertEqual(session.history_index, 0)
+        self.assertEqual(len(session.messages), 202)   # transcript untouched
+
+    def test_the_message_cap_remains_a_secondary_guard(self):
+        # A huge number of tiny turns is still bounded even when the tokens fit.
+        session = self._session(max_messages=5, model="gpt-4o")
+        session.messages = ([{"role": "system", "content": "S"}]
+                            + [{"role": "user", "content": "hi"}] * 20)
+
+        stub = self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+
+        self.assertEqual(len(stub.calls), 2)
+        self.assertEqual(session.history_index, 1)
+
+    def test_a_large_transcript_compacts_on_tokens_with_few_messages(self):
+        # Four messages, each ~10k tokens: over the default 32k fallback budget
+        # many times over, yet nowhere near any message cap.
+        session = self._session()                    # unknown model -> fallback
+        session.messages = [{"role": "system", "content": "S"}] + [
+            {"role": "user", "content": "x" * 40_000} for _ in range(4)]
+
+        stub = self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+
+        self.assertEqual(len(stub.calls), 2)
+        self.assertEqual(session.history_index, 1)
+        self.assertLess(sum(len(m.get("content") or "")
+                            for m in session.messages), 4 * 40_000)
+
+    def test_the_server_reported_prompt_size_drives_the_trigger(self):
+        # The transcript is tiny, but the server says the last prompt was huge:
+        # that count is authoritative for the prefix it covered, so it compacts.
+        session = self._session(max_context_tokens=1_000)
+        session.last_prompt_tokens = 5_000
+        session.last_prompt_message_count = len(session.messages)
+
+        stub = self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+
+        self.assertEqual(len(stub.calls), 2)
+        self.assertEqual(session.history_index, 1)
+
+    def test_the_output_reserve_counts_towards_the_limit(self):
+        # 1_000-token budget with a 900-token reply reserve: a request that leaves
+        # almost no room for the answer is already too big.
+        session = self._session(max_context_tokens=1_000, max_tokens=900)
+        self.assertEqual(session.compaction_budget.reserved_output_tokens, 900)
+        session.last_prompt_tokens = 200
+        session.last_prompt_message_count = len(session.messages)
+
+        stub = self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+
+        self.assertEqual(len(stub.calls), 2)        # 200 + 900 > 1_000
+        self.assertEqual(session.history_index, 1)
+
+    def test_the_same_request_fits_when_the_reserve_is_smaller(self):
+        session = self._session(max_context_tokens=1_000, max_tokens=100)
+        session.last_prompt_tokens = 200
+        session.last_prompt_message_count = len(session.messages)
+
+        stub = self._run_step(session, [("Done.", [], USAGE)])
+
+        self.assertEqual(len(stub.calls), 1)        # 200 + 100 < 1_000
+        self.assertEqual(session.history_index, 0)
+
+    def test_token_compaction_still_reinjects_the_plan_and_goal_in_plan_mode(self):
+        session = self._session(plan=True, max_context_tokens=1)
+        session.plan_manager.write_goal("do the thing")
+        session.plan_manager.write_plan("1. do it")
+
+        self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+
+        self.assertEqual(session.history_index, 1)
+        joined = "\n".join(str(m.get("content") or "") for m in session.messages)
+        self.assertIn("do the thing", joined)        # CURRENT_GOAL.md re-injected
+        self.assertIn("1. do it", joined)            # CURRENT_PLAN.md re-injected
+
+    def test_the_restored_session_starts_from_an_estimate(self):
+        original = self._session()
+        original.messages = [{"role": "system", "content": "S"},
+                             {"role": "user", "content": "hello"}]
+        original.shutdown()
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.restore_session = os.path.join(self.cache_dir, original.unique_id)
+        restored = AgentSession(args, console=silent_console())
+        restored.start_session()
+
+        # No prompt has been sent in this process, so there is no server report
+        # to trust: the projection must fall back to the heuristic estimate.
+        self.assertEqual(restored.last_prompt_tokens, 0)
+        self.assertEqual(restored.last_prompt_message_count, 0)
+        self.assertGreater(restored._projected_input_tokens(), 0)
 
 
 # ---------------------------------------------------------------------------

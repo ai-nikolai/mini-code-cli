@@ -36,6 +36,7 @@ from . import ui
 from . import subagents
 from . import skills
 from . import plan as plan_utils
+from . import tokens as tokens_mod
 from .config import (
     DEFAULT_CACHE_LOCATION,
     DEFAULT_MODEL_URL,
@@ -43,6 +44,7 @@ from .config import (
     DEFAULT_TOOL_TIMEOUT,
     DEFAULT_HTTP_TIMEOUT,
     DEFAULT_MAX_MESSAGES,
+    compaction_budget,
 )
 from .persistence import (
     save_history,
@@ -101,7 +103,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
     # MODEL / LLM related
     parser.add_argument("--url", type=str, default=f"{DEFAULT_MODEL_URL}", help=f"API host, default={DEFAULT_MODEL_URL}")
-    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response, default=None")
+    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for a single LLM response (the reply budget), default=None. Also used as the output headroom reserved when deriving the compaction limit from the model's context window.")
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help=f"Temperature for LLM, default={DEFAULT_TEMPERATURE}")
     parser.add_argument("--model", type=str, help="Model name, default=None")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
@@ -126,7 +128,8 @@ def parse_args():
     parser.add_argument("--skills", dest="enable_skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
-    parser.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES, help=f"History length (in messages) before the conversation is compacted into a summary. Lower it to compact sooner on small context windows. default={DEFAULT_MAX_MESSAGES}")
+    parser.add_argument("--max-context-tokens", type=int, default=None, help="Input-token budget before the conversation is compacted into a summary. This is the primary compaction trigger: it is compared against the projected size of the next request (the server-reported prompt tokens, plus an estimate for whatever was appended since) plus the output reserve (--max-tokens, or a default). Unset (default): derived from the model's context window minus the output reserve and a safety margin, falling back to a conservative window for unknown models. Lower it to compact sooner.")
+    parser.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES, help=f"Secondary compaction guard: also compact once the history holds more than this many messages, even if the tokens fit. Set 0 to disable. default={DEFAULT_MAX_MESSAGES}")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --subagents, --shell, --automode, --sudo")
@@ -190,19 +193,67 @@ def print_help(args):
 # history compaction
 # ---------------------------------------------------------------------------
 
-def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES, plan_hook=None, console=None):
-    """Compact the conversation history once it grows beyond ``max_messages``.
+def _compaction_trigger(messages, token_limit, reserved_output_tokens,
+                        current_tokens, max_messages):
+    """Decide whether the history is too big, and say why.
+
+    Token pressure is the real trigger: an over-full *context window* makes the
+    next request fail outright, and it is the number of tokens -- not the number
+    of turns -- that decides that. A handful of large tool outputs can fill a
+    window that a hundred short exchanges would not, so counting messages is a
+    poor proxy for it.
+
+    The projection adds ``reserved_output_tokens`` to the current input size,
+    because the reply has to fit in the same window: a request that leaves no
+    room to answer is already too big.
+
+    ``max_messages`` is kept as a cheap secondary guard (a transcript of
+    thousands of tiny turns is slow and expensive even when it fits), and is
+    skipped entirely when unset.
+
+    Returns ``(triggered, reason)``; ``reason`` is a short human-readable string
+    for the console note when it fires.
+    """
+    if token_limit and int(token_limit) > 0:
+        limit = int(token_limit)
+        reserve = max(int(reserved_output_tokens or 0), 0)
+        tokens = current_tokens
+        if tokens is None:
+            tokens = tokens_mod.estimate_messages_tokens(messages)
+        projected = max(int(tokens), 0) + reserve
+        if projected > limit:
+            return True, (f"{projected} tokens in, {reserve} reserved for the reply "
+                          f"> {limit} budget")
+    if max_messages and len(messages) > int(max_messages):
+        return True, f"{len(messages)} messages > {int(max_messages)} cap"
+    return False, ""
+
+
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
+                  history_index=0, token_limit=None, reserved_output_tokens=0,
+                  current_tokens=None, max_messages=None, plan_hook=None, console=None):
+    """Compact the conversation history once it no longer fits the context window.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
-    When the history gets too large we ask the LLM to summarize it and replace the
-    old turns with that summary, keeping the original system prompt as the first
-    message. The compaction call itself is a single, tool-free request, so it
-    cannot trigger further tool calls or recurse into compaction.
+    The trigger is the *projected input size* of the next request -- the estimate
+    for ``messages`` (or ``current_tokens``, a better number the caller already
+    has) plus ``reserved_output_tokens`` headroom for the reply -- compared
+    against ``token_limit``. Compaction is then done by asking the LLM to
+    summarize the history and replacing the old turns with that summary, keeping
+    the original system prompt as the first message. The compaction call itself
+    is a single, tool-free request, so it cannot trigger further tool calls or
+    recurse into compaction.
+
+    ``token_limit=None`` disables the token guard (callers that only want the
+    legacy message cap), and ``max_messages=None`` disables the message cap (the
+    default: tokens are the real limit). See :func:`_compaction_trigger` for how
+    the two interact.
 
     ``plan_hook`` is an optional callable the caller supplies only when running
     under plan mode (in practice ``AgentSession._handle_compaction``). After the
     summary is built the hook re-injects the running goal + plan so the compacted
-    messages carry them forward. Passing it in -- instead of referencing the
+    messages carry them forward. It receives the compacted list and must update it
+    *in place*, because that list is what gets returned to the caller. Passing it in -- instead of referencing the
     owning session -- keeps ``maybe_compact`` a small, module-level, network-free
     helper that the test-suite can import and exercise directly.
     """
@@ -214,7 +265,9 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     if console is None:
         console = ui.console
 
-    if len(messages) <= max_messages:
+    triggered, reason = _compaction_trigger(
+        messages, token_limit, reserved_output_tokens, current_tokens, max_messages)
+    if not triggered:
         # No compaction: keep the same segment (history_index) and signal the
         # caller with (messages, did_compact=False, unchanged_index). Returning
         # the full triple here is required -- callers unpack all three, so a
@@ -222,7 +275,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         return messages, False, history_index
 
     try:
-        console.note(f"Compacting conversation history ({len(messages)} messages -> summary)...", "warn")
+        console.note(f"Compacting conversation history ({reason}) -> summary...", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
 
         # The summariser sometimes answers with nothing at all. An empty summary
@@ -259,7 +312,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
             console.note(
                 f"Could not compact history: the summariser returned an empty "
                 f"summary twice. Keeping all {len(messages)} messages "
-                f"(over the {max_messages}-message cap).", "warn")
+                f"({reason}).", "warn")
             return messages, False, history_index
 
         system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
@@ -334,6 +387,23 @@ class AgentSession:
         # Keeping the two apart is what lets usage survive a compaction.
         self.token_stats = empty_usage()
         self.total_usage = empty_usage()
+
+        # Compaction budget. History is compacted when the *projected input size*
+        # of the next request would not leave room for the reply inside the
+        # model's context window -- not when the message count crosses a
+        # threshold, because it is tokens that make a request fail. Resolving it
+        # once, here, means every step (and the console) agrees on one number.
+        self.compaction_budget = compaction_budget(
+            model=self.model,
+            explicit_limit=getattr(args, "max_context_tokens", None),
+            max_output_tokens=getattr(args, "max_tokens", None),
+        )
+        # How large the last request's prompt was, per the server's own count,
+        # and how many messages that request held. Together these let
+        # project_input_tokens() track the growing transcript instead of
+        # re-estimating from characters every step (see _note_prompt_size).
+        self.last_prompt_tokens = 0
+        self.last_prompt_message_count = 0
 
         self.background_mode = background_mode
 
@@ -448,6 +518,11 @@ class AgentSession:
             restored = load_history_from_dir(restore_directory) if restore_directory else None
 
             self.messages = restored if restored is not None else self._build_initial_messages()
+            # No prompt has been sent in *this* process yet, so any remembered
+            # size would be stale: start from a plain estimate of the restored
+            # transcript (which is what project_input_tokens falls back to).
+            self.last_prompt_tokens = 0
+            self.last_prompt_message_count = 0
             # The recorder restore decides which segment we are on, so usage --
             # which is stored per segment -- has to be restored after it.
             self._load_summary_if_restored(restore_directory)
@@ -579,6 +654,35 @@ class AgentSession:
         """Bill one LLM call to both the current segment and the session total."""
         accumulate_usage(self.token_stats, usage)
         accumulate_usage(self.total_usage, usage)
+
+    def _note_prompt_size(self, usage, message_count=None):
+        """Remember how large the last request's prompt was.
+
+        The server's reported ``prompt_tokens`` is exact, so it is worth far more
+        than a characters/4 guess -- but it only describes the transcript as it
+        was at that moment. Recording the message count alongside it is what lets
+        :func:`tokens.project_input_tokens` keep using that number later in the
+        turn: it adds an estimate for the messages appended since, instead of
+        throwing the real count away and re-guessing the whole transcript.
+
+        ``message_count`` defaults to the current transcript length. A call that
+        reports nothing (many local servers) or fails leaves the previous
+        estimate in place, which then simply ages into the heuristic path.
+        """
+        if not usage:
+            return
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        if prompt_tokens <= 0:
+            return
+        if message_count is None:
+            message_count = len(self.messages)
+        self.last_prompt_tokens = prompt_tokens
+        self.last_prompt_message_count = int(message_count)
+
+    def _projected_input_tokens(self):
+        """Best estimate of how large the next request's prompt will be."""
+        return tokens_mod.project_input_tokens(
+            self.messages, self.last_prompt_tokens, self.last_prompt_message_count)
 
     def _bill_compaction(self, segment_before):
         """Carry the compaction call's spend over into the session total.
@@ -771,6 +875,17 @@ class AgentSession:
                    "turn, /reset <n> to rewind. Type /help for all commands.")
         self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
+        # Say so when the compaction budget came from the fallback: an unknown
+        # model gets a deliberately conservative window, so the user should know
+        # the limit is a guess they can override rather than a measured value.
+        if self.compaction_budget.source == "default":
+            self.console.note(
+                f"Unknown model {self.model!r}: assuming a "
+                f"{self.compaction_budget.context_window:,}-token context window, so "
+                f"history compacts at {self.compaction_budget.token_limit:,} input "
+                f"tokens (+{self.compaction_budget.reserved_output_tokens:,} reserved "
+                f"for the reply). Override with --max-context-tokens.", "warn")
+
     def _run_turn(self, user_input):
         """Run one user turn: record it, step until the model stops, then review.
 
@@ -913,6 +1028,11 @@ class AgentSession:
             self.console.stop_thinking()
 
             self._record_usage(usage)
+            # The plan prompt is one message holding a flattened copy of the whole
+            # transcript, so its prompt_tokens is a safe (slightly high) upper
+            # bound on the transcript's own size -- worth keeping, since it is a
+            # real count from this model rather than a character estimate.
+            self._note_prompt_size(usage, len(self.messages))
             plan_text = response or ""
         except Exception as exc:
             self.console.note(f"Could not generate a plan: {exc}", "warn")
@@ -955,6 +1075,7 @@ class AgentSession:
             )
             self.console.stop_thinking()
             self._record_usage(usage)
+            self._note_prompt_size(usage, len(self.messages))
             summary = response or ""
         except Exception as exc:
             self.console.note(f"Could not review the plan: {exc}", "warn")
@@ -975,14 +1096,20 @@ class AgentSession:
     def _handle_compaction(self, compacted):
         """Re-inject goal + plan into the compacted messages (plan mode).
 
-        Thin plan-mode counterpart to the inlined plan handling inside
-        :meth:`maybe_compact`, which takes a ``plan_hook`` rather than the
-        owning session so it can stay a network-free module-level helper. The
-        loop wires in this method only when plan mode is on; it simply
-        re-injects the goal + plan via :meth:`_apply_plan_to_compacted`, which
-        also rewrites the tracking files to match.
+        Plan-mode counterpart to the plan handling inside :meth:`maybe_compact`,
+        which takes a ``plan_hook`` rather than the owning session so it can stay
+        a network-free module-level helper. The loop wires in this method only
+        when plan mode is on; it re-injects the goal + plan via
+        :meth:`_apply_plan_to_compacted`, which also rewrites the tracking files
+        to match.
+
+        The hook must update ``compacted`` **in place**: ``maybe_compact``
+        returns *that* list to the caller, which then assigns it to
+        ``self.messages``. Rebinding (``self.messages = ...``) instead would be
+        discarded a moment later, silently dropping the goal and plan -- which is
+        exactly what happened before this was a slice assignment.
         """
-        self.messages = self._apply_plan_to_compacted(compacted)
+        compacted[:] = self._apply_plan_to_compacted(compacted)
 
     def _apply_plan_to_compacted(self, messages):
         """Re-inject the current goal + plan after a history compaction.
@@ -1345,9 +1472,13 @@ class AgentSession:
         # rolls the session over to a fresh history segment (history_index + 1)
         # and returns that bump so the recorder can stay flat across it.
         segment_before = dict(self.token_stats)
+        projected = self._projected_input_tokens()
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
             self.args.llm_timeout, self.token_stats, self.history_index,
+            token_limit=self.compaction_budget.token_limit,
+            reserved_output_tokens=self.compaction_budget.reserved_output_tokens,
+            current_tokens=projected,
             # getattr keeps argparse-like namespaces without the attribute
             # (older callers / tests) working, falling back to the default.
             max_messages=getattr(self.args, "max_messages", DEFAULT_MAX_MESSAGES),
@@ -1359,6 +1490,13 @@ class AgentSession:
         self._bill_compaction(segment_before)
 
         if did_compact:
+            # The transcript was replaced, so the last prompt-size report now
+            # describes a conversation that no longer exists. Dropping it makes
+            # the next projection a plain estimate of the (much shorter)
+            # compacted history rather than a stale, over-large number that
+            # would trigger compaction again immediately.
+            self.last_prompt_tokens = 0
+            self.last_prompt_message_count = 0
             # Close the old segment's usage file before moving on, so its spend
             # is preserved on disk even though the next segment starts at zero.
             save_usage_segment(self.token_stats, self.cache_dir, self.unique_id,
@@ -1374,6 +1512,9 @@ class AgentSession:
 
         # Show a "… thinking" spinner while the LLM works (in-place, non-scrolling;
         # a no-op on non-TTY / ASCII output). Stopped right after the call returns.
+        # Capture the transcript length *before* the call: this is exactly how
+        # many messages the reported prompt_tokens describe.
+        sent_message_count = len(self.messages)
         self.console.start_thinking()
         response_text, tool_calls, usage = utils.call_openai_server(
             self.messages,
@@ -1400,6 +1541,7 @@ class AgentSession:
             }
 
         self._record_usage(usage)
+        self._note_prompt_size(usage, sent_message_count)
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
             self.token_stats["tool_calls"] += len(tool_calls)
