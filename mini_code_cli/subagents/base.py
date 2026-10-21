@@ -199,6 +199,15 @@ class SubAgent:
                                    parent_console=parent.console)
         try:
             child = agent_loop.AgentSession(child_args, console=child_console)
+            # A child session is built in two stages: __init__ only wires config,
+            # and start_new_session() is what creates its session dir, recorder
+            # and initial ``messages``. _drive_auto() appends to ``messages`` and
+            # persists, so without this the nested run crashes with
+            # "'AgentSession' object has no attribute 'messages'". We call
+            # start_new_session() (not start_session()) deliberately: a sub-agent
+            # must always begin a fresh, isolated session and never inherit a
+            # resumable session from the parent's --allowed-dir pointer.
+            child.start_new_session()
             # The child writes its report into its own session dir. Read it
             # back from there: ``self._report_path(parent)`` is *exactly* the
             # path the system prompt (built at system_prompt() time) told the

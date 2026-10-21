@@ -379,17 +379,30 @@ class AgentSession:
 
 
     def restore_previous_session(self, restore_directory):
-        """A function to restore from a directory."""
+        """A function to restore from a directory.
+
+        Order matters here. ``self.messages`` must be loaded *before* the
+        recorder is restored, because the legacy fallback in
+        :meth:`_load_summary_if_restored` rebuilds the recorder by scanning the
+        restored messages. ``self.summary`` / ``self.history_index`` are seeded
+        first so that fallback can append to them and so ``_persist()`` has a
+        segment index to write to. Previously all three were unset on this path,
+        so restoring a session folder that had a ``history_N.json`` but no
+        ``summary_history.json`` (older code, or a hand-made folder) raised
+        AttributeError and the caller silently started a *new* session instead.
+        """
         try:
             self.unique_id = os.path.basename(os.path.normpath(restore_directory))
             self.session_dir = restore_directory
             self.plan_manager = plan_utils.PlanManager(
                 self.session_dir, enabled=self.plan_mode)
+            self.summary = []
+            self.history_index = 0
             self._restore_usage_if_available(restore_directory)
-            self._load_summary_if_restored(restore_directory)
             restored = load_history_from_dir(restore_directory) if restore_directory else None
 
             self.messages = restored if restored is not None else self._build_initial_messages()
+            self._load_summary_if_restored(restore_directory)
 
             return True
 
@@ -725,7 +738,7 @@ class AgentSession:
                     else:
                         self.console.note(
                             "LLM seems to have to an end of the task.", "info")
-                
+
                         if self.plan_mode:
                             self.console.note(
                                 "Reviewing the plan, if everything is done.", "info")
@@ -733,8 +746,12 @@ class AgentSession:
                             should_continue = self._step()
                             self._persist()
 
-                            if not should_continue:
-                                running_turn = False #escape turn loop
+                        # A response with no tool calls means the turn is over. This must
+                        # happen regardless of plan mode: previously the assignment sat inside
+                        # `if self.plan_mode`, so non-plan sessions never left the turn loop and
+                        # re-called the model forever.
+                        if not should_continue:
+                            running_turn = False  # escape the turn loop
             
             except _Abort:
                 # Ctrl-C during a permission prompt already shut the session
