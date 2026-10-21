@@ -67,11 +67,14 @@ _UNICODE_GLYPHS = {
     "tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "h": "═", "v": "║",
     "bullet": "•", "arrow": "↳", "info": "ℹ", "warn": "⚠",
     "error": "✖", "ok": "✔", "gear": "⚙", "role": "▸", "flag": "⚑",
+    # Context-usage bar (see Console.context_bar): filled / empty cells.
+    "bar_full": "█", "bar_empty": "░",
 }
 _ASCII_GLYPHS = {
     "tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "-", "v": "|",
     "bullet": "*", "arrow": "->", "info": "[i]", "warn": "[!]",
     "error": "[x]", "ok": "[v]", "gear": "#", "role": ">", "flag": "!",
+    "bar_full": "#", "bar_empty": "-",
 }
 
 
@@ -360,17 +363,58 @@ class Console:
     def banner(self, title, lines, fg="cyan"):
         self.print_box(lines, title=title, fg=fg)
 
-    def turn(self, role, content, accent="cyan"):
-        """Render a single conversation turn (user / assistant / system)."""
+    def turn(self, role, content, accent="cyan", badge=None):
+        """Render a single conversation turn (user / assistant / system).
+
+        ``badge`` is an optional, already-rendered string shown on the header
+        line's right (after the role) -- used for the context-occupancy bar, so
+        "how full is the window" sits next to the turn that was just produced
+        rather than on a separate line. It is emitted verbatim (the caller owns
+        any styling), and nothing is drawn when it is empty.
+        """
         header = f"{self.glyph('role')} {role}"
-        self.emit(self.style(header, fg=accent, bold=True) if accent
-                  else self.style(role, bold=True))
+        rendered = self.style(header, fg=accent, bold=True) if accent \
+            else self.style(role, bold=True)
+        if badge:
+            rendered = f"{rendered}  {badge}"
+        self.emit(rendered)
         text = "" if content is None else str(content)
         if text == "":
             self.emit("   (no content)")
             return
         for line in text.splitlines():
             self.emit("   " + line)
+
+    def context_bar(self, fraction, width=10, warn=0.60, danger=0.85):
+        """Render a small "how full is the context window" bar.
+
+        ``fraction`` is the share of the window currently in use (0.0-1.0;
+        anything outside is clamped, so a rough estimate can never produce a
+        broken bar). Returns e.g. ``█████░░░░░ 48%`` -- or ``#####----- 48%``
+        on a non-unicode (piped / ASCII) console, consistent with every other
+        glyph in this module.
+
+        The fill is coloured by pressure: green below ``warn``, amber up to
+        ``danger``, red from there on. The caller passes those two thresholds as
+        fractions of the window so they can line up with whatever *actually*
+        happens at high occupancy (compaction), instead of a fixed percentage
+        that may sit far away from it.
+
+        Returns "" for an unusable ``fraction`` (``None``, or a non-number) so
+        the caller can drop it into a header unconditionally.
+        """
+        try:
+            frac = float(fraction)
+        except (TypeError, ValueError):
+            return ""
+        frac = min(max(frac, 0.0), 1.0)
+        pct = int(round(frac * 100))
+        filled = min(max(int(round(frac * width)), 0), width)
+        bar = self.glyph("bar_full") * filled + self.glyph("bar_empty") * (width - filled)
+        fg = "green" if frac < warn else ("yellow" if frac < danger else "red")
+        # The percentage is left unstyled and outside the colour span so the
+        # digits stay legible on any terminal theme.
+        return f"{self.style(bar, fg=fg)} {pct}%"
 
     def note(self, msg, level="info"):
         """Render a one-line status message (info / ok / warn / error).
@@ -561,8 +605,16 @@ class Console:
         self.emit(label)
         self.emit(f"    {name}: {str(params)[:35]}")
 
-    def usage_inline(self, usage):
-        """A compact one-liner describing a single LLM call's token usage."""
+    def usage_inline(self, usage, llm_calls=None):
+        """A compact one-liner describing token usage.
+
+        ``usage`` is a single call's numbers. ``llm_calls``, when given, is the
+        session-wide number of LLM calls made so far and is appended as a
+        trailing ``| 12 LLM calls`` field -- the per-call figures alone cannot
+        say how much work the session has actually done (a turn can cost one
+        call or a dozen, and compaction / planning calls are invisible in the
+        token totals once their segment is closed).
+        """
         if not usage:
             text = "input=n/a (server did not report usage)"
         else:
@@ -570,19 +622,24 @@ class Console:
                     f"output={usage.get('completion_tokens', 0)} "
                     f"toolcalls={usage.get('tool_calls', 0)} "
                     f"total={usage.get('total_tokens', 0)}")
+        if llm_calls is not None:
+            calls = int(llm_calls)
+            text += f" | {calls} LLM call{'' if calls == 1 else 's'}"
         label = self.style("tokens", fg="cyan", dim=True) if self.color_enabled else "tokens"
         return f"{label}: {text}"
 
-    def usage_line(self, usage, transient=None):
+    def usage_line(self, usage, transient=None, llm_calls=None):
         """Emit the one-line usage readout.
 
         Printed permanently in verbose mode; in non-verbose mode (or when
         ``transient`` is True) it goes into the live region that is cleared on
         the next transient emit, so per-call usage does not accumulate.
+        ``llm_calls`` is passed through to :meth:`usage_inline`.
         """
         if transient is None:
             transient = not self.verbose
-        self.emit_transient(self.usage_inline(usage)) if transient else self.emit(self.usage_inline(usage))
+        line = self.usage_inline(usage, llm_calls=llm_calls)
+        self.emit_transient(line) if transient else self.emit(line)
 
     def usage_summary(self, stats):
         """Render the accumulated token usage for the session so far (box).

@@ -684,6 +684,48 @@ class AgentSession:
         return tokens_mod.project_input_tokens(
             self.messages, self.last_prompt_tokens, self.last_prompt_message_count)
 
+    def _context_fraction(self):
+        """How much of the model's context window the next request would fill.
+
+        Returns a 0.0-1.0 fraction (clamped), or ``None`` when it cannot be
+        computed. It divides the *same* projection the compaction trigger uses
+        against the same window, so the bar the user sees and the moment
+        compaction fires can never disagree -- a bar stuck at 20% while the
+        transcript is compacted would be worse than no bar at all.
+
+        Note this counts input only, i.e. it answers "how full is the window
+        with what we are about to send", not "including the reply that is about
+        to be written"; that reserve is what the compaction limit already
+        accounts for.
+        """
+        window = self.compaction_budget.context_window
+        if not window or window <= 0:
+            return None
+        try:
+            used = self._projected_input_tokens()
+        except Exception:
+            # A display detail must never be able to break a turn.
+            return None
+        return min(max(used / float(window), 0.0), 1.0)
+
+    def _context_badge(self):
+        """The context-occupancy badge for the Assistant header ("" if unusable).
+
+        The percentage is occupancy of the whole window (what the user asked
+        for: "how much of the context is in use"), but the colour thresholds are
+        derived from the compaction limit, so amber/red mean "compaction is
+        near" -- i.e. they point at the point where something actually happens.
+        With a fixed 60/85% of the window the red zone would be unreachable: the
+        budget keeps a reserve plus a margin, so history is compacted at roughly
+        84% of the window and never gets near 100%.
+        """
+        fraction = self._context_fraction()
+        if fraction is None:
+            return ""
+        window = self.compaction_budget.context_window
+        danger = min(max(self.compaction_budget.token_limit / float(window), 0.0), 1.0)
+        return self.console.context_bar(fraction, warn=danger * 0.85, danger=danger)
+
     def _bill_compaction(self, segment_before):
         """Carry the compaction call's spend over into the session total.
 
@@ -1443,7 +1485,12 @@ class AgentSession:
         # visually separated (the assistant may reply several times in a row
         # in auto-mode, or right after a tool-call summary).
         self.console.divider()
-        self.console.turn("Assistant", text, accent="green")
+        # The context-occupancy bar rides on the header, so "how full is the
+        # window" is visible exactly when the user is reading a reply -- and it
+        # refreshes every turn because it is recomputed from the projection
+        # (which is reset after a compaction, so the bar drops back down there).
+        self.console.turn("Assistant", text, accent="green",
+                          badge=self._context_badge())
 
     def _persist(self):
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
@@ -1574,7 +1621,8 @@ class AgentSession:
         # bottom of the screen. That way the next step can clear it in place
         # (cursor up + wipe + reprint) instead of jumping up past the assistant
         # turn above it -- which is what made the screen keep scrolling.
-        self.console.usage_line(usage, transient=False)
+        self.console.usage_line(usage, transient=False,
+                                llm_calls=self.total_usage["llm_calls"])
 
         # Append this step's turn to the high-level recorder. On compaction the
         # recorder was already seeded for the new segment above, so this becomes
