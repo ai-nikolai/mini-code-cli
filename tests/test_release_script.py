@@ -20,14 +20,36 @@ import unittest
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                       "scripts", "push_version_tag.py")
 
-# A commit identity, passed per-command so the tests never depend on (or
-# modify) the developer's git config.
-IDENTITY = ["-c", "user.email=tests@example.invalid", "-c", "user.name=Test"]
+# A commit identity, supplied through the *environment* rather than ``git -c``
+# or the developer's config. Two reasons: the script under test is a black box
+# that runs its own ``git tag -a``, which needs a committer identity as well, and
+# a CI runner has no global git user at all -- which is exactly how this test
+# first failed there ("empty ident name ... not allowed"). Environment variables
+# reach both the test's git calls and the script's, and touch no config file.
+IDENTITY_ENV = {
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "tests@example.invalid",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "tests@example.invalid",
+    # A developer's global config must not leak in either: it can enable tag
+    # signing (the script's ``git tag -a`` would then fail), set a hooks
+    # template, or pick a different default branch. The tests own their repos,
+    # so an empty config is the honest baseline -- and it reproduces CI locally.
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    # Never let a stray credential helper or askpass prompt block the suite.
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def git_env():
+    """The environment every git call in this file (and the script) inherits."""
+    return {**os.environ, **IDENTITY_ENV}
 
 
 def git(cwd, *args):
     """Run git in ``cwd`` and return stdout; raise with stderr on failure."""
-    result = subprocess.run(["git", *IDENTITY, *args], cwd=cwd, text=True,
+    result = subprocess.run(["git", *args], cwd=cwd, text=True, env=git_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {result.stderr}")
@@ -42,8 +64,9 @@ class ReleaseScriptTest(unittest.TestCase):
         self.origin = os.path.join(self.root, "origin.git")
         self.work = os.path.join(self.root, "work")
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.origin],
-                       check=True)
-        subprocess.run(["git", "init", "-q", "-b", "main", self.work], check=True)
+                       check=True, env=git_env())
+        subprocess.run(["git", "init", "-q", "-b", "main", self.work],
+                       check=True, env=git_env())
         self.write_pyproject("0.1.0")
         self.commit("initial")
         git(self.work, "remote", "add", "origin", self.origin)
@@ -67,8 +90,10 @@ class ReleaseScriptTest(unittest.TestCase):
         git(self.work, "push", "-q", "origin", "HEAD:main")
 
     def run_script(self, *args):
+        # ``env=git_env()`` is what makes this work on a runner with no git
+        # identity configured: the script's own ``git tag -a`` needs one too.
         return subprocess.run([sys.executable, SCRIPT, *args], cwd=self.work,
-                              text=True, stdout=subprocess.PIPE,
+                              text=True, env=git_env(), stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE)
 
     def remote_tags(self):
