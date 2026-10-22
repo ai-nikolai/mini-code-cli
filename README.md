@@ -63,68 +63,6 @@ given a reference implementation.
 > **Every flag** is listed once, in [Command-line options](#command-line-options) — or run
 > `mini-code --help`. Modes and their caveats are described in [Modes & safety](#modes--safety).
 
-## Modes & safety
-
-### Shell execution — `-s` / `--enable-shell`
-
-Everything the agent runs from the shell first passes a **safety classifier** that sorts the
-command into one of three tiers:
-
-| Tier | Examples | What happens |
-| --- | --- | --- |
-| **DENY** | `rm -rf /`, `dd of=/dev/...`, `mkfs.*`, fork bombs | refused outright, never run |
-| **ASK** | `rm file`, `sudo ...`, `chmod`, `curl ... \| sh` | requires your confirmation |
-| **ALLOW** | `ls`, `cat`, `git status` | runs without prompting |
-
-> [!WARNING]
-> The classifier is **always enforced** — even in auto-mode and with `--sudo` — so the agent
-> cannot run destructive commands unattended. It is a heuristic, not a sandbox: use it with care.
-> `--allowed-dir` sandboxes **file tools**, not the shell.
-
-### Plan mode — `-p` / `--plan`
-
-The loop keeps two human-readable tracking files in the session directory: `CURRENT_GOAL.md`
-(your latest instruction) and `CURRENT_PLAN.md` (a step-by-step plan for that goal, marked
-finished when it is done). They are authored by the *loop*, not the agent, live outside
-`--allowed-dir`, and can be inspected any time with `/plan`.
-
-> [!NOTE]
-> Plan mode also changes **history compaction**: after the transcript is compacted to a summary,
-> `CURRENT_PLAN.md` and `CURRENT_GOAL.md` are re-injected, so the agent keeps working against the
-> same goal. When the work looks done the plan is reviewed and any outstanding task is re-queued
-> before the agent returns to you.
-
-### Sessions — resume, or start fresh
-
-Every session is saved under `--cache-dir` (default `~/.cache/mini/sessions/`).
-
-| Flag | Behaviour |
-| --- | --- |
-| `--restore-session PATH` | continue that exact session |
-| `-l`, `--load-last-session` | continue the session recorded in the `.mini/last_session.json` pointer, without asking |
-
-`--load-last-session` resumes under a **brand-new session id**, so the original is never
-overwritten; an explicit `--restore-session` wins if both are given. The "most recent" session
-comes from a single source — the tiny `.mini/last_session.json` pointer written at the end of
-every interactive session inside `--allowed-dir` (deliberately no timestamp fallback: with no
-pointer, a fresh session starts). That pointer lives in the same `.mini` directory as `--skills`,
-but as its own dedicated file, so the two never clash.
-
-> [!TIP]
-> If a previous session exists but you did **not** ask to resume one (neither
-> `--load-last-session` nor `--restore-session`), the prompt offers **Resume / Start new / Exit**
-> before the conversation begins. Ctrl-C or EOF there is a graceful exit. This is the *asking*
-> variant; `--load-last-session` is the *silent* one.
-
-### Context compaction — `--max-context-tokens`
-
-Compaction is decided by **tokens only**, never by message count: a few large tool outputs can
-fill a window that hundreds of short turns would not. The next request is projected from the
-server-reported `prompt_tokens`, plus an estimate of what was appended since, plus the output
-reserve (`--max-tokens`). Unset (default) it is derived from the model's context window minus the
-output reserve and a safety margin. Lower it to compact sooner, raise it to compact later — there
-is no message-count cap to configure.
-
 ## Command-line options
 
 | Option | Default | What it does |
@@ -248,6 +186,72 @@ python3 -m unittest discover -s tests -p "test_*.py"    # run the test suite
 Releases are cut by tagging `main`: pushing a `v*` tag triggers
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the sdist + wheel,
 verifies them with `twine check`, and attaches them to a new GitHub release.
+
+
+
+## Modes & safety
+
+### Shell execution — `-s` / `--enable-shell`
+
+Everything the agent runs from the shell first passes a **safety classifier** that sorts the
+command into one of three tiers:
+
+| Tier | Examples | What happens |
+| --- | --- | --- |
+| **DENY** | `rm -rf /`, `dd of=/dev/...`, `mkfs.*`, fork bombs | refused outright, never run |
+| **ASK** | `rm file`, `sudo ...`, `chmod`, `curl ... \| sh` | requires your confirmation |
+| **ALLOW** | `ls`, `cat`, `git status` | runs without prompting |
+
+> [!WARNING]
+> The classifier is **always enforced** — even in auto-mode and with `--sudo` — so the agent
+> cannot run destructive commands unattended. It is a heuristic, not a sandbox: use it with care.
+> `--allowed-dir` sandboxes **file tools**, not the shell.
+
+### Plan mode — `-p` / `--plan`
+
+The loop keeps two human-readable tracking files in the session directory: `CURRENT_GOAL.md`
+(your latest instruction) and `CURRENT_PLAN.md` (a step-by-step plan for that goal, marked
+finished when it is done). They are authored by the *loop*, not the agent, live outside
+`--allowed-dir`, and can be inspected any time with `/plan`.
+
+> [!NOTE]
+> Plan mode also changes **history compaction**: after the transcript is compacted to a summary,
+> `CURRENT_PLAN.md` and `CURRENT_GOAL.md` are re-injected, so the agent keeps working against the
+> same goal. When the work looks done the plan is reviewed and any outstanding task is re-queued
+> before the agent returns to you.
+
+### Sessions — resume, or start fresh
+
+Every session is saved under `--cache-dir` (default `~/.cache/mini/sessions/`).
+
+> [!TIP]
+> If a previous session exists but you did **not** ask to resume one (neither
+> `--load-last-session` nor `--restore-session`), the prompt offers **Resume / Start new / Exit**
+> before the conversation begins. Ctrl-C or EOF there is a graceful exit. This is the *asking*
+> variant; `--load-last-session` is the *silent* one.
+
+
+| Flag | Behaviour |
+| --- | --- |
+| `--restore-session PATH` | continue that exact session |
+| `-l`, `--load-last-session` | continue the session recorded in the `.mini/last_session.json` pointer, without asking |
+
+`--load-last-session` resumes under a **brand-new session id**, so the original is never
+overwritten; an explicit `--restore-session` wins if both are given. The "most recent" session
+comes from a single source — the tiny `.mini/last_session.json` pointer written at the end of
+every interactive session inside `--allowed-dir` (deliberately no timestamp fallback: with no
+pointer, a fresh session starts). That pointer lives in the same `.mini` directory as `--skills`,
+but as its own dedicated file, so the two never clash.
+
+### Context compaction — `--max-context-tokens`
+
+Compaction is decided by **tokens only**, never by message count: a few large tool outputs can
+fill a window that hundreds of short turns would not. The next request is projected from the
+server-reported `prompt_tokens`, plus an estimate of what was appended since, plus the output
+reserve (`--max-tokens`). Unset (default) it is derived from the model's context window minus the
+output reserve and a safety margin. Lower it to compact sooner, raise it to compact later — there
+is no message-count cap to configure.
+
 
 ## Serving a model locally
 
