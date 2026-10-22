@@ -840,6 +840,33 @@ class OnelineTest(unittest.TestCase):
         self.assertEqual(console._oneline("a\nb"), "a b")
 
 
+class PluralTest(unittest.TestCase):
+    """One ``plural`` helper, shared by the agent loop and the console.
+
+    The compaction notes, the good-bye box and the usage line all build counts
+    for a human to read; before this was factored out there were three inline
+    ``'' if n == 1 else 's'`` expressions, and a "1 messages" would have been
+    invisible until a release note said it.
+    """
+
+    def test_singular_and_plural(self):
+        self.assertEqual(utils.plural(1, "message"), "1 message")
+        self.assertEqual(utils.plural(0, "message"), "0 messages")
+        self.assertEqual(utils.plural(2, "message"), "2 messages")
+
+    def test_a_custom_suffix_is_honoured(self):
+        # The helper concatenates a suffix rather than inflecting English, so a
+        # noun that takes "-es" works and anything irregular stays the caller's
+        # problem (none of the call sites need it).
+        self.assertEqual(utils.plural(1, "box", "es"), "1 box")
+        self.assertEqual(utils.plural(3, "box", "es"), "3 boxes")
+
+    def test_the_console_usage_line_uses_it(self):
+        console = ui.Console(stream=io.StringIO(), color=False, unicode=False)
+        self.assertIn("| 1 LLM call", console.usage_inline({}, llm_calls=1))
+        self.assertIn("| 2 LLM calls", console.usage_inline({}, llm_calls=2))
+
+
 # ---------------------------------------------------------------------------
 # shell-safety classifier
 # ---------------------------------------------------------------------------
@@ -1035,6 +1062,127 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         self.assertIs(out, messages)
         self.assertIn("Failed to compact history", self.output())
         self.assertIn("Keeping all 3 messages unchanged", self.output())
+
+
+
+# ---------------------------------------------------------------------------
+# the good-bye box, the version invariant and the -m entry point
+# ---------------------------------------------------------------------------
+
+class FarewellBoxTest(_SessionCase):
+    """The exit banner: what it says, when it says it, and how often.
+
+    It is the last thing a user sees, and the only place the quiet (non-verbose)
+    view states what the session left behind, so the content and the "exactly
+    once, normal exits only" rule are both pinned here.
+    """
+
+    def make(self):
+        """A started session whose console writes into ``self.output()``."""
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+        with mock.patch.object(AgentSession, "show_resume_choice", return_value="new"):
+            session.start_session()
+        return session
+
+    def test_the_box_shows_the_version_the_sign_off_and_the_state(self):
+        session = self.make()
+        session.console.emit("")           # separator, keeps assertions simple
+
+        session.shutdown()
+
+        from mini_code_cli import __version__
+
+        text = self.output()
+        self.assertIn(f"MiniCodeCLI v{__version__} - goodbye", text)
+        self.assertIn("Goodbye, and thanks for using MiniCodeCLI!", text)
+        self.assertIn("session id", text)
+        self.assertIn(session.unique_id, text)
+        self.assertIn("saved under", text)
+        self.assertIn("history", text)
+        self.assertIn("conversation", text)
+        self.assertIn("tokens", text)
+        self.assertIn("calls", text)
+
+    def test_it_is_not_the_startup_banner(self):
+        # The welcome box lists how the session *will* run; the farewell box
+        # must not repeat any of that once it is over.
+        session = self.make()
+        session.console.emit("")
+
+        session.shutdown()
+
+        text = self.output()
+        for absent in ("allowed dir", "server url", "permissions :", "model       :"):
+            self.assertNotIn(absent, text)
+
+    def test_it_prints_exactly_once_across_repeated_shutdowns(self):
+        session = self.make()
+        session.console.emit("")
+
+        session.shutdown()
+        session.shutdown()
+
+        self.assertEqual(self.output().count("Goodbye, and thanks"), 1)
+
+    def test_no_box_on_the_interrupt_and_fatal_paths(self):
+        session = self.make()
+        session.console.emit("")
+
+        session.shutdown(farewell=False)
+
+        self.assertNotIn("Goodbye, and thanks", self.output())
+        # ... but the session was still persisted ("Saved session to ...").
+        self.assertIn("Saved session to", self.output())
+
+    def test_the_interrupt_path_in_run_prints_no_box(self):
+        session = self.make()
+        session.console.emit("")
+        with mock.patch.object(AgentSession, "print_welcome"), \
+                mock.patch.object(AgentSession, "print_announcements"), \
+                mock.patch.object(AgentSession, "_warn_compaction_budget"), \
+                mock.patch.object(AgentSession, "start_session"), \
+                mock.patch.object(AgentSession, "_print_session_id"), \
+                mock.patch.object(AgentSession, "_emit_tip"), \
+                mock.patch.object(AgentSession, "_read_user_line",
+                                  side_effect=KeyboardInterrupt):
+            session.run()
+
+        text = self.output()
+        self.assertIn("Interrupting: Mini Code Exiting...", text)
+        self.assertNotIn("Goodbye, and thanks", text)
+
+
+class VersionTest(unittest.TestCase):
+
+    def test_the_package_version_matches_pyproject(self):
+        # ``pyproject.toml`` is the single source of truth (the welcome banner
+        # reads it through ``__init__``), and the release workflow refuses a tag
+        # that disagrees with it -- so a forgotten bump should fail here first.
+        import tomllib
+
+        from mini_code_cli import __version__
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "pyproject.toml"), "rb") as handle:
+            declared = tomllib.load(handle)["project"]["version"]
+        self.assertEqual(__version__, declared)
+
+
+class ModuleEntryPointTest(unittest.TestCase):
+
+    def test_python_dash_m_starts_the_cli(self):
+        # ``mini_code_cli/__main__.py`` exists so the package runs without the
+        # ``mini-code`` script on PATH; ``--help`` proves the wiring without
+        # needing a server or a session.
+        import subprocess
+        import sys
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = subprocess.run([sys.executable, "-m", "mini_code_cli", "--help"],
+                                cwd=root, text=True, capture_output=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage: mini-code", result.stdout)
 
 
 if __name__ == "__main__":
