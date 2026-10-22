@@ -28,6 +28,12 @@ DEFAULT_DOCKER = {
 }
 DEFAULT_OUTPUT_DIR = os.path.join("benchmarks", "runs")
 
+#: Which container runtime to use by default: ``"auto"`` means "docker if it is
+#: installed, otherwise apptainer" (see ``benchmarks/runtime.py``). HPC machines
+#: frequently have no Docker daemon at all, and pinning the runtime in the config
+#: is what keeps a comparison reproducible across two such machines.
+DEFAULT_RUNTIME = "auto"
+
 
 class ConfigError(ValueError):
     """The configuration file is unusable; the message names what to fix."""
@@ -145,7 +151,7 @@ class RunConfig:
 
     def __init__(self, suites, agents, models, output_dir=DEFAULT_OUTPUT_DIR,
                  concurrency=1, timeouts=None, docker=None, env=None,
-                 source=None):
+                 runtime=None, source=None):
         self.suites = list(suites)
         self.agents = list(agents)
         self.models = list(models)
@@ -156,7 +162,17 @@ class RunConfig:
         self.docker = dict(DEFAULT_DOCKER)
         self.docker.update(docker or {})
         self.env = dict(env or {})
+        # Resolved lazily so a config that says "auto" is still a pure data
+        # structure: `plan` on a Docker host and `plan` on an Apptainer host show
+        # their own commands, and the manifest records what was actually used.
+        self.runtime = str(runtime).strip().lower() if runtime else DEFAULT_RUNTIME
         self.source = source
+
+    def resolved_runtime(self):
+        """The runtime this machine will use, or ``None`` when none is installed."""
+        from .runtime import resolve
+
+        return resolve(self.runtime)
 
     # -- expansion -------------------------------------------------------
 
@@ -194,7 +210,8 @@ class RunConfig:
                         # An explicit --limit wins; otherwise the suite's own
                         # limit (if any) applies, so a config is self-contained.
                         limit=limit if limit is not None else suite.limit,
-                        timeouts=self.timeouts, docker=self.docker))
+                        timeouts=self.timeouts, docker=self.docker,
+                        runtime=self.runtime))
         return out
 
     def to_dict(self):
@@ -204,6 +221,7 @@ class RunConfig:
             "timeouts": dict(self.timeouts),
             "docker": dict(self.docker),
             "env": dict(self.env),
+            "runtime": self.runtime,
             "suites": [s.to_dict() for s in self.suites],
             "agents": [a.to_dict() for a in self.agents],
             "models": [m.to_dict() for m in self.models],
@@ -251,8 +269,8 @@ def parse_config(data, source=None):
     ``options`` are passed through untouched, because they belong to the suite or
     agent that consumes them.
     """
-    known = {"output_dir", "concurrency", "timeouts", "docker", "env", "suites",
-             "agents", "models"}
+    known = {"output_dir", "concurrency", "timeouts", "docker", "env", "runtime",
+             "suites", "agents", "models"}
     # Keys starting with "_" are comments (the configs here are hand-written and
     # JSON has no comment syntax); anything else unknown is a typo.
     unknown = sorted(k for k in set(data) - known if not str(k).startswith("_"))
@@ -306,6 +324,7 @@ def parse_config(data, source=None):
         timeouts=data.get("timeouts"),
         docker=data.get("docker"),
         env=data.get("env"),
+        runtime=data.get("runtime"),
         source=source,
     )
     problems = validate_config(config)
@@ -359,7 +378,12 @@ def validate_config(config, check_env=False):
             problems.append(
                 f"model {model.name!r}: base_url must be an http(s) URL, "
                 f"not {model.base_url!r}")
-        if check_env and model.api_key_env and not os.environ.get(model.api_key_env):
+        if check_env and model.api_key_env and \
+                not (os.environ.get(model.api_key_env)
+                     or config.env.get(model.api_key_env)):
+            # A key may come from the process environment or from the config's own
+            # `env` block (which the harness injects into every command); either
+            # satisfies "the agent will have it".
             problems.append(
                 f"model {model.name!r}: {model.api_key_env} is not set in the "
                 f"environment")
@@ -369,4 +393,11 @@ def validate_config(config, check_env=False):
             problems.append(f"timeout {name!r} must be a positive integer")
     if config.concurrency < 1:
         problems.append("concurrency must be at least 1")
+
+    from .runtime import AUTO as _AUTO, RUNTIMES as _RUNTIMES
+
+    if config.runtime not in _RUNTIMES + (_AUTO,):
+        problems.append(
+            f"runtime must be one of {', '.join(_RUNTIMES + (_AUTO,))}, "
+            f"not {config.runtime!r}")
     return problems

@@ -28,6 +28,7 @@ Result files differ too, so :meth:`collect` understands both:
 import json
 import os
 
+from .. import runtime as runtime_module
 from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
 
 
@@ -75,10 +76,24 @@ class TerminalBenchSuite(Suite):
             name = "harbor" if self.harness(spec) == "harbor" else "tb"
             problems.append(f"suite 'terminal-bench': the {name!r} CLI is not on "
                             f"PATH ({self.install_hint})")
-        if require_binary and not self._docker_available():
-            problems.append("suite 'terminal-bench': docker is not available "
-                            "(every task runs in a container)")
+        chosen = runtime_module.resolve(self._runtime_hint())
+        if require_binary and chosen is None:
+            problems.append(
+                "suite 'terminal-bench': no container runtime is usable "
+                f"({' or '.join(runtime_module.RUNTIMES)} not on PATH); every task "
+                "runs in a container")
+        elif require_binary and chosen == "apptainer" and \
+                self.harness(spec) == "harbor":
+            problems.append(
+                "suite 'terminal-bench': harbor drives task containers through "
+                "Docker; its Apptainer backend (`--env singularity`) converts the "
+                "images but then needs /usr/bin/python3 inside them to bootstrap "
+                "its RPC server, which Terminal-Bench images do not ship, so this "
+                "suite needs a Docker host (see benchmarks/README.md)")
         return problems
+
+    def _runtime_hint(self):
+        return getattr(self, "runtime", None)
 
     def notes(self, model):
         spec = getattr(self, "spec", None)
@@ -92,6 +107,15 @@ class TerminalBenchSuite(Suite):
             name = "harbor" if self.harness(spec) == "harbor" else "tb"
             notes.append(f"{name!r} is not installed here; `run` will fail, "
                          f"`plan` works")
+        chosen = runtime_module.resolve(self._runtime_hint())
+        if chosen == "apptainer":
+            notes.append("container runtime: apptainer; harbor reaches it through "
+                         "`--env singularity`, which only works for tasks that "
+                         "declare docker_image in task.toml")
+        elif chosen == "docker":
+            notes.append("container runtime: docker")
+        else:
+            notes.append("no container runtime found (docker/apptainer)")
         if self.harness(spec) == "harbor":
             notes.append("Terminal-Bench 2.x is executed by harbor; `harbor "
                          "datasets list` shows the dataset@version strings")
@@ -127,14 +151,22 @@ class TerminalBenchSuite(Suite):
         if selection.get("agent"):
             argv += ["-a", str(selection["agent"])]
         else:
-            argv += ["--agent-import-path", str(selection["import_path"])]
+            # harbor resolves the import path *in its own interpreter*, so a
+            # module from this repository only imports if the repository is on
+            # PYTHONPATH (see the env below). `-a` is the non-deprecated spelling
+            # and accepts an import path just as well.
+            argv += ["-a", str(selection["import_path"])]
         for key, value in (selection.get("kwargs") or {}).items():
             rendered = _kwarg(value)
             if rendered == "":
                 continue
             argv += ["--agent-kwarg", f"{key}={rendered}"]
 
-        provider = options.get("provider", "openai")
+        # The provider prefix must match the wire protocol the *agent* speaks:
+        # `anthropic/...` makes harbor point Claude Code at an Anthropic endpoint,
+        # `openai/...` is what every other agent here consumes.
+        provider = options.get("provider") or (
+            "anthropic" if model.api == "anthropic" else "openai")
         argv += ["-m", f"{provider}/{model.model}"]
         argv += ["--n-concurrent", str(int(options.get(
             "n_concurrent", trial.limit or 1)))]
@@ -146,15 +178,29 @@ class TerminalBenchSuite(Suite):
             argv += ["--cpus", str(options["cpus"])]
         if options.get("memory"):
             argv += ["--memory", str(options["memory"])]
-        if options.get("env_backend"):
-            argv += ["--env", str(options["env_backend"])]
+        container = trial.container_runtime
+        env_backend = options.get("env_backend")
+        if env_backend is None and container == "apptainer":
+            # harbor's Apptainer backend is spelled 'singularity'.
+            env_backend = "singularity"
+        if env_backend:
+            argv += ["--env", str(env_backend)]
+        for kwarg in options.get("environment_kwargs") or ():
+            argv += ["--environment-kwarg", str(kwarg)]
+        if env_backend == "singularity" and not options.get("environment_kwargs"):
+            cache = options.get("singularity_image_cache_dir")
+            argv += ["--environment-kwarg",
+                     f"singularity_image_cache_dir={cache or os.path.join(run_dir, 'sif')}"]
         # Never wait for a human: a benchmark job starts unattended.
         argv += ["--yes"]
 
+        env = dict(adapter.env(model))
+        if not selection.get("agent"):
+            env.setdefault("PYTHONPATH", _repo_root())
         return PlannedCommand(
             label=f"harbor run {job_name}",
             argv=argv,
-            env=dict(adapter.env(model)),
+            env=env,
             cwd=workspace,
             timeout=options.get("harness_timeout_sec"),
             artifacts=(os.path.join(jobs_dir, job_name, "result.json"),
@@ -198,7 +244,8 @@ class TerminalBenchSuite(Suite):
                 continue
             argv += ["--agent-kwarg", f"{key}={rendered}"]
 
-        provider = options.get("provider", "openai")
+        provider = options.get("provider") or (
+            "anthropic" if model.api == "anthropic" else "openai")
         argv += ["--model", f"{provider}/{model.model}"]
         argv += ["--n-concurrent-trials", str(int(options.get(
             "n_concurrent_trials", trial.limit or 1)))]
@@ -248,8 +295,15 @@ class TerminalBenchSuite(Suite):
     def _collect_harbor(self, path):
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
+        entries = payload.get("trial_results") or []
+        if not entries:
+            # A job whose trials never started (no environment, missing image)
+            # carries no trial_results -- only per-eval exception stats. Those
+            # trials are outcomes too: dropping them would turn "every task
+            # errored" into "nothing ran", which is a different claim.
+            return self._collect_harbor_stats(payload)
         outcomes = []
-        for entry in payload.get("trial_results", []) or []:
+        for entry in entries:
             rewards = ((entry.get("verifier_result") or {}).get("rewards") or {})
             failed = bool(entry.get("exception_info"))
             if failed:
@@ -266,6 +320,28 @@ class TerminalBenchSuite(Suite):
                 extra={"rewards": rewards,
                        "trial_name": entry.get("trial_name")},
             ))
+        return outcomes
+
+    def _collect_harbor_stats(self, payload):
+        outcomes = []
+        stats = payload.get("stats") or {}
+        for eval_name, entry in (stats.get("evals") or {}).items():
+            for exception_type, task_names in (entry.get("exception_stats") or {}).items():
+                for task_name in task_names or []:
+                    outcomes.append(TrialOutcome(
+                        suite=self.name, instance_id=str(task_name),
+                        outcome=TrialOutcome.ERROR,
+                        detail=f"{exception_type}: trials never started "
+                               f"(eval {eval_name})",
+                        extra={"eval": eval_name,
+                               "exception_type": exception_type}))
+            if not entry.get("exception_stats") and not entry.get("n_errors"):
+                continue
+        if not outcomes and stats.get("n_errored_trials"):
+            outcomes.append(TrialOutcome(
+                suite=self.name, instance_id="<unknown>",
+                outcome=TrialOutcome.ERROR,
+                detail=f"{stats['n_errored_trials']} trial(s) errored"))
         return outcomes
 
     def _collect_tb(self, path):
@@ -300,6 +376,16 @@ class TerminalBenchSuite(Suite):
             path = os.path.join(base, run_id, "results.json")
             return path if os.path.isfile(path) else None
         return _newest(os.path.join(base, "*", "results.json"))
+
+
+def _repo_root():
+    """The directory that contains the ``benchmarks`` package.
+
+    Passed to harbor as ``PYTHONPATH`` so ``-a benchmarks.harbor_agents:...``
+    resolves there; harbor runs in whatever interpreter it was installed into.
+    """
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.dirname(here)
 
 
 def _newest(pattern):

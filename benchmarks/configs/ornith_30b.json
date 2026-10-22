@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "One fixed model, three agents, ~3 samples per dataset: the smoke matrix that",
+    "answers 'does the whole pipeline work end to end, and what does it score?'",
+    "",
+    "Every agent talks to the *same* vLLM server. Claude Code speaks the Anthropic",
+    "Messages API, which recent vLLM serves directly at /v1/messages; on older vLLM",
+    "put a LiteLLM proxy in front (see benchmarks/README.md) and set",
+    "ANTHROPIC_BASE_URL to the proxy. ANTHROPIC_API_KEY only has to be *set* -- the",
+    "local server ignores its value -- and nothing secret ever reaches the results.",
+    "",
+    "Datasets: terminal-bench@2.0 is what the harbor registry currently publishes",
+    "(2.1 can be pinned as soon as it appears: `harbor datasets list --legacy`),",
+    "and swebench-verified is the 500-instance human-validated set. limit=3 keeps a",
+    "smoke run to nine agent runs per suite.",
+    "",
+    "runtime='auto' means docker when there is a daemon, apptainer otherwise; pin it",
+    "to one of them when a comparison has to be byte-for-byte reproducible."
+  ],
+  "output_dir": "benchmarks/runs",
+  "concurrency": 1,
+  "runtime": "auto",
+  "timeouts": {
+    "instance_seconds": 3600,
+    "agent_seconds": 1800,
+    "test_seconds": 1800
+  },
+  "docker": {
+    "cpus": 4,
+    "memory": "16g",
+    "pids_limit": 2048,
+    "network": "bridge"
+  },
+  "env": {
+    "OPENAI_API_KEY": "local-vllm",
+    "ANTHROPIC_API_KEY": "local-vllm",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:30000",
+    "ANTHROPIC_MODEL": "ornith-ai/Ornith-1.5-35B-A3B"
+  },
+  "suites": [
+    {
+      "name": "terminal-bench",
+      "dataset": "terminal-bench",
+      "version": "2.0",
+      "limit": 3,
+      "options": {
+        "harness": "harbor",
+        "n_concurrent": 1,
+        "_provider": "derived per model: anthropic/ for the Claude Code model, openai/ otherwise",
+        "singularity_image_cache_dir": "/tmp/bench-sif"
+      }
+    },
+    {
+      "name": "swebench",
+      "dataset": "SWE-bench/SWE-bench_Verified",
+      "split": "test",
+      "limit": 3,
+      "options": {
+        "max_workers": 1,
+        "test_timeout_sec": 1800,
+        "skip_evaluation": false
+      }
+    }
+  ],
+  "models": [
+    {
+      "name": "ornith-35b-a3b",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "openai",
+      "notes": "vLLM on the H200: vllm serve ornith-ai/Ornith-1.5-35B-A3B --port 30000"
+    },
+    {
+      "name": "ornith-35b-a3b-anthropic",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "notes": "the same server over the Anthropic Messages API (/v1/messages); Claude Code speaks this"
+    }
+  ],
+  "agents": [
+    {
+      "name": "mini-code",
+      "settings": [
+        "default"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
+    },
+    {
+      "name": "claude-code",
+      "settings": [
+        "bypass-permissions"
+      ],
+      "models": [
+        "ornith-35b-a3b-anthropic"
+      ]
+    },
+    {
+      "name": "pi",
+      "settings": [
+        "default"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
+    }
+  ]
+}
