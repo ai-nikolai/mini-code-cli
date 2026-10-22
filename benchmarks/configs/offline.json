@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "No keys, no network, no GPU: the config used by the test suite and by CI.",
+    "`python -m benchmarks plan --config benchmarks/configs/offline.json` must",
+    "work on a bare machine, which is what keeps `plan` honest.",
+    "Run it with `--allow-host` to exercise the runner end to end against the",
+    "mock agent (it only touches the workspace)."
+  ],
+  "output_dir": "benchmarks/runs",
+  "concurrency": 1,
+  "timeouts": {
+    "instance_seconds": 120,
+    "agent_seconds": 60,
+    "test_seconds": 60
+  },
+  "suites": [
+    {
+      "name": "terminal-bench",
+      "dataset": "terminal-bench",
+      "version": "2.1",
+      "limit": 1
+    }
+  ],
+  "models": [
+    {
+      "name": "none",
+      "model": "mock/none",
+      "base_url": "http://127.0.0.1:9",
+      "api": "openai"
+    }
+  ],
+  "agents": [
+    {
+      "name": "mock",
+      "settings": ["empty", "touch"]
+    }
+  ]
+}

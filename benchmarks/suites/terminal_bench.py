@@ -1,0 +1,340 @@
+"""Terminal-Bench suite: wraps the official harness, either generation of it.
+
+Terminal-Bench ships **two** harnesses, and which one is correct depends on the
+dataset version:
+
+``harbor`` (Terminal-Bench 2.x, the current one)
+    ``harbor run -d terminal-bench@2.1 -a claude-code -m anthropic/...``
+    Harbor is the official framework for Terminal-Bench 2.0/2.1 (it is by the
+    Terminal-Bench authors) and it also ships first-class agents for Claude Code
+    and Pi, which is what makes those two comparable on the same task set.
+
+``tb`` (Terminal-Bench 1.x / ``terminal-bench-core``)
+    ``tb run --dataset terminal-bench-core==0.1.1 --agent-import-path ...``
+    Pinned against ``terminal-bench`` 0.2.18.
+
+Both are *wrapped*, never reimplemented: the harness builds the task container,
+drives the agent inside it and runs the task's own tests. This adapter decides
+what to pass and reads the result back.
+
+Result files differ too, so :meth:`collect` understands both:
+
+* harbor: ``<jobs-dir>/<job-name>/result.json`` ->
+  ``{"trial_results": [{"task_name", "verifier_result": {"rewards": {...}},
+  "exception_info"}]}``
+* tb: ``<output-path>/<run-id>/results.json`` ->
+  ``{"results": [{"task_id", "is_resolved", "failure_mode"}]}``
+"""
+import json
+import os
+
+from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
+
+
+class TerminalBenchSuite(Suite):
+    name = "terminal-bench"
+    install_hint = ("pip install harbor   (Terminal-Bench 2.x)  |  "
+                    "uv tool install terminal-bench   (1.x, the 'tb' CLI)")
+    results_filename = "result.json"
+
+    # -- which harness ---------------------------------------------------
+
+    def harness(self, spec=None):
+        """``"harbor"`` (default, 2.x) or ``"tb"`` (1.x/core).
+
+        An explicitly passed spec wins; otherwise the spec this suite was built
+        for decides. That matters for :meth:`dataset_label`, which is also called
+        with a bare spec from the report side.
+        """
+        for candidate in (spec, getattr(self, "spec", None)):
+            options = (candidate.options if candidate is not None else None) or {}
+            if "harness" in options:
+                return str(options["harness"])
+        return "harbor"
+
+    def binary(self, spec=None):
+        from ..agents.base import which
+
+        if self.harness(spec) == "harbor":
+            return which("harbor") or which("hr")
+        return which("tb") or which("terminal-bench")
+
+    def dataset_label(self, spec):
+        """``dataset@version`` for harbor, ``dataset==version`` for tb."""
+        if not spec.version:
+            return str(spec.dataset or "")
+        joiner = "@" if self.harness(spec) == "harbor" else "=="
+        return f"{spec.dataset}{joiner}{spec.version}"
+
+    # -- preflight -------------------------------------------------------
+
+    def preflight(self, model, require_binary=True):
+        spec = getattr(self, "spec", None)
+        problems = []
+        if require_binary and not self.binary(spec):
+            name = "harbor" if self.harness(spec) == "harbor" else "tb"
+            problems.append(f"suite 'terminal-bench': the {name!r} CLI is not on "
+                            f"PATH ({self.install_hint})")
+        if require_binary and not self._docker_available():
+            problems.append("suite 'terminal-bench': docker is not available "
+                            "(every task runs in a container)")
+        return problems
+
+    def notes(self, model):
+        spec = getattr(self, "spec", None)
+        notes = [
+            "tasks run inside their own containers: the agent must be able to "
+            "reach the model endpoint from there (bind vLLM to 0.0.0.0 and use "
+            "a host address the container can route to)",
+        ]
+        binary = self.binary(spec)
+        if not binary:
+            name = "harbor" if self.harness(spec) == "harbor" else "tb"
+            notes.append(f"{name!r} is not installed here; `run` will fail, "
+                         f"`plan` works")
+        if self.harness(spec) == "harbor":
+            notes.append("Terminal-Bench 2.x is executed by harbor; `harbor "
+                         "datasets list` shows the dataset@version strings")
+        return notes
+
+    @staticmethod
+    def _docker_available():
+        import shutil
+
+        return shutil.which("docker") is not None
+
+    # -- commands --------------------------------------------------------
+
+    def commands(self, trial, workspace, run_dir, adapter):
+        if self.harness(trial.suite) == "harbor":
+            return [self._harbor_command(trial, workspace, run_dir, adapter)]
+        return [self._tb_command(trial, workspace, run_dir, adapter)]
+
+    def _harbor_command(self, trial, workspace, run_dir, adapter):
+        """``harbor run ...`` -- one job per trial; harbor parallelises inside."""
+        spec = trial.suite
+        model = trial.model
+        options = spec.options or {}
+        jobs_dir = self.ensure_dir(os.path.join(run_dir, "harbor"))
+        job_name = trial.run_id
+
+        argv = [self.binary(spec) or "harbor", "run",
+                "-d", self.dataset_label(spec),
+                "--jobs-dir", str(jobs_dir),
+                "--job-name", job_name]
+
+        selection = adapter.harbor_selection(model)
+        if selection.get("agent"):
+            argv += ["-a", str(selection["agent"])]
+        else:
+            argv += ["--agent-import-path", str(selection["import_path"])]
+        for key, value in (selection.get("kwargs") or {}).items():
+            rendered = _kwarg(value)
+            if rendered == "":
+                continue
+            argv += ["--agent-kwarg", f"{key}={rendered}"]
+
+        provider = options.get("provider", "openai")
+        argv += ["-m", f"{provider}/{model.model}"]
+        argv += ["--n-concurrent", str(int(options.get(
+            "n_concurrent", trial.limit or 1)))]
+        if trial.limit:
+            argv += ["--n-tasks", str(int(trial.limit))]
+        if options.get("max_retries"):
+            argv += ["--max-retries", str(int(options["max_retries"]))]
+        if options.get("cpus"):
+            argv += ["--cpus", str(options["cpus"])]
+        if options.get("memory"):
+            argv += ["--memory", str(options["memory"])]
+        if options.get("env_backend"):
+            argv += ["--env", str(options["env_backend"])]
+        # Never wait for a human: a benchmark job starts unattended.
+        argv += ["--yes"]
+
+        return PlannedCommand(
+            label=f"harbor run {job_name}",
+            argv=argv,
+            env=dict(adapter.env(model)),
+            cwd=workspace,
+            timeout=options.get("harness_timeout_sec"),
+            artifacts=(os.path.join(jobs_dir, job_name, "result.json"),
+                       os.path.join(jobs_dir, job_name, "config.json")),
+            notes=[f"dataset: {self.dataset_label(spec)}",
+                   f"agent: {trial.agent.label}",
+                   "harbor writes <jobs-dir>/<job-name>/result.json"],
+        )
+
+    def _tb_command(self, trial, workspace, run_dir, adapter):
+        """``tb run ...`` (Terminal-Bench 1.x / core datasets)."""
+        spec = trial.suite
+        model = trial.model
+        runs_dir = self.ensure_dir(os.path.join(run_dir, "tb"))
+        run_id = trial.run_id
+        options = spec.options or {}
+
+        argv = [self.binary(spec) or "tb", "run", "--run-id", run_id,
+                "--output-path", str(runs_dir)]
+
+        if options.get("use_legacy_dataset_flags"):
+            if spec.dataset:
+                argv += ["--dataset-name", spec.dataset]
+            if spec.version:
+                argv += ["--dataset-version", spec.version]
+        else:
+            argv += ["--dataset", self.dataset_label(spec)]
+        if options.get("dataset_path"):
+            argv += ["--dataset-path", str(options["dataset_path"])]
+
+        selection = adapter.harness_selection(model)
+        if selection.get("agent"):
+            argv += ["--agent", str(selection["agent"])]
+        else:
+            argv += ["--agent-import-path", str(selection["import_path"])]
+        for key, value in (selection.get("kwargs") or {}).items():
+            rendered = _kwarg(value)
+            if rendered == "":
+                # An empty kwarg would only be noise in the printed command, and
+                # tb would pass an empty string where the agent expects a default.
+                continue
+            argv += ["--agent-kwarg", f"{key}={rendered}"]
+
+        provider = options.get("provider", "openai")
+        argv += ["--model", f"{provider}/{model.model}"]
+        argv += ["--n-concurrent-trials", str(int(options.get(
+            "n_concurrent_trials", trial.limit or 1)))]
+        argv += ["--n-attempts", str(int(options.get("n_attempts", 1)))]
+        argv += ["--global-agent-timeout-sec", str(int(
+            options.get("agent_timeout_sec", _timeout(trial, "agent_seconds"))))]
+        argv += ["--global-test-timeout-sec", str(int(
+            options.get("test_timeout_sec", _timeout(trial, "test_seconds"))))]
+        if trial.limit:
+            argv += ["--n-tasks", str(int(trial.limit))]
+        for task_id in spec.task_ids:
+            argv += ["--task-id", task_id]
+        for excluded in options.get("exclude_task_ids", ()):
+            argv += ["--exclude-task-id", str(excluded)]
+        if options.get("no_rebuild"):
+            argv += ["--no-rebuild"]
+        if options.get("cleanup"):
+            argv += ["--cleanup"]
+
+        return PlannedCommand(
+            label=f"tb run {run_id}",
+            argv=argv,
+            env=dict(adapter.env(model)),
+            cwd=workspace,
+            timeout=options.get("harness_timeout_sec"),
+            artifacts=(os.path.join(runs_dir, run_id, "results.json"),
+                       os.path.join(runs_dir, run_id, "run_metadata.json")),
+            notes=[f"dataset: {self.dataset_label(spec)}",
+                   f"agent: {trial.agent.label}"],
+        )
+
+    # -- results ---------------------------------------------------------
+
+    def collect(self, run_dir, run_id=None):
+        """Read whichever harness's result file exists under ``run_dir``."""
+        harbor_path = self._harbor_results_path(run_dir, run_id)
+        if harbor_path:
+            return self._collect_harbor(harbor_path)
+        tb_path = self._tb_results_path(run_dir, run_id)
+        if tb_path:
+            return self._collect_tb(tb_path)
+        raise SuiteError(
+            f"terminal-bench: no results under {run_dir} (looked for "
+            f"harbor/<job>/result.json and tb/<run>/results.json); did the run "
+            f"finish?")
+
+    def _collect_harbor(self, path):
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        outcomes = []
+        for entry in payload.get("trial_results", []) or []:
+            rewards = ((entry.get("verifier_result") or {}).get("rewards") or {})
+            failed = bool(entry.get("exception_info"))
+            if failed:
+                outcome = TrialOutcome.ERROR
+            elif rewards and max(float(v) for v in rewards.values()) >= 1.0:
+                outcome = TrialOutcome.RESOLVED
+            else:
+                outcome = TrialOutcome.UNRESOLVED
+            outcomes.append(TrialOutcome(
+                suite=self.name,
+                instance_id=str(entry.get("task_name") or entry.get("trial_name") or ""),
+                outcome=outcome,
+                detail=_exception_detail(entry),
+                extra={"rewards": rewards,
+                       "trial_name": entry.get("trial_name")},
+            ))
+        return outcomes
+
+    def _collect_tb(self, path):
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        outcomes = []
+        for entry in payload.get("results", []) or []:
+            resolved = bool(entry.get("is_resolved"))
+            outcomes.append(TrialOutcome(
+                suite=self.name,
+                instance_id=str(entry.get("task_id") or entry.get("trial_name") or ""),
+                outcome=(TrialOutcome.RESOLVED if resolved
+                         else TrialOutcome.UNRESOLVED),
+                detail=str(entry.get("failure_mode") or ""),
+                artifacts=[entry["recording_path"]] if entry.get("recording_path") else [],
+                extra={"trial_name": entry.get("trial_name"),
+                       "input_tokens": entry.get("total_input_tokens"),
+                       "output_tokens": entry.get("total_output_tokens")},
+            ))
+        return outcomes
+
+    def _harbor_results_path(self, run_dir, job_name=None):
+        base = os.path.join(run_dir, "harbor")
+        if job_name:
+            path = os.path.join(base, job_name, "result.json")
+            return path if os.path.isfile(path) else None
+        return _newest(os.path.join(base, "*", "result.json"))
+
+    def _tb_results_path(self, run_dir, run_id=None):
+        base = os.path.join(run_dir, "tb")
+        if run_id:
+            path = os.path.join(base, run_id, "results.json")
+            return path if os.path.isfile(path) else None
+        return _newest(os.path.join(base, "*", "results.json"))
+
+
+def _newest(pattern):
+    """The most recently modified file matching a one-level glob, or ``None``."""
+    import glob
+
+    candidates = [(os.path.getmtime(p), p) for p in glob.glob(pattern)]
+    return max(candidates)[1] if candidates else None
+
+
+def _exception_detail(entry):
+    info = entry.get("exception_info") or {}
+    if not info:
+        return ""
+    return str(info.get("exception_type") or info.get("message") or "")
+
+
+def _kwarg(value):
+    """Serialise an ``--agent-kwarg`` value.
+
+    Lists (the argv template) go over as JSON: the harness parses JSON, strings
+    and booleans from this value, and JSON is the only lossless spelling for a
+    list of arguments that may themselves contain ``=`` or spaces.
+    """
+    if isinstance(value, (list, tuple)):
+        return json.dumps(list(value))
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True) if value else ""
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _timeout(trial, key):
+    """The trial's budget for ``key``, with the config's default as a floor."""
+    return (trial.timeouts or {}).get(key, 3_600 if key == "agent_seconds" else 1_800)

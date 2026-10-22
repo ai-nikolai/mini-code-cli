@@ -5,6 +5,7 @@ pypi_upload.sh
 __pycache__
 *.egg-info
 dist
+build/
 
 history.json
 tools*.json
@@ -18,3 +19,14 @@ CURRENT_PLAN.md
 
 vllm.log
 .mini_tests/
+
+# --- benchmarks ---------------------------------------------------------------
+# Run artifacts, cached datasets, container build contexts and generated
+# predictions are large or machine-specific; nothing here belongs in the repo.
+benchmarks/runs/
+benchmarks/datasets/
+benchmarks/.cache/
+benchmarks/**/build_context/
+*.predictions.jsonl
+predictions.jsonl
+runs/
