@@ -209,7 +209,7 @@ class TokenEstimateTest(unittest.TestCase):
 
     def test_a_malformed_message_never_raises(self):
         self.assertEqual(tokens.estimate_message_tokens("not a dict"), 0)
-        self.assertEqual(tokens.estimate_message_tokens({"role": "user"}), 
+        self.assertEqual(tokens.estimate_message_tokens({"role": "user"}),
                          tokens.MESSAGE_OVERHEAD_TOKENS)
 
     def test_transcript_estimate_grows_with_the_transcript(self):

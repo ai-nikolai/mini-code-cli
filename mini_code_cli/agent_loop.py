@@ -145,7 +145,7 @@ def parse_args():
         args.sudo = True
         args.auto_mode = True
         args.enable_skills = True
-    
+
     if args.all_last:
         args.load_last_session = True
 
@@ -397,11 +397,11 @@ class AgentSession:
         self.server_url = f"{args.url}"
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
         self.model = self._resolve_model(args)
-        
+
         self._register_tools(args)
 
         # report_path is set on a *sub-agent child* session (by
-        # SubAgent._build_child_args) 
+        # SubAgent._build_child_args)
         self.report_path = getattr(args, "report_path", None)
 
         self.plan_mode = bool(getattr(self.args, "plan", False))
@@ -438,7 +438,7 @@ class AgentSession:
         # offer (a piped/non-TTY stdin would otherwise answer that offer with EOF
         # and exit without doing anything). --restore-session still wins.
         self.load_last_session = bool(getattr(self.args, "load_last_session", False))
-        
+
     def start_session(self):
         """Restore a previous session when there is one, else start fresh.
 
@@ -1481,7 +1481,7 @@ class AgentSession:
         # Show a "… calling tool" spinner (in-place, non-scrolling) while the
         # tool(s) execute, mirroring the thinking spinner that covers the LLM
         # call. Always stopped (finally) so it can never leak into the next turn.
-        
+
         try:
             for call in tool_calls:
                 self._run_one_tool_call(call)

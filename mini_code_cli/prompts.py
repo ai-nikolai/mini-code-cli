@@ -43,7 +43,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
         base_prompt = "You are a helpful AI assistant without any tools."
         end_prompt = ""
 
-        
+
     allowed_dir_prompt = ""
     if allowed_dir:
         allowed_dir_prompt = f"\nThe path you are allowed to operate in is called: {allowed_dir}"
@@ -55,8 +55,8 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
     plan_mode_prompt = ""
     if plan_mode:
         plan_mode_prompt = "\n" + plan_instructions(session_dir)
-    
-    
+
+
     prompt = f"""
 {base_prompt}
 {tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{skills_prompt}

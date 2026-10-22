@@ -247,6 +247,21 @@ python3 tests/test_interactive.py
 python3 tests/test_subagents.py
 ```
 
+### Linting
+
+There is no third-party linter to install: `scripts/lint.py` is itself standard-library only
+and checks that every `*.py` under `mini_code_cli/`, `tests/` and `scripts/` compiles, has
+unambiguous indentation (`tabnanny`), and is tidy (no trailing whitespace, no tab characters,
+a newline at end of file). It exits non-zero if it reports anything:
+
+```bash
+python3 scripts/lint.py          # lint the defaults
+python3 scripts/lint.py tests    # ...or specific files / directories
+```
+
+CI (`.github/workflows/ci.yml`) runs exactly these two commands on every push and pull request:
+`python3 scripts/lint.py` and the `unittest discover` line above.
+
 The tests focus on the parts of the agent that are easy to get wrong and worth guarding:
 
 The suite is hermetic: every test builds its own temporary `--allowed-dir` and cache dir, so
