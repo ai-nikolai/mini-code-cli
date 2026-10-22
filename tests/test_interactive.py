@@ -2,8 +2,15 @@
 
 These cover the parts of the CLI a user drives directly rather than the model:
 
-  * the slash commands (``/history``, ``/history <n>``, ``/reset [<n>]``,
-    ``/plan``, ``/clear``) -- handled in place, so they never reach the LLM;
+  * the slash commands (``/history``, ``/history <n>``, ``/history last``,
+    ``/reset [<n>|last]``, ``/plan``, ``/clear``) -- handled in place, so they
+    never reach the LLM;
+  * history navigation and rewinding as an *on-disk* contract: turn-selector
+    validation, the destructive-by-explicit-command rule, deletion of the
+    segments a rewind moved past, rollback when a write fails, and a restore
+    that must not resurrect a rewound-away tail;
+  * robustness of a damaged session folder: corrupt or empty segments, and a
+    restore that refuses (rather than repairs) a recorder it cannot trust;
   * the ``.mini`` latest-session pointer: its readers, its writer, and the
     rule that a real session records it while a background (sub-agent) one does not;
   * the shared ``oneline`` helper (one implementation, three callers);
@@ -25,8 +32,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import persistence, prompts, shell_safety_utils, ui, utils
+from mini_code_cli import agent_loop, persistence, prompts, shell_safety_utils, ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
+from mini_code_cli.config import compaction_budget
 
 from test_e2e_agent_loop import USAGE, StubLLM, make_args, run_loop, tool_call
 
@@ -72,6 +80,61 @@ class _SessionCase(unittest.TestCase):
         run_loop(session, "read the file", stub)
         return session
 
+    # -- history helpers (shared by the rewind / robustness tests) ---------
+
+    def session_dir(self, session):
+        """The on-disk folder backing ``session``."""
+        return os.path.join(self.cache_dir, session.unique_id)
+
+    def segment_names(self, session):
+        """The history/usage files actually present for ``session``, sorted."""
+        return sorted(n for n in os.listdir(self.session_dir(session))
+                      if n.startswith("history_") or n.startswith("usage_"))
+
+    def snapshot(self, session):
+        """Every file in the session folder, name -> raw text, for "unchanged" checks."""
+        directory = self.session_dir(session)
+        texts = {}
+        for name in sorted(os.listdir(directory)):
+            with open(os.path.join(directory, name), "r", encoding="utf-8") as f:
+                texts[name] = f.read()
+        return texts
+
+    def write_segment(self, session, index, messages):
+        """Write one ``history_{index}.json`` for ``session``."""
+        return persistence.save_history(messages, self.cache_dir,
+                                        session.unique_id, index)
+
+    def step(self, session, queue):
+        """Drive one LLM step against a scripted queue (no user input involved)."""
+        stub = StubLLM(queue)
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            session._step()
+        return stub
+
+    def make_two_segment_session(self):
+        """A real session whose recorder spans ``history_0.json`` and ``history_1.json``.
+
+        One ordinary turn is recorded in segment 0; the compaction budget is then
+        tightened to a single token so the next step rolls over (a *token*
+        triggered compaction is the only way a new segment ever starts) and
+        records its turns in segment 1. The result is the state a cross-segment
+        ``/reset`` has to handle: turns recorded in both segments, segment 1 live.
+        """
+        session = self.build_session(turns=1)
+        self.assertEqual(persistence.history_segment_indices(self.session_dir(session)), [0])
+
+        session.compaction_budget = compaction_budget(
+            model="test-model", explicit_limit=1, max_output_tokens=None)
+        self.step(session, [("A summary of the start.", [], USAGE),
+                            ("After the compaction.", [], USAGE)])
+
+        self.assertEqual(persistence.history_segment_indices(self.session_dir(session)),
+                         [0, 1])
+        self.assertEqual(session.history_index, 1)
+        self.assertEqual([r["history_file"] for r in session.summary], [0, 0, 1, 1])
+        return session
+
 
 # ---------------------------------------------------------------------------
 # slash commands
@@ -115,10 +178,46 @@ class SlashCommandTest(_SessionCase):
         # ... the recorder dropped the later turns ...
         self.assertEqual(len(session.summary), 1)
         # ... and the truncation was persisted, so a restore sees the same state.
-        loaded = persistence.load_history_from_dir(os.path.join(self.cache_dir, session.unique_id))
+        loaded = persistence.load_history_from_dir(
+            os.path.join(self.cache_dir, session.unique_id), session.history_index)
         self.assertEqual([m.get("content") for m in loaded],
                          [m.get("content") for m in session.messages])
         self.assertIn("Reset to turn 1", self.output())
+
+    # -- turn selectors: one rule for /history and /reset ------------------
+
+    def test_history_rejects_zero_negative_and_out_of_range_turns(self):
+        """``summary[int(arg) - 1]`` had no lower bound: ``/history 0`` showed
+        the *last* turn and ``/history -2`` the third-to-last, silently."""
+        session = self.build_session(turns=1)
+        for bad in ("0", "-1", "-2", "99"):
+            with self.subTest(turn=bad):
+                self.assertTrue(session._handle_command("/history " + bad))
+        self.assertEqual(self.output().count("No such turn"), 4)
+
+    def test_history_rejects_a_non_numeric_turn(self):
+        session = self.build_session(turns=1)
+        self.assertTrue(session._handle_command("/history junk"))
+        self.assertIn("No such turn 'junk'", self.output())
+
+    def test_history_last_shows_the_most_recent_turn(self):
+        session = self.build_session(turns=1)
+        self.assertTrue(session._handle_command("/history last"))
+        self.assertNotIn("No such turn", self.output())
+        self.assertIn("Final answer.", self.output())
+
+    def test_reset_rejects_an_invalid_turn_without_touching_anything(self):
+        session = self.build_session(turns=1)
+        before = self.snapshot(session)
+        messages = [m.get("content") for m in session.messages]
+
+        for bad in ("0", "-2", "junk"):
+            with self.subTest(turn=bad):
+                self.assertTrue(session._handle_command("/reset " + bad))
+
+        self.assertEqual(self.output().count("No such turn"), 3)
+        self.assertEqual([m.get("content") for m in session.messages], messages)
+        self.assertEqual(self.snapshot(session), before)
 
     def test_plan_command_renders_goal_and_plan(self):
         session = self.build_session(plan=True)
@@ -149,6 +248,283 @@ class SlashCommandTest(_SessionCase):
     def test_plain_text_is_not_a_command(self):
         session = self.build_session()
         self.assertFalse(session._handle_command("just a question"))
+
+
+# ---------------------------------------------------------------------------
+# rewinding: the on-disk contract
+# ---------------------------------------------------------------------------
+
+class HistoryRewindRegressionTest(_SessionCase):
+    """``/reset`` must stick: across a restart, across segments, on any disk.
+
+    The bugs these pin down all shared one shape -- the in-memory session was
+    rewound while the *disk* kept (or was missing) something else, so a later
+    restore silently undid the rewind or shortened the transcript.
+    """
+
+    def test_cross_segment_reset_deletes_higher_segments(self):
+        """A rewind past a compaction removes the segments it moved past.
+
+        Leaving ``history_1.json`` behind was the actual bug: a restore then
+        picked the newest segment, so the orphan resurrected exactly the turns
+        the user had just rewound away.
+        """
+        session = self.make_two_segment_session()
+        session._persist()                     # as a quit would: flush segment 1 + usage_1
+        self.assertEqual(self.segment_names(session),
+                         ["history_0.json", "history_1.json",
+                          "usage_0.json", "usage_1.json"])
+
+        self.assertTrue(session._handle_command("/reset 1"))
+
+        self.assertEqual(self.segment_names(session), ["history_0.json", "usage_0.json"])
+        self.assertEqual(session.history_index, 0)
+        self.assertIn("Removed 2 later history/usage segment file(s).", self.output())
+
+    def test_cross_segment_reset_survives_a_restart(self):
+        session = self.make_two_segment_session()
+        session._persist()
+        self.assertIn("After the compaction.",
+                      [m.get("content") for m in session.messages])
+
+        self.assertTrue(session._handle_command("/reset 1"))
+        kept = [m.get("content") for m in session.messages]
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.restore_session = self.session_dir(session)
+        restored = AgentSession(args, console=self.console())
+        with mock.patch.object(AgentSession, "show_resume_choice", return_value="new"):
+            restored.start_session()
+
+        self.assertEqual([m.get("content") for m in restored.messages], kept)
+        self.assertNotIn("After the compaction.",
+                         [m.get("content") for m in restored.messages])
+        self.assertEqual(len(restored.summary), 1)          # the dropped turns are gone
+        self.assertEqual(restored.history_index, 0)         # and we resume on segment 0
+
+    def test_reset_reloads_segment_usage_and_preserves_the_session_total(self):
+        """A rewind does not un-spend tokens, and must not cross-wire segments."""
+        session = self.make_two_segment_session()
+        session._persist()
+        directory = self.session_dir(session)
+        segment_0 = persistence.load_usage_segment(directory, 0)
+        thread_total = dict(session.total_usage)
+        self.assertNotEqual(segment_0, persistence.load_usage_segment(directory, 1))
+
+        self.assertTrue(session._handle_command("/reset 1"))
+
+        # The segment counters are the *target* segment's, so the next save cannot
+        # write the later segment's numbers over history_0's usage file.
+        self.assertEqual(session.token_stats, segment_0)
+        self.assertEqual(session.total_usage, thread_total)
+        self.assertEqual(persistence.load_total_usage_from_dir(directory), thread_total)
+
+    def test_reset_rolls_back_when_the_write_fails(self):
+        """A failed persist leaves the session exactly as it was (no half-rewind)."""
+        session = self.make_two_segment_session()
+        session._persist()
+        before = self.snapshot(session)
+        messages = [m.get("content") for m in session.messages]
+        summary = [dict(r) for r in session.summary]
+        index = session.history_index
+
+        with mock.patch.object(agent_loop, "save_history",
+                               side_effect=OSError("No space left on device")):
+            self.assertTrue(session._handle_command("/reset 1"))
+
+        self.assertIn("Could not persist the rewind", self.output())
+        self.assertEqual([m.get("content") for m in session.messages], messages)
+        self.assertEqual([dict(r) for r in session.summary], summary)
+        self.assertEqual(session.history_index, index)
+        self.assertEqual(self.snapshot(session), before)
+
+    def test_reset_last_is_accepted(self):
+        session = self.build_session(turns=1)
+        before = [m.get("content") for m in session.messages]
+
+        self.assertTrue(session._handle_command("/reset last"))
+
+        self.assertNotIn("No such turn", self.output())
+        self.assertEqual([m.get("content") for m in session.messages], before)
+
+    def test_bare_reset_on_a_settled_transcript_reports_already_at_turn(self):
+        """No argument, nothing to drop: say so and write nothing at all."""
+        session = self.build_session(turns=1)
+        before = self.snapshot(session)
+
+        self.assertTrue(session._handle_command("/reset"))
+
+        self.assertIn("Already at turn 2", self.output())
+        self.assertIn("nothing to rewind", self.output())
+        self.assertEqual(self.snapshot(session), before)
+
+    def test_bare_reset_with_an_unrecorded_tail_warns_and_does_not_truncate(self):
+        """Messages that no turn records must never be destroyed by a bare /reset."""
+        session = self.build_session(turns=1)
+        session.messages.append({"role": "user", "content": "never recorded"})
+        before = [m.get("content") for m in session.messages]
+
+        self.assertTrue(session._handle_command("/reset"))
+
+        self.assertIn("were never recorded", self.output())
+        self.assertIn("refusing to discard", self.output())
+        self.assertEqual([m.get("content") for m in session.messages], before)
+
+    def test_explicit_reset_forces_the_rewind_past_an_unrecorded_tail(self):
+        """...but an explicit turn is an explicit instruction, so it does rewind."""
+        session = self.build_session(turns=1)
+        session.messages.append({"role": "user", "content": "never recorded"})
+
+        self.assertTrue(session._handle_command("/reset 1"))
+
+        self.assertIn("Reset to turn 1", self.output())
+        self.assertEqual(len(session.messages), session.summary[0]["index"] + 1)
+        self.assertNotIn("never recorded", [m.get("content") for m in session.messages])
+
+    def test_every_completed_step_records_a_turn(self):
+        """Even an empty reply is recorded, so a bare /reset has no phantom tail."""
+        session = self.build_session(turns=1)
+        count = len(session.summary)
+
+        self.step(session, [("", [], USAGE)])          # no text, no tool calls
+
+        self.assertEqual(len(session.summary), count + 1)
+        self.assertEqual(session.summary[-1]["what"], "assistant (no response)")
+        self.assertEqual(session.summary[-1]["index"], len(session.messages) - 1)
+
+    def test_shutdown_names_the_files_that_really_exist(self):
+        session = self.make_two_segment_session()
+        session._persist()
+        session._handle_command("/reset 1")
+
+        session.shutdown()
+
+        self.assertIn("history_0.json + summary_history.json", self.output())
+        self.assertNotIn("history_0..", self.output())
+        self.assertEqual([n for n in os.listdir(self.session_dir(session))
+                          if n.startswith("history_")], ["history_0.json"])
+
+
+# ---------------------------------------------------------------------------
+# robustness: a damaged session folder must degrade, never crash
+# ---------------------------------------------------------------------------
+
+class HistoryRobustnessTest(_SessionCase):
+    """Corrupt segments, untrustworthy recorders, unrestorable folders.
+
+    A folder this version cannot read is *refused* -- one note saying why, then a
+    clean fresh session. Nothing is repaired, renumbered or rebuilt, because a
+    repaired recorder silently disagrees with the transcripts on disk.
+    """
+
+    def test_history_and_reset_survive_a_corrupt_segment(self):
+        session = self.make_two_segment_session()
+        session._persist()
+        # Corrupt the *older* segment: the live one is served from memory.
+        with open(os.path.join(self.session_dir(session), "history_0.json"), "w") as f:
+            f.write("{not json")
+
+        self.assertTrue(session._handle_command("/history 1"))
+        self.assertIn("Could not load the history segment", self.output())
+
+        messages = [m.get("content") for m in session.messages]
+        before = self.snapshot(session)
+        self.assertTrue(session._handle_command("/reset 1"))
+        self.assertIn("session is unchanged", self.output())
+        self.assertEqual([m.get("content") for m in session.messages], messages)
+        self.assertEqual(self.snapshot(session), before)
+
+    def test_an_empty_or_absurd_segment_index_is_unusable(self):
+        session = self.build_session(turns=1)
+        self.write_segment(session, 5, [])
+
+        self.assertIsNone(session._load_segment(5))       # empty list: not a segment
+        self.assertIsNone(session._load_segment(-1))
+        self.assertIsNone(session._load_segment("junk"))
+        self.assertIsNone(session._load_segment(404))     # missing file
+
+    def _restore(self, session):
+        """Restore ``session``'s folder and return (the new session, its folder)."""
+        folder = self.session_dir(session)
+        args = make_args(self.workdir, self.cache_dir)
+        args.restore_session = folder
+        restored = AgentSession(args, console=self.console())
+        restored.start_session()
+        return restored, folder
+
+    def test_a_junk_recorder_is_refused_not_repaired(self):
+        """Dropping/renumbering records used to shift every later turn number."""
+        session = self.build_session(turns=1)
+        persistence.save_summary(
+            [None, "nope", {"turn": "x", "index": -5},
+             {"what": "assistant", "history_file": 0, "index": 1}],
+            self.cache_dir, session.unique_id)
+
+        restored, _ = self._restore(session)
+
+        self.assertNotEqual(restored.unique_id, session.unique_id)   # a fresh session
+        self.assertEqual(restored.summary, [])
+        self.assertEqual([m["role"] for m in restored.messages], ["system"])
+        self.assertIn("Cannot restore", self.output())
+        self.assertIn("record 1 is not a JSON object", self.output())
+
+    def test_a_folder_without_a_recorder_is_not_restored(self):
+        """No summary_history.json: refused, not rebuilt from the transcript."""
+        folder = os.path.join(self.cache_dir, "bare-session")
+        os.makedirs(folder)
+        messages = [{"role": "system", "content": "S"},
+                    {"role": "user", "content": "q1"},
+                    {"role": "assistant", "content": "a1"}]
+        persistence.save_history(messages, self.cache_dir, "bare-session", 1)
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.restore_session = folder
+        restored = AgentSession(args, console=self.console())
+        restored.start_session()
+
+        self.assertNotEqual(restored.unique_id, "bare-session")
+        self.assertEqual(restored.summary, [])
+        self.assertIn("no readable summary_history.json", self.output())
+        # The refused folder is left untouched: nothing was written into it.
+        self.assertEqual(sorted(os.listdir(folder)), ["history_1.json"])
+
+    def test_an_unreadable_recorder_is_refused(self):
+        session = self.build_session(turns=1)
+        with open(os.path.join(self.session_dir(session), "summary_history.json"), "w") as f:
+            f.write("{not json")
+
+        restored, _ = self._restore(session)
+
+        self.assertNotEqual(restored.unique_id, session.unique_id)
+        self.assertIn("no readable summary_history.json", self.output())
+
+    def test_a_recorder_pointing_at_a_missing_segment_is_refused(self):
+        """The last record names where the session is: no guessing, no scan."""
+        session = self.build_session(turns=1)
+        self.assertGreaterEqual(len(session.summary), 1)
+        os.unlink(os.path.join(self.session_dir(session), "history_0.json"))
+
+        restored, _ = self._restore(session)
+
+        self.assertNotEqual(restored.unique_id, session.unique_id)
+        self.assertIn("history_0.json is missing, empty or unreadable", self.output())
+        self.assertEqual([m["role"] for m in restored.messages], ["system"])
+
+    def test_a_valid_session_still_round_trips(self):
+        """The strict contract must not break the normal case."""
+        session = self.build_session(turns=2)
+        session._persist()
+        original = [m.get("content") for m in session.messages]
+
+        restored, folder = self._restore(session)
+
+        self.assertEqual(restored.unique_id, session.unique_id)
+        self.assertEqual(restored.session_dir, folder)
+        self.assertEqual([m.get("content") for m in restored.messages], original)
+        self.assertEqual(restored.summary, session.summary)
+        self.assertEqual(restored.history_index, session.history_index)
+        self.assertEqual(restored.token_stats, persistence.load_usage_segment(folder, 0))
+        self.assertNotIn("Cannot restore", self.output())
 
 
 # ---------------------------------------------------------------------------
@@ -359,14 +735,14 @@ class ResolveModelTest(_SessionCase):
 # ---------------------------------------------------------------------------
 
 class ResolveSessionDirTest(unittest.TestCase):
-    """One canonical resolver: session dir, history file, bare id, or None."""
+    """One canonical resolver: an existing session dir, a bare id, or None."""
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.cache = os.path.join(self.root, "cache")
         self.session = os.path.join(self.cache, "1792-abc")
         os.makedirs(self.session)
-        for name in ("history.json", "history_1.json"):
+        for name in ("history_0.json", "history_1.json", "summary_history.json"):
             with open(os.path.join(self.session, name), "w") as f:
                 f.write("[]")
 
@@ -381,11 +757,11 @@ class ResolveSessionDirTest(unittest.TestCase):
     def test_a_session_directory_is_returned(self):
         self.assertEqual(persistence.resolve_session_dir(self.session), self.session)
 
-    def test_a_history_file_yields_its_directory(self):
-        for name in ("history.json", "history_1.json"):
-            self.assertEqual(
-                persistence.resolve_session_dir(os.path.join(self.session, name)),
-                self.session)
+    def test_a_file_is_not_a_session(self):
+        """A file path used to resolve to its parent folder -- an unnamed session."""
+        path = os.path.join(self.session, "history_0.json")
+        self.assertEqual(persistence.resolve_session_dir(path), path)
+        self.assertEqual(persistence.resolve_session_dir(path, self.cache), path)
 
     def test_a_bare_session_id_resolves_under_the_cache_dir(self):
         self.assertEqual(
@@ -410,15 +786,19 @@ class ResolveSessionDirTest(unittest.TestCase):
         self.assertFalse(hasattr(persistence, "_restore_dir"))
         self.assertFalse(hasattr(persistence, "_resolve_history_path"))
 
-    def test_load_history_accepts_a_directory_or_a_file(self):
-        messages = [{"role": "user", "content": "hi"}]
-        with open(os.path.join(self.session, "history.json"), "w") as f:
+    def test_the_single_file_loaders_are_gone(self):
+        """``history.json`` is not a format this version reads, at all."""
+        self.assertFalse(hasattr(persistence, "load_history"))
+        messages = [{"role": "user", "content": "segment"}]
+        with open(os.path.join(self.session, "history_0.json"), "w") as f:
             json.dump(messages, f)
+        with open(os.path.join(self.session, "history.json"), "w") as f:
+            json.dump([{"role": "user", "content": "single file"}], f)
 
-        self.assertEqual(persistence.load_history(self.session), messages)
-        self.assertEqual(
-            persistence.load_history(os.path.join(self.session, "history.json")),
-            messages)
+        # A caller must name the segment it wants ...
+        self.assertIsNone(persistence.load_history_from_dir(self.session, None))
+        # ... and when it does, the segment wins over any single-file history.
+        self.assertEqual(persistence.load_history_from_dir(self.session, 0), messages)
 
 
 # ---------------------------------------------------------------------------

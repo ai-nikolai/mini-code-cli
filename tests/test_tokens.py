@@ -31,7 +31,11 @@ def silent_console():
 
 
 class StubLLM:
-    """Pop scripted ``(content, tool_calls, usage)`` replies, in order."""
+    """Pop scripted ``(content, tool_calls, usage)`` replies, in order.
+
+    The queue spells the fields a test cares about; the stub adds the reasoning
+    slot, so what the loop receives has the real 4-field shape.
+    """
 
     def __init__(self, queue):
         self.queue = list(queue)
@@ -41,7 +45,8 @@ class StubLLM:
         self.calls.append(messages)
         if not self.queue:
             raise AssertionError("LLM stub called more times than scripted")
-        return self.queue.pop(0)
+        content, tool_calls, usage = self.queue.pop(0)
+        return content, tool_calls, usage, None
 
 
 def long_messages(count, chars):

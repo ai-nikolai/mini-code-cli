@@ -12,9 +12,8 @@ what to do next, instead of an opaque "tool raised an error".
 
 The parameter sets are deliberately *small but useful*: the handful of knobs a
 model actually needs (a line range, a recursive search, an include filter, an
-exact-match edit) and nothing that would change existing behaviour when left
-out. All optional parameters have defaults, so an older call style keeps
-working unchanged.
+exact-match edit) and nothing more. Every optional parameter has a default, so a
+call that omits it behaves exactly as a call that never had it.
 """
 import fnmatch
 import functools

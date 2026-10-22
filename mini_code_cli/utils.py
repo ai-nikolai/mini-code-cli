@@ -88,21 +88,14 @@ def unpack_llm_result(result):
     thinking-mode models require it to be passed back verbatim, yet it must
     never be shown to the user as the assistant's reply.
 
-    Legacy callers and test stubs that still return the old 3-tuple
-    ``(content, tool_calls, usage)`` keep working: a short tuple simply yields
-    ``reasoning_content=None``, and a non-tuple (e.g. ``None``) yields four
-    ``None``s. This lives here so every caller unpacks the same way.
+    The shape is fixed: the 4-tuple above, or ``None`` when the call failed
+    (which yields four ``None``s). Anything else is a caller error and raises --
+    a short 3-tuple used to be accepted silently, which quietly discarded a
+    reply's reasoning text instead of surfacing the mismatch.
     """
     if result is None:
         return None, None, None, None
-    try:
-        parts = tuple(result)
-    except TypeError:
-        return result, None, None, None
-    content = parts[0] if len(parts) > 0 else None
-    tool_calls = parts[1] if len(parts) > 1 else None
-    usage = parts[2] if len(parts) > 2 else None
-    reasoning_content = parts[3] if len(parts) > 3 else None
+    content, tool_calls, usage, reasoning_content = result
     return content, tool_calls, usage, reasoning_content
 
 
@@ -119,7 +112,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
     Returns ``(content, tool_calls, usage, reasoning_content)``. On any failure
     it prints a diagnostic and returns ``(None, None, None, None)`` so the
     caller can degrade gracefully instead of crashing; use
-    :func:`unpack_llm_result` to unpack either shape.
+    :func:`unpack_llm_result` to unpack that 4-tuple.
 
     ``reasoning_content`` is the chain-of-thought text that thinking-mode
     servers (DeepSeek V3.2+ ``deepseek-reasoner``, ...) return alongside

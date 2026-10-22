@@ -1,5 +1,9 @@
 # Architecture
 
+> User-facing documentation (install, CLI flags, tools, sub-agents, in-session commands) is in
+> [README.md](../README.md); the developer guide (setup, tests, CI, releasing) is in
+> [README_DEV.md](README_DEV.md).
+
 A small, dependency-free (stdlib-only) CLI that drives an interactive loop over an
 OpenAI-compatible LLM server (vLLM / SGLang / etc.). The agent reads user input, calls the
 model, runs any tool calls the model asks for, persists the conversation, and repeats.
@@ -11,17 +15,17 @@ and the options available for sub-agents.
 
 The agent loop was intentionally split out of one large `agent_loop.py` into small,
 single-concern modules. `mini_code_cli/agent_loop.py` now owns only the top-level CLI
-(argument parsing, banners, `AgentSession`) and *re-exports* the helpers the tests and any
-external callers used to import from it, so `from mini_code_cli.agent_loop import ...` still
-works.
+(argument parsing, banners, `AgentSession`) and *re-exports* a few helpers (see its
+`__all__`), so `from mini_code_cli.agent_loop import save_history, ...` works for the test
+suite.
 
 | Module | Responsibility |
 | --- | --- |
-| `agent_loop.py` | CLI entry point (`main`, `parse_args`), the `AgentSession` loop, history compaction, plan-mode hooks, sub-agent delegation wiring. Re-exports helpers for backward compatibility. |
+| `agent_loop.py` | CLI entry point (`main`, `parse_args`), the `AgentSession` loop, history compaction, plan-mode hooks, sub-agent delegation wiring. Re-exports a few helpers through `__all__` for the test suite. |
 | `config.py` | Process-wide defaults (cache location, model URL, timeouts) plus the model context-window table and the token-based compaction budget (`compaction_budget`). History compaction is triggered by tokens only -- there is no message-count limit. Shared by every module to avoid import cycles. |
 | `prompts.py` | Builds the system prompt (tool list, allowed-dir note, plan-mode instructions) and the compaction/summary prompt. |
 | `tools.py` | The tool *functions* the model can call (`read_file`, `write_file`, `edit`, `grep`, `glob`, `web_search`, `read_website`, `run_shell_command`) plus `util_get_tools` / `util_get_tools_dict` which introspect their signatures into an OpenAI-style tool schema. Every tool returns a string and never raises; optional parameters (a line range for `read_file`, `recursive`/`include` for `grep`, `root` for `glob`, `replace_all` for `edit`, `cwd` for the shell, ...) all have safe defaults, and the schema type is inferred from a parameter's annotation *or* its default so integer/boolean knobs are not advertised as strings. |
-| `persistence.py` | Everything about session histories on disk: `history_{n}.json` segments, the flat `summary_history.json` recorder, per-segment `usage_{n}.json` + `total_usage.json`, and the restore/`find_last_session` helpers. Every loader is best-effort (never raises). |
+| `persistence.py` | Everything about session histories on disk: `history_{n}.json` segments, the flat `summary_history.json` recorder, per-segment `usage_{n}.json` + `total_usage.json`, atomic JSON writes, segment listing/cleanup (`history_segment_indices`, `delete_segments_above`) and the restore/`find_last_session` helpers. The loaders never raise (they report `None`/zeros), and a restore accepts *only* the layout described below. |
 | `sandbox.py` | The `--allowed-dir` filesystem sandbox (`is_within_allowed_dir`, `tool_paths_are_allowed`), using `os.path.realpath` to defeat symlinks / `..`. |
 | `permissions.py` | Pure "does this tool call need a prompt?" helpers (`needs_permission`, `shell_forces_ask_permission`, `sudo_disables_prompts`). |
 | `runner.py` | `call_function_with_timeout` -- runs a tool with a hard wall-clock limit via `SIGALRM`. |
@@ -37,14 +41,75 @@ A session owns a folder under `cache_dir/{session_id}/` and keeps:
 
 * **`history_{n}.json`** -- one file per conversation *segment*. Messages only ever append
   within a segment, so any earlier message index still marks a faithful prefix; a new
-  segment (`n -> n+1`) is started every time the history is compacted.
+  segment (`n -> n+1`) is started every time the history is compacted, and the closing
+  segment is flushed to disk at that moment so what the recorder points at always exists.
+  Every history file is written **atomically** (temp file + `os.replace`), so an interrupt
+  mid-write can never leave a half-truncated file that could not be restored.
 * **`summary_history.json`** -- a flat, high-level *recorder*: one record per turn (the turn
   number, *what* happened, and which `history_{n}.json` + message index the turn lives in).
   This powers `/history`, `/history <n>` and `/reset <n>` without reading the full histories.
+  A restore validates it strictly (`_validate_records`): every record must be an object with
+  integer `turn` / `history_file` / `index`, no negative values, and turns numbered `1..N`.
+  Anything else refuses the restore -- records are never dropped, clamped or renumbered,
+  because that silently shifts every later turn number.
 * **`usage_{n}.json`** -- token usage spent while segment *n* was live, so usage
   survives a compaction (which starts a new segment).
 * **`total_usage.json`** -- the whole-session token usage, accumulated across
   every still-available `usage_{n}.json`.
+
+`start_new_session` writes all four files straight away, so a session this version creates is
+a complete, restorable folder even if the process dies before the first quit.
+
+### Restoring a session
+
+`--restore-session <dir|id>`, `--load-last-session` and the interactive resume offer all end
+up in `restore_previous_session`, which accepts exactly the layout above and nothing else:
+
+1. the value must resolve to a session **directory** (`resolve_session_dir` accepts an
+   existing directory or a bare session id under `--cache-dir`; a path to a *file* is not a
+   session);
+2. `summary_history.json` must exist and validate;
+3. `history_{n}.json` for the segment the **last record** names must be readable --
+   the segments' *usage* files are optional and default to zeros.
+
+The order is recorder-first, so the messages come from the segment the user was actually
+looking at (never from "the newest file on disk", which would undo a `/reset`). There is no
+fallback to a single-file `history.json` and no rebuild-the-recorder-from-the-transcript
+path: both had to invent turn boundaries, and a rebuilt session then behaved differently
+under `/reset` than a recorded one.
+
+A folder that fails any step is **refused**: one note says which part was wrong, the session
+state is cleared (`_fail_restore`, including the id), and a fresh session is started. A
+refused restore never half-adopts the folder and never writes into it.
+
+### Rewinding (`/reset`) and what it does to the files
+
+`/reset [<n>|last]` (alias `/rewind`) rewinds to the *end of turn `n`*. Turn selectors are
+validated in one place (`_resolve_turn_record`): `last`, or a positive 1-based number --
+`0`, negatives, non-numbers and out-of-range values all report `No such turn`, for `/history`
+exactly as for `/reset`.
+
+* **A bare `/reset` destroys nothing.** If the transcript already ends at the last recorded
+  turn it just reports `Already at turn N` (no files are rewritten); if messages exist that
+  were never recorded it *warns and refuses*, because those messages were never part of any
+  turn the user could have meant. Only an explicit `/reset <n>` / `/reset last` rewinds.
+* **The rewind is then persisted before the session changes.** `_reset_history` truncates the
+  target segment, writes `history_{n}.json` + `summary_history.json` (and `total_usage.json`)
+  first -- rolling both back if a write fails -- and only then mutates the live transcript.
+* **Same segment:** `history_{n}.json` is truncated *in place*; the dropped messages are gone
+  (there is no backup). **Earlier segment:** the session moves back onto it and every higher
+  `history_{m}.json` / `usage_{m}.json` (`m > n`) is deleted, so nothing on disk can resurrect
+  the dropped turns later. A restore uses the segment the recorder names, so it lands on
+  the rewound state even if an orphan somehow survived.
+* **The live transcript wins for the current segment:** the interactive loop only persists on
+  quit, so `_segment_for` reads the in-memory messages for `history_index` (and the file for
+  older, immutable segments). That is what stops a rewind from truncating to a state *older*
+  than the turn it was asked to keep.
+* **Usage is never rewound**: `usage_{n}.json` keeps the spend of the dropped turns,
+  `total_usage.json` never decreases and is re-saved after a rewind -- a rewind does not
+  un-spend tokens. The session's segment counters are reloaded from `usage_{n}.json`, so the
+  next save cannot overwrite the target segment with the later segment's numbers.
+* Plan-mode files (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`) are untouched by a reset.
 
 ## 2. The sub-agent framework
 

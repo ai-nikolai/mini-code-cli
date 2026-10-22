@@ -1,8 +1,9 @@
 # mini-code-cli — Developer Guide
 
-This is the developer-facing companion to [README.md](README.md). It covers local setup,
+This is the developer-facing companion to [README.md](../README.md). It covers local setup,
 linting, the test suite, CI, and how to cut a release. User-facing documentation (install,
-CLI flags, tools, sub-agents, in-session commands) stays in the [README](README.md).
+CLI flags, tools, sub-agents, in-session commands) stays in the [README](../README.md);
+the design of the agent loop is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Contents
 
@@ -44,10 +45,13 @@ scripts/run_model.sh      helper for serving a local model
 tests/                    stdlib unittest suite
 .github/workflows/ci.yml      lint + test on every push / pull request
 .github/workflows/release.yml build + GitHub release, triggered by pushing a `v*` tag
+docs/README_DEV.md        this developer guide
+docs/ARCHITECTURE.md      design of the agent loop, plan mode, compaction and sub-agents
 pyproject.toml            package metadata, version, entry point
 ```
 
-`ARCHITECTURE.md` describes the design of the agent loop, plan mode, compaction and sub-agents.
+[ARCHITECTURE.md](ARCHITECTURE.md) describes the design of the agent loop, plan mode,
+compaction and sub-agents.
 
 ## Linting
 
@@ -87,7 +91,9 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   (`AgentSession(args).run(...)`), with only the LLM stubbed: real tools run on disk, the
   `--allowed-dir` sandbox is exercised end to end, plan mode's tracking files are written,
   sub-agent delegation runs a nested loop, history compaction rolls the segment over
-  (keeping per-segment usage), sessions restore in place, and the `edit` tool / richer
+  (keeping per-segment usage), sessions restore in place while a folder that does not
+  satisfy the restore contract (no recorder, or no segment for it) is refused in favour of a
+  fresh session, and the `edit` tool / richer
   tool schemas are covered.
 - **`test_tokens.py`** — the compaction *policy*: the model → context-window table, the
   budget resolution (explicit / model / conservative fallback), the token estimator, and
@@ -104,7 +110,7 @@ This keeps the tool honest as it grows, and makes it safe to experiment with ris
 
 ## Continuous integration
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs exactly these two commands on every
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs exactly these two commands on every
 push and pull request:
 
 ```bash
@@ -118,7 +124,7 @@ the tests, so make sure `main` is green before you tag it.
 ## Releasing (tag `main` → GitHub release)
 
 Releases are cut **from `main` by pushing a tag**, never from a feature branch. The tag is what
-fires [`.github/workflows/release.yml`](.github/workflows/release.yml).
+fires [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
 ### 1. Bump the version
 

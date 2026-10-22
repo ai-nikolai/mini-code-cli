@@ -21,9 +21,17 @@ A session owns a directory under ``cache_dir/{session_name}/`` and keeps:
   * ``total_usage.json`` — the whole-session token usage, accumulated across
     every still-available ``usage_{n}.json``.
 
-Every loader here is *best-effort*: a missing/garbled file must never break a
-restore, so each function returns a safe default (or ``None``) instead of
-raising.
+The on-disk shape above is the *only* one this module reads. A restore is
+strict: the recorder must be a readable ``summary_history.json`` and the segment
+its last record names must be a readable ``history_{n}.json``. Session files
+written by older versions (a single ``history.json`` / ``usage.json``, or a
+folder whose recorder was never written) are not accepted, and a folder that
+does not match is refused so the caller can start a fresh session instead.
+
+The loaders themselves never raise: a missing or garbled file yields a safe
+default (``None`` for the transcript and the recorder, zeros for usage) plus an
+error note, so a damaged folder degrades to "cannot restore" rather than a
+traceback.
 """
 import json
 import os
@@ -54,14 +62,18 @@ def resolve_session_dir(restore_session, cache_dir=None):
     and ``_restore_dir``, which disagreed on edge cases). It accepts:
 
       * ``None`` / ``""``              -> ``None`` (nothing to restore);
-      * a path to a history file       -> the directory containing it, so both
-                                          ``history.json`` and ``history_{n}.json``
-                                          work;
       * a path to a session directory  -> that directory;
       * a bare session id             -> ``cache_dir/<id>`` when ``cache_dir`` is
                                           given, so ``--restore-session 1792-abc``
                                           works without spelling out the full path;
       * ``~``                          -> expanded.
+
+    Only *directories* are resolved. A path to a file used to resolve to its
+    parent directory, so ``--restore-session history_0.json`` quietly restored
+    whichever session happened to live above it -- the user named a file and got
+    a conversation. A value that names no existing directory is now returned
+    unchanged (with ``~`` expanded) instead of guessed at: the restore then
+    fails with a message naming the value, rather than adopting a neighbour.
 
     The result is *not* required to exist: callers decide whether a missing
     directory is fatal (a requested restore) or merely means "nothing to
@@ -70,9 +82,9 @@ def resolve_session_dir(restore_session, cache_dir=None):
     if not restore_session:
         return None
     candidate = os.path.expanduser(str(restore_session))
-    if os.path.isfile(candidate):
-        return os.path.dirname(os.path.abspath(candidate))
-    if not os.path.isdir(candidate) and cache_dir:
+    if os.path.isdir(candidate):
+        return candidate
+    if cache_dir:
         # A bare session id: look for it inside the cache dir. Only accept it
         # when it resolves to something real, so a typo'd path stays a typo.
         under_cache = os.path.join(cache_dir, candidate)
@@ -211,68 +223,174 @@ def find_last_session_dir(allowed_dir):
     return load_last_session_pointer(allowed_dir)
 
 
+# atomic JSON writes
+# ---------------------------------------------------------------------------
+#
+# Every history-shaped file is rewritten whole, many times per session. A plain
+# ``open(path, "w")`` truncates the file first, so an interrupt (Ctrl-C), a
+# crash or a full disk in the middle of ``json.dump`` leaves a *truncated* file
+# behind -- and that session can then never be restored. Writing to a temporary
+# file in the same directory and ``os.replace``-ing it into place makes the swap
+# atomic: a reader (or a later restore) sees either the old file or the new one,
+# never half of each.
+
+def _atomic_write_json(path, payload, indent=2):
+    """Write ``payload`` as JSON to ``path`` atomically, returning ``path``.
+
+    The temporary file lives in the same directory (so ``os.replace`` stays a
+    same-filesystem rename, which is atomic). On any failure the temp file is
+    removed and the exception propagates -- callers decide whether that is fatal
+    (a normal save) or something to roll back (``/reset``).
+    """
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=indent)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 # history segments (history_{n}.json)
 # ---------------------------------------------------------------------------
 
+_HISTORY_SEGMENT_RE = re.compile(r"history_(\d+)\.json")
+_USAGE_SEGMENT_RE = re.compile(r"usage_(\d+)\.json")
+
+
+def history_segment_indices(directory):
+    """Return the sorted segment indices present as ``history_{n}.json``.
+
+    Empty list when the directory is missing or holds no segments. Never raises.
+    """
+    return _segment_indices(directory, _HISTORY_SEGMENT_RE)
+
+
+def usage_segment_indices(directory):
+    """Return the sorted segment indices present as ``usage_{n}.json``."""
+    return _segment_indices(directory, _USAGE_SEGMENT_RE)
+
+
+def _segment_indices(directory, pattern):
+    """Sorted integers extracted from filenames in ``directory`` matching ``pattern``."""
+    indices = set()
+    if not directory or not os.path.isdir(directory):
+        return []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    for fn in names:
+        m = pattern.fullmatch(fn)
+        if m:
+            indices.add(int(m.group(1)))
+    return sorted(indices)
+
+
+def delete_segments_above(directory, keep_index):
+    """Delete every history/usage segment whose index is above ``keep_index``.
+
+    A ``/reset`` that lands on an *earlier* segment must not leave the segments
+    above it behind: a later restore prefers the newest segment, so the orphaned
+    ``history_{m}.json`` would resurrect exactly the turns the user rewound past.
+    Removing them (and their ``usage_{m}.json``) makes the rewind stick.
+
+    Each file is removed independently and a failure is reported as a warning
+    rather than raised -- the rewind itself has already been persisted, so a
+    stray undeletable file must not undo it. Returns the list of removed paths.
+    """
+    removed = []
+    if not directory or not os.path.isdir(directory):
+        return removed
+    try:
+        keep = int(keep_index)
+    except (TypeError, ValueError):
+        return removed
+    indices = sorted(set(history_segment_indices(directory))
+                     | set(usage_segment_indices(directory)))
+    for idx in indices:
+        if idx <= keep:
+            continue
+        for name in (f"history_{idx}.json", f"usage_{idx}.json"):
+            path = os.path.join(directory, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                os.unlink(path)
+                removed.append(path)
+            except OSError as e:
+                ui.console.note(f"Could not remove {name}: {e}", "warn")
+    return removed
+
+
 def save_history(messages, cache_dir, session_name="", history_index=0):
-    """Persist a detailed conversation-history *segment* to disk."""
+    """Persist a detailed conversation-history *segment* to disk (atomically)."""
     d = history_dir(cache_dir, session_name)
     history_path = os.path.join(d, f"history_{history_index}.json")
-    with open(history_path, "w", encoding="utf-8") as f:
-        json.dump(messages, f, indent=2)
-    return history_path
+    return _atomic_write_json(history_path, messages)
 
 
-def load_history_from_dir(directory):
-    """Load the most complete history for a session directory.
+def _load_message_list(path):
+    """Load one history file as a message list, or ``None`` if it is unusable.
 
-    Prefers the newest ``history_{n}.json`` segment and falls back to the
-    classic ``history.json``. Returns the messages list, or ``None`` if nothing
-    could be loaded (never raises: a failed restore falls back to a fresh
-    session).
+    "Unusable" covers a missing file, unreadable/invalid JSON, a payload that is
+    not a list, and an empty list (a segment always starts with at least the
+    system prompt, so an empty one cannot be a real conversation). Never raises.
     """
-    if not directory or not os.path.isdir(directory):
-        return None
-    newest, highest = None, -1
-    for fn in os.listdir(directory):
-        m = re.fullmatch(r"history_(\d+)\.json", fn)
-        if m and int(m.group(1)) > highest:
-            highest, newest = int(m.group(1)), fn
-    path = (os.path.join(directory, newest) if newest is not None
-            else os.path.join(directory, "history.json"))
     try:
         with open(path, "r", encoding="utf-8") as f:
             messages = json.load(f)
-        return messages if isinstance(messages, list) else None
-    except Exception as e:
-        ui.console.note(f"Failed to load history from {directory}: {e}", "error")
+    except Exception:
         return None
+    return messages if isinstance(messages, list) and messages else None
 
 
-def load_history(restore_session):
-    """Load a previous session's message history from disk (single-file path).
+def load_history_with_index(directory, preferred_index):
+    """Load the ``history_{n}.json`` segment a session's recorder points at.
 
-    Returns the messages list, or ``None`` if nothing could be loaded (missing
-    file, wrong shape, or unreadable JSON). Never raises.
+    The segment index is *mandatory* and always comes from the recorder's last
+    record (see ``AgentSession.restore_previous_session``), so the messages come
+    from the segment the user was really looking at. There is deliberately no
+    "newest readable segment wins" scan and no single-file ``history.json``
+    fallback any more: the scan is what used to undo a ``/reset`` that had
+    rewound onto an older segment (the orphaned higher segment won the restore),
+    and both guessed at layouts that are no longer written.
+
+    Returns ``(messages, index)``, where ``index`` is the segment number the
+    messages came from. Returns ``(None, None)`` when the index is not a
+    non-negative integer or that segment is missing, empty or garbled; the
+    *caller* reports it (a restore knows which note to print). Never raises.
     """
-    if not restore_session:
-        return None
-    directory = resolve_session_dir(restore_session)
-    if os.path.isfile(os.path.expanduser(str(restore_session))):
-        history_path = os.path.expanduser(str(restore_session))
-    else:
-        history_path = os.path.join(directory, "history.json")
-    if not os.path.isfile(history_path):
-        ui.console.note(f"No history found to restore from: {restore_session}", "warn")
-        return None
+    if not directory or not os.path.isdir(directory):
+        return None, None
+
     try:
-        with open(history_path, "r", encoding="utf-8") as f:
-            messages = json.load(f)
-        if not isinstance(messages, list):
-            raise ValueError("history file did not contain a message list")
-    except Exception as e:
-        ui.console.note(f"Failed to load history from {restore_session}: {e}", "error")
-        return None
+        index = int(preferred_index)
+    except (TypeError, ValueError):
+        index = -1
+    if index < 0:
+        return None, None
+
+    messages = _load_message_list(os.path.join(directory, f"history_{index}.json"))
+    if messages is None:
+        return None, None
+    return messages, index
+
+
+def load_history_from_dir(directory, preferred_index):
+    """Load the message list of the segment ``preferred_index`` names.
+
+    Thin wrapper over :func:`load_history_with_index` for callers that only need
+    the messages. There is no default index on purpose: a caller has to say
+    *which* segment it wants, so "load whatever happens to be on disk" cannot
+    creep back in. Returns the messages list, or ``None`` (never raises).
+    """
+    messages, _ = load_history_with_index(directory, preferred_index)
     return messages
 
 
@@ -281,31 +399,32 @@ def load_history(restore_session):
 # ---------------------------------------------------------------------------
 
 def save_summary(summary, cache_dir, session_name=""):
-    """Persist the high-level recorder to ``summary_history.json``."""
+    """Persist the high-level recorder to ``summary_history.json`` (atomically)."""
     d = history_dir(cache_dir, session_name)
     summary_path = os.path.join(d, "summary_history.json")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-    return summary_path
+    return _atomic_write_json(summary_path, summary)
 
 
 def load_summary_from_dir(directory):
     """Load a session's high-level recorder (``summary_history.json``).
 
-    Returns the list of records, or an empty list if there is none or it cannot
-    be read. Best-effort only.
+    Returns the list of records, which may legitimately be empty -- that is a
+    real, if turn-less, session (started, then quit before the first turn
+    finished). ``None`` means there is no usable recorder at all: the file is
+    missing, unreadable, or does not hold a list. The two cases are deliberately
+    distinct, because only the second one makes a folder unrestorable.
     """
     if not directory or not os.path.isdir(directory):
-        return []
+        return None
     path = os.path.join(directory, "summary_history.json")
     if not os.path.isfile(path):
-        return []
+        return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             saved = json.load(f)
-        return saved if isinstance(saved, list) else []
     except Exception:
-        return []
+        return None
+    return saved if isinstance(saved, list) else None
 
 
 # ---------------------------------------------------------------------------
@@ -315,8 +434,9 @@ def load_summary_from_dir(directory):
 # Usage is recorded per history *segment*, mirroring ``history_{n}.json``:
 # ``usage_{n}.json`` holds the tokens spent while segment *n* was the live one.
 # That matters because history compaction rolls the conversation over to a fresh
-# segment: a single ``usage.json`` could not say what the pre-compaction half of
-# the session cost, so per-segment files let usage survive a compaction.
+# segment: a single whole-session usage file could not say what the
+# pre-compaction half of the session cost, so per-segment files let usage
+# survive a compaction.
 #
 # ``total_usage.json`` is the whole-session accumulator. It is written from the
 # running session total (which never decreases -- a rewind does not un-spend
@@ -358,12 +478,10 @@ def _segment_usage_path(directory, history_index):
 
 
 def save_usage_segment(token_stats, cache_dir, session_name="", history_index=0):
-    """Persist one history segment's token usage to ``usage_{n}.json``."""
+    """Persist one history segment's token usage to ``usage_{n}.json`` (atomically)."""
     d = history_dir(cache_dir, session_name)
     path = _segment_usage_path(d, history_index)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(token_stats, f, indent=2)
-    return path
+    return _atomic_write_json(path, token_stats)
 
 
 def load_usage_segment(directory, history_index=0):
@@ -382,29 +500,25 @@ def load_usage_segment(directory, history_index=0):
 
 
 def save_total_usage(total_stats, cache_dir, session_name=""):
-    """Persist the whole-session token usage to ``total_usage.json``."""
+    """Persist the whole-session token usage to ``total_usage.json`` (atomically)."""
     d = history_dir(cache_dir, session_name)
     path = os.path.join(d, "total_usage.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(total_stats, f, indent=2)
-    return path
+    return _atomic_write_json(path, total_stats)
 
 
 def load_usage_from_dir(directory):
-    """Sum every still-available usage file in a session directory.
+    """Sum the ``usage_{n}.json`` segments of a session directory.
 
-    That is all ``usage_{n}.json`` segments plus a legacy single ``usage.json``
-    (written by older versions), so restoring an old session still recovers its
-    totals. Best-effort: unreadable files are skipped, never raised.
+    Only per-segment files are read. Best-effort: an unreadable segment is
+    skipped and a session with no usage files simply reads as zeros (usage is
+    optional -- a restore never depends on it).
     """
     stats = empty_usage()
     if not directory or not os.path.isdir(directory):
         return stats
-    for fn in sorted(os.listdir(directory)):
-        if not (re.fullmatch(r"usage_\d+\.json", fn) or fn == "usage.json"):
-            continue
+    for index in usage_segment_indices(directory):
         try:
-            with open(os.path.join(directory, fn), "r", encoding="utf-8") as f:
+            with open(_segment_usage_path(directory, index), "r", encoding="utf-8") as f:
                 part = _coerce_usage(json.load(f))
         except Exception:
             continue

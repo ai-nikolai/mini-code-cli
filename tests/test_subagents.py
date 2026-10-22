@@ -163,6 +163,10 @@ class NoUserInputTest(SubAgentTestCase):
         os.makedirs(pointed, exist_ok=True)
         save_history([{"role": "system", "content": "OLD"},
                       {"role": "user", "content": "old question"}], self.cache_dir, "old_session", 0)
+        # A restorable session is a recorder *plus* the segment it names; a bare
+        # history_0.json is refused by the strict restore.
+        save_summary([{"turn": 1, "what": "user", "history_file": 0, "index": 1}],
+                     self.cache_dir, "old_session")
         pointer = persistence.pointer_dir(self.workdir)
         os.makedirs(pointer, exist_ok=True)
         with open(os.path.join(pointer, persistence.LAST_SESSION_FILENAME), "w") as f:

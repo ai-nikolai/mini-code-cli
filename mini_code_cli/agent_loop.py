@@ -18,9 +18,9 @@ smaller, focused modules so each concern is easy to read and test:
   * :mod:`mini_code_cli.subagents`   -- delegating a task to a sub-agent.
   * :mod:`mini_code_cli.skills`      -- the ``.mini`` skills feature.
 
-For backward compatibility (and the test-suite) the most commonly imported
-helpers are re-exported from here, so ``from mini_code_cli.agent_loop import ...``
-keeps working.
+The helpers the test-suite imports from here are re-exported through
+``__all__``, so ``from mini_code_cli.agent_loop import save_history, ...`` works
+without the tests reaching into every module.
 """
 
 import os
@@ -50,11 +50,12 @@ from .persistence import (
     save_summary,
     save_usage_segment,
     save_total_usage,
-    load_history,
-    load_history_from_dir,
+    load_history_with_index,
     load_summary_from_dir,
     load_usage_segment,
     load_total_usage_from_dir,
+    delete_segments_above,
+    history_segment_indices,
     empty_usage,
     find_last_session_dir,
     save_last_session_pointer,
@@ -72,7 +73,7 @@ from .runner import call_function_with_timeout
 
 
 __all__ = [
-    # re-exported helpers (kept for the test-suite / external callers)
+    # re-exported helpers (imported from here by the test-suite)
     "is_within_allowed_dir",
     "tool_paths_are_allowed",
     "_FILE_TOOL_PATH_ARGS",
@@ -84,7 +85,6 @@ __all__ = [
     "call_function_with_timeout",
     "save_history",
     "save_summary",
-    "load_history",
     "generate_unique_id",
     "find_last_session_dir",
     # public classes / entry points
@@ -92,6 +92,25 @@ __all__ = [
     "main",
     "parse_args",
 ]
+
+
+# ---------------------------------------------------------------------------
+# recorder helpers (shared by the class and the tests)
+# ---------------------------------------------------------------------------
+
+def _safe_int(value, default=0):
+    """Coerce ``value`` to ``int``, returning ``default`` when that is impossible.
+
+    Used by the *display / navigation* paths, which read a recorder that was
+    already validated at restore time but may have been hand-edited since: a
+    ``/history`` listing must render a junk field rather than crash the CLI.
+    A restore itself never comes through here -- it validates strictly instead
+    (see ``AgentSession._validate_records``).
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +128,7 @@ def parse_args():
 
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
-    parser.add_argument("--restore-session", type=str, help="The location of a previous session to continue. (e.g. ~/.cache/mini/sessions/1792028090823027-a9d77653/)")
+    parser.add_argument("--restore-session", type=str, help="A previous session to continue: its directory (e.g. ~/.cache/mini/sessions/1792028090823027-a9d77653/) or a bare session id under --cache-dir. A session folder must hold a summary_history.json recorder plus the history_{n}.json segment it names; anything else starts a fresh session.")
     parser.add_argument("-l","--load-last-session", action="store_true", help="Continue the most recent previous session recorded in the --allowed-dir .mini pointer, in place and without the resume prompt, instead of starting fresh. --restore-session takes precedence if also given.")
 
     # Agent behaviour related
@@ -169,8 +188,10 @@ def print_help(args):
     for command, description in (
         ("/history", "list the conversation (turn number, what happened, where)"),
         ("/history <n>", "show the full messages recorded for turn n"),
+        ("/history last", "...for the most recent turn"),
         ("/plan", "show the current goal + plan (plan mode only)"),
-        ("/reset [<n>]", "rewind to the end of turn n (drops everything after it)"),
+        ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
+        ("", "a bare /reset only re-saves the current state (no data loss)"),
         ("/clear", "clear the screen (keeps the conversation history)"),
         ("/help", "show this help"),
         ("/quit, /exit", "save the session and exit"),
@@ -447,6 +468,12 @@ class AgentSession:
         pointer nor offers the interactive resume prompt, so it always begins a
         fresh isolated session. That is what makes delegation safe to run
         unattended -- there is a single place that decides this.
+
+        All three ways in (``--restore-session``, ``--load-last-session`` and the
+        interactive offer) go through :meth:`_try_restore`, which reports *why* a
+        restore was refused and then leaves the session clean for
+        :meth:`start_new_session`. A refused restore therefore never silently
+        reuses the old folder.
         """
         if self.background_mode and not self.restore_session:
             self.start_new_session()
@@ -469,13 +496,24 @@ class AgentSession:
     def _try_restore(self, restore_directory):
         """Restore a session in place, returning whether it worked.
 
-        A restore failure is not fatal: the caller falls back to a fresh session,
-        so a corrupt or half-written folder never blocks the CLI from starting.
+        A failed restore is not fatal: the caller falls back to a fresh session,
+        so a folder this version cannot read (or a typo'd path) never blocks the
+        CLI from starting. It is not silent either -- the reason is noted by
+        :meth:`restore_previous_session` and the fallback is announced here,
+        because a user who asked to continue a conversation needs to know that
+        they are not looking at it.
         """
         try:
-            return bool(self.restore_previous_session(restore_directory))
-        except Exception:
-            return False
+            if self.restore_previous_session(restore_directory):
+                return True
+        except Exception as e:
+            self.console.note(
+                f"Could not restore {restore_directory}: {e}", "error")
+            self._fail_restore()
+        self.console.note(
+            f"Starting a fresh session instead of restoring {restore_directory}.",
+            "warn")
+        return False
 
     def _resume_previous(self, detected):
         """Continue the detected session if the user wants to; True if restored.
@@ -505,6 +543,13 @@ class AgentSession:
         The id is normally minted in ``__init__`` (see there) and simply reused
         here; it is re-minted only when it is missing, which is what happens
         after a failed restore has cleared it.
+
+        The complete on-disk set is written straight away -- the segment, the
+        recorder and the (all-zero) usage files -- so a session this version
+        creates always satisfies the restore contract even if the process dies
+        before the first quit. A restorable session needs the recorder and the
+        segment it names; the usage files are optional, and writing them here
+        keeps the folder self-describing rather than half-populated.
         """
         self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
@@ -519,6 +564,9 @@ class AgentSession:
 
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
         save_summary(self.summary, self.cache_dir, self.unique_id)
+        save_usage_segment(self.token_stats, self.cache_dir, self.unique_id,
+                           self.history_index)
+        save_total_usage(self.total_usage, self.cache_dir, self.unique_id)
 
         # Record this session in --allowed-dir/.mini so a later
         # --load-last-session (or the interactive resume offer) can find it.
@@ -526,51 +574,106 @@ class AgentSession:
 
 
     def restore_previous_session(self, restore_directory):
-        """A function to restore from a directory.
+        """Restore a session from ``restore_directory``, strictly, or refuse it.
 
-        Order matters here. ``self.messages`` must be loaded *before* the
-        recorder is restored, because the legacy fallback in
-        :meth:`_load_summary_if_restored` rebuilds the recorder by scanning the
-        restored messages. ``self.summary`` / ``self.history_index`` are seeded
-        first so that fallback can append to them and so ``_persist()`` has a
-        segment index to write to. Previously all three were unset on this path,
-        so restoring a session folder that had a ``history_N.json`` but no
-        ``summary_history.json`` (older code, or a hand-made folder) raised
-        AttributeError and the caller silently started a *new* session instead.
+        A restorable folder is exactly what this version writes: a
+        ``summary_history.json`` recorder whose records name where each turn
+        lives, plus a readable ``history_{n}.json`` for the segment the *last*
+        record points at. Nothing else is accepted, and each refusal says which
+        part was wrong:
+
+          * the directory does not exist              -> refuse;
+          * no recorder (or not a JSON list)          -> refuse;
+          * a recorder that does not validate         -> refuse (``_validate_records``);
+          * the named segment missing/empty/garbled   -> refuse.
+
+        There is deliberately no "rebuild the recorder from the transcript" path
+        and no single-file ``history.json`` fallback: both had to *invent* turn
+        boundaries, which made a rebuilt session behave differently under
+        ``/reset`` than a recorded one -- and only sessions this version wrote
+        are being restored.
+
+        Order matters, and it is recorder-first. The recorder says which segment
+        the user was really looking at, and the messages are loaded from *that*
+        one, so a ``/reset`` that rewound onto an older segment is not undone by
+        a stale higher segment left on disk. The loaded index becomes
+        ``history_index`` -- the segment later saves append to -- and only then
+        are the usage totals restored (they are looked up by that index).
+
+        Failure is atomic: :meth:`_fail_restore` clears everything a restore
+        touches, so the caller's fallback is a clean fresh session that never
+        half-adopts this folder or reuses its id.
         """
+        prefix = f"Cannot restore {restore_directory}"
+        if not restore_directory or not os.path.isdir(restore_directory):
+            self.console.note(f"{prefix}: no such session directory.", "error")
+            return self._fail_restore()
+
+        saved_summary = load_summary_from_dir(restore_directory)
+        if saved_summary is None:
+            self.console.note(
+                f"{prefix}: it has no readable summary_history.json "
+                "(the recorder every restorable session has).", "error")
+            return self._fail_restore()
+        try:
+            records = self._validate_records(saved_summary)
+        except ValueError as e:
+            self.console.note(f"{prefix}: {e}.", "error")
+            return self._fail_restore()
+
+        # A recorder with no turns is a session that quit before finishing one:
+        # it is restorable, on the segment it started on.
+        preferred = records[-1]["history_file"] if records else 0
+        restored, loaded_index = load_history_with_index(restore_directory, preferred)
+        if restored is None:
+            self.console.note(
+                f"{prefix}: history_{preferred}.json is missing, empty or "
+                "unreadable.", "error")
+            return self._fail_restore()
+
         try:
             self.unique_id = os.path.basename(os.path.normpath(restore_directory))
             self.session_dir = restore_directory
             self.plan_manager = plan_utils.PlanManager(
                 self.session_dir, enabled=self.plan_mode)
-            self.summary = []
-            self.history_index = 0
-            restored = load_history_from_dir(restore_directory) if restore_directory else None
-
-            self.messages = restored if restored is not None else self._build_initial_messages()
+            self.messages = restored
+            self.summary = records
+            self.history_index = int(loaded_index)
             # No prompt has been sent in *this* process yet, so any remembered
             # size would be stale: start from a plain estimate of the restored
             # transcript (which is what project_input_tokens falls back to).
             self.last_prompt_tokens = 0
             self.last_prompt_message_count = 0
-            # The recorder restore decides which segment we are on, so usage --
-            # which is stored per segment -- has to be restored after it.
-            self._load_summary_if_restored(restore_directory)
             self._restore_usage_if_available(restore_directory)
 
             # Continuing a session in place makes it the latest one again: keep
             # the pointer aimed at it so a later --load-last-session finds the
             # conversation the user is actually working in.
             self._save_last_session_pointer()
-
             return True
-
         except Exception as e:
-            self.unique_id = None
-            self.session_dir = None
-            self.plan_manager = None
-            return False
+            self.console.note(f"{prefix}: {e}", "error")
+            return self._fail_restore()
 
+    def _fail_restore(self):
+        """Clear every field a restore may have touched; always returns ``False``.
+
+        A restore is all-or-nothing. Dropping ``unique_id`` is what guarantees
+        the fallback really is a *fresh* session: ``start_new_session`` re-mints
+        the id when it is missing, so a refused restore can never append to (or
+        overwrite) the folder it just declined to adopt.
+        """
+        self.unique_id = None
+        self.session_dir = None
+        self.plan_manager = None
+        self.messages = []
+        self.summary = []
+        self.history_index = 0
+        self.token_stats = empty_usage()
+        self.total_usage = empty_usage()
+        self.last_prompt_tokens = 0
+        self.last_prompt_message_count = 0
+        return False
 
     def _resolve_model(self, args):
         """Pick the model id: the one the user named, else the server's default.
@@ -667,10 +770,12 @@ class AgentSession:
 
         ``token_stats`` comes from the segment we restored onto
         (``usage_{history_index}.json``) and ``total_usage`` from
-        ``total_usage.json`` (falling back to the sum of all segments), so the
-        running summary stays continuous across a restore *and* across the
-        compaction that may have happened before it. Best-effort: any problem
-        leaves the totals at zero rather than breaking the restore.
+        ``total_usage.json`` (reconstructed from the segment files when it is
+        missing), so the running totals stay continuous across a restore *and*
+        across the compaction that may have happened before it. Usage is
+        optional -- a folder that has no usage files at all still restores, with
+        zeros -- and any problem there leaves the totals at zero rather than
+        failing the restore.
         """
         segment = load_usage_segment(restore_directory, self.history_index)
         total = load_total_usage_from_dir(restore_directory)
@@ -770,29 +875,52 @@ class AgentSession:
             if delta > 0:
                 self.total_usage[key] = self.total_usage.get(key, 0) + delta
 
-    def _load_summary_if_restored(self, restore_directory):
-        """Restore the high-level recorder and segment index for a restore.
+    @staticmethod
+    def _validate_records(saved):
+        """Validate a loaded recorder strictly; return a clean copy of its records.
 
-        Prefers the saved ``summary_history.json`` so the recorder stays flat and
-        contiguous across the restore, seeding ``self.summary`` and the next
-        ``history_index`` from its last record. If no recorder was saved (e.g. a
-        session created by older code, or only a classic ``history.json``), we
-        rebuild a minimal recorder by scanning the restored messages for
-        assistant turns, so navigation still works. Best-effort only.
+        A ``summary_history.json`` is the *contract* the navigation layer runs
+        on: ``/history <n>`` and ``/reset <n>`` index into the list positionally
+        and every record says exactly where its turn lives on disk
+        (``history_{n}.json`` at message ``index``). A malformed record
+        therefore cannot be repaired without inventing a location, so this
+        raises ``ValueError`` naming the offending record instead of normalising
+        it -- the restore is then refused and the user starts a fresh session,
+        which is honest. (The old lenient pass silently dropped junk entries,
+        clamped negatives at 0 and renumbered turns ``1..N``; one dropped record
+        shifted every later turn number and made a rewind land in the wrong
+        place while still reporting success.)
+
+        Requirements: a JSON list of objects, each with integer ``turn`` /
+        ``history_file`` / ``index``, no negative ``history_file`` or ``index``,
+        and ``turn == position + 1`` (turns run contiguously from 1). An empty
+        list is valid -- a session that quit before finishing a turn.
         """
-        saved = load_summary_from_dir(restore_directory)
-
-        saved = [r for r in saved if isinstance(r, dict)]
-        if saved:
-            self.summary = saved
-            self.history_index = int(saved[-1].get("history_file", 0))
-            return
-        turn = 0
-        for i, m in enumerate(self.messages):
-            if m.get("role") == "assistant":
-                turn += 1
-                self.summary.append({"turn": turn, "what": "assistant",
-                                     "history_file": 0, "index": i})
+        if not isinstance(saved, list):
+            raise ValueError("summary_history.json does not hold a list of turns")
+        records = []
+        for position, entry in enumerate(saved, start=1):
+            if not isinstance(entry, dict):
+                raise ValueError(f"record {position} is not a JSON object")
+            for key in ("turn", "history_file", "index"):
+                value = entry.get(key)
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise ValueError(
+                        f"record {position} has a non-integer {key} ({value!r})")
+            if entry["turn"] != position:
+                raise ValueError(
+                    f"record {position} is numbered turn {entry['turn']} "
+                    f"(turns must run 1..{len(saved)})")
+            if entry["history_file"] < 0 or entry["index"] < 0:
+                raise ValueError(
+                    f"record {position} has a negative history_file/index")
+            records.append({
+                "turn": entry["turn"],
+                "what": str(entry.get("what") or "?"),
+                "history_file": entry["history_file"],
+                "index": entry["index"],
+            })
+        return records
 
     def _record_turn(self, what, messages, history_index=None):
         """Append one entry to the high-level recorder.
@@ -815,64 +943,193 @@ class AgentSession:
 
     def _show_history(self):
         """Print the high-level recorder as a numbered list of turns."""
-        rows = [(str(r.get("turn", i + 1)),
-                 r.get("what", "?"),
-                 f"history_{r.get('history_file', 0)}.json#{r.get('index', 0)}")
-                for i, r in enumerate(self.summary)]
+        if not self.summary:
+            self.console.note("No history has been recorded yet.", "warn")
+            return
+        rows = [(str(_safe_int(r.get("turn", i + 1), i + 1)),
+                 str(r.get("what") or "?"),
+                 f"history_{_safe_int(r.get('history_file'), 0)}.json"
+                 f"#{_safe_int(r.get('index'), 0)}")
+                for i, r in enumerate(self.summary) if isinstance(r, dict)]
         self.console.history_list(rows)
+
+    def _resolve_turn_record(self, arg):
+        """Resolve a turn selector to ``(position, record)``, or ``None``.
+
+        One rule for both ``/history <n>`` and ``/reset <n>``: accept ``last``
+        (case-insensitive) or a **positive** 1-based integer, and reject
+        everything else with the same message -- ``0``, negatives, non-integers
+        and out-of-range values. Previously ``/history`` computed
+        ``summary[int(arg) - 1]`` without a lower bound, so ``/history 0``
+        silently showed the *last* turn and ``/history -2`` the third-to-last,
+        while ``/reset`` rejected exactly those inputs: the same user mistake got
+        two different (and one silently wrong) answers.
+        """
+        count = len(self.summary)
+        if not count:
+            self.console.note("No history has been recorded yet.", "warn")
+            return None
+        text = (arg or "").strip().lower()
+        if text in ("last", ""):
+            return count - 1, self.summary[-1]
+        try:
+            position = int(text) - 1
+        except (TypeError, ValueError):
+            position = -1
+        if not 0 <= position < count:
+            self.console.note(
+                f"No such turn {arg!r} (have 1..{count}, or 'last').", "error")
+            return None
+        return position, self.summary[position]
 
     def _inspect_history(self, arg):
         """Print the full messages recorded for a single turn."""
-        try:
-            record = self.summary[-1] if arg == "last" else self.summary[int(arg) - 1]
-        except (ValueError, IndexError):
-            self.console.note(f"No such turn {arg!r} (have 1..{len(self.summary)}).", "error")
+        resolved = self._resolve_turn_record(arg)
+        if resolved is None:
             return
+        _, record = resolved
         messages = self._segment_upto(record)
         if messages is None:
             return
         self.console.history_detail(record, messages, total=len(self.summary))
+
+    def _load_segment(self, history_index):
+        """Load ``history_{history_index}.json`` as a message list, or ``None``.
+
+        Never raises and never trusts the argument: an out-of-range, negative or
+        non-integer index, a missing file, unreadable JSON or a payload that is
+        not a non-empty list all yield ``None``. Navigation and the rewind only
+        ever *read* through here, so a damaged segment can never crash the CLI.
+        """
+        index = _safe_int(history_index, -1)
+        if index < 0 or not self.session_dir:
+            return None
+        path = os.path.join(self.session_dir, f"history_{index}.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                segment = json.load(f)
+        except Exception:
+            return None
+        if not isinstance(segment, list) or not segment:
+            return None
+        return [m for m in segment if isinstance(m, dict)]
+
+    def _segment_for(self, history_index):
+        """Return the messages of a segment, preferring the live transcript.
+
+        ``_persist()`` only runs on quit (and at a compaction rollover), so the
+        ``history_{n}.json`` file on disk can lag arbitrarily far behind the
+        running conversation. For the *current* segment the in-memory transcript
+        is therefore the authoritative copy -- reading the file instead used to
+        silently drop everything said since the last save (a ``/reset`` could
+        truncate to a state older than the turn it was asked to keep). Older
+        segments are immutable within their lifetime, so they are read from disk.
+        """
+        index = _safe_int(history_index, -1)
+        if index < 0:
+            return None
+        if index == self.history_index:
+            live = [m for m in self.messages if isinstance(m, dict)]
+            if live:
+                return live
+        return self._load_segment(index)
 
     def _segment_upto(self, record):
         """Load a recorded turn's segment and truncate it at its index.
 
         Returns the messages reproducing the conversation state at the end of
         that turn, or None if the segment could not be loaded (never raises: a
-        missing or moved segment must not crash navigation).
+        missing or moved segment must not crash navigation). Both recorded
+        numbers are coerced and the index is clamped into the segment, so a
+        stale or hand-edited recorder entry cannot slice outside it.
         """
-        segment_path = os.path.join(
-            self.session_dir, f"history_{record.get('history_file', 0)}.json")
-        try:
-            with open(segment_path, "r", encoding="utf-8") as f:
-                segment = json.load(f)
-        except Exception:
+        segment = self._segment_for(record.get("history_file"))
+        if not segment:
             self.console.note("Could not load the history segment for that turn.", "error")
             return None
-        idx = max(0, min(int(record.get("index", 0)), len(segment) - 1))
-        return segment[:idx + 1]
+        index = max(0, min(_safe_int(record.get("index"), 0), len(segment) - 1))
+        return segment[:index + 1]
 
-    def _reset_history(self, keep, record):
+    def _reset_history(self, keep_count, record, force=True):
         """Rewind the conversation to the end of a recorded turn.
 
-        Rebuilds ``self.messages`` from the turn's recorded segment + index,
-        moves the session back onto that segment (``history_index``) and drops
-        everything after it -- both the extra messages and the later recorder
-        entries. New turns then continue from that state. Best-effort only: a
-        segment that cannot be loaded leaves the session unchanged.
+        ``keep_count`` is how many recorder entries to keep (the resolved
+        position + 1 -- *not* ``record["turn"]``, which is display data and used
+        to be trusted for slicing). The work is ordered so a failure cannot leave
+        the live session remembering a state the disk did not accept:
+
+          1. load the target segment and compute the truncated transcript;
+          2. refuse (with a warning) when ``force`` is off and messages after the
+             recorded turn exist -- an unrecorded tail must not be silently
+             destroyed;
+          3. persist the truncated ``history_{n}.json``, ``summary_history.json``
+             and ``total_usage.json`` *first*, rolling the segment/summary back
+             if either write fails;
+          4. delete the now-orphaned higher segments (best-effort: a failure is
+             a warning, not a rollback -- the rewind is already on disk);
+          5. only then mutate the live session.
+
+        Afterwards the session is really on segment ``n``: ``token_stats`` is
+        reloaded from ``usage_{n}.json`` (so the next ``_persist()`` cannot write
+        the later segment's counters over it), the remembered prompt size is
+        dropped (it describes a transcript that no longer exists) and
+        ``total_usage`` is left alone -- a rewind does not un-spend tokens.
         """
-        messages = self._segment_upto(record)
-        if messages is None:
-            return
+        target_index = _safe_int(record.get("history_file"), -1)
+        full_segment = self._segment_for(target_index)
+        if full_segment is None:
+            self.console.note(
+                "Could not load the history segment for that turn; "
+                "the session is unchanged.", "error")
+            return False
+
+        index = max(0, min(_safe_int(record.get("index"), 0), len(full_segment) - 1))
+        messages = full_segment[:index + 1]
+        trailing = max(len(full_segment) - len(messages), 0)
+        if not force and trailing:
+            self.console.note(
+                f"{trailing} message(s) after turn {keep_count} were never recorded; "
+                f"refusing to discard them. Use /reset {keep_count} to rewind anyway.",
+                "warn")
+            return False
+
+        new_summary = [r for r in self.summary[:keep_count] if isinstance(r, dict)]
+        try:
+            save_history(messages, self.cache_dir, self.unique_id, target_index)
+            save_summary(new_summary, self.cache_dir, self.unique_id)
+            save_total_usage(self.total_usage, self.cache_dir, self.unique_id)
+        except Exception as e:
+            # Put the untouched segment and recorder back, so the on-disk state
+            # still matches the (unchanged) in-memory session.
+            try:
+                save_history(full_segment, self.cache_dir, self.unique_id, target_index)
+                save_summary(self.summary, self.cache_dir, self.unique_id)
+            except Exception:
+                pass
+            self.console.note(
+                f"Could not persist the rewind ({e}); the session is unchanged.", "error")
+            return False
+
+        removed = delete_segments_above(self.session_dir, target_index)
+
         self.messages = messages
-        self.history_index = int(record.get("history_file", 0))
-        self.summary = self.summary[:keep]
-        save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
-        save_summary(self.summary, self.cache_dir, self.unique_id)
+        self.history_index = target_index
+        self.summary = new_summary
+        self.token_stats = load_usage_segment(self.session_dir, target_index)
+        self.last_prompt_tokens = 0
+        self.last_prompt_message_count = 0
+
         self.console.note(
-            f"Reset to turn {keep}: kept {len(self.messages)} messages "
-            f"(history_{self.history_index}.json up to index "
-            f"{int(record.get('index', 0))}).", "ok")
+            f"Reset to turn {keep_count}: kept {len(self.messages)} messages "
+            f"(history_{target_index}.json up to index {index}).", "ok")
+        if removed:
+            # Reported at "ok" level, not "info": info notes are hidden in the
+            # default (non-verbose) view, which is exactly where the user needs to
+            # know that files were deleted.
+            self.console.note(
+                f"Removed {len(removed)} later history/usage segment file(s).", "ok")
         self.console.note("Continuing: new turns will append to this state.", "info")
+        return True
 
     def _warn_sudo(self):
         """Print a prominent red warning about --sudo mode.
@@ -1363,8 +1620,10 @@ class AgentSession:
           /history           list the high-level recorder (turn number, what
                              happened, and which history_{n}.json + index)
           /history <n>       show the full messages recorded for turn <n>
-          /reset [<n>]       rewind the conversation to the end of turn <n>
-                             (no <n> rewinds to the most recent turn)
+          /history last      ...for the most recent turn
+          /reset [<n>|last]  rewind the conversation to the end of turn <n>
+                             (a bare /reset only re-saves the current state;
+                             see _do_reset)
           /plan              show the current goal + plan the loop maintains
                              (plan mode only)
           /clear             clear the screen (keeps the conversation)
@@ -1404,25 +1663,38 @@ class AgentSession:
     def _do_reset(self, arg):
         """Rewind the conversation to the end of a recorded turn.
 
-        No argument resets to the most recent turn (a no-op that just replays the
-        current state). With <n>, rewinds to that turn, dropping the messages and
-        recorder entries after it.
+        ``/reset <n>`` and ``/reset last`` are *explicit* rewinds: they truncate
+        the transcript to the end of that turn and drop everything recorded after
+        it. A bare ``/reset`` is the cautious variant -- it never truncates: when
+        the transcript really ends at the last recorded turn it just reports
+        "Already at turn N", and when unrecorded messages follow that turn it
+        *warns* instead of destroying them, because the user never asked for a
+        specific turn. Forcing the rewind is one explicit command away:
+        ``/reset <n>``.
         """
-        if not self.summary:
-            self.console.note("No history has been recorded yet.", "warn")
+        resolved = self._resolve_turn_record(arg)
+        if resolved is None:
             return
-        target = self.summary[-1]
-        if arg:
-            try:
-                idx = int(arg) - 1
-                if not (0 <= idx < len(self.summary)):
-                    raise ValueError
-                target = self.summary[idx]
-            except ValueError:
-                self.console.note(
-                    f"No such turn {arg!r} (have 1..{len(self.summary)}).", "error")
-                return
-        self._reset_history(target["turn"], target)
+        position, record = resolved
+        explicit = bool((arg or "").strip())
+
+        if not explicit and self._transcript_ends_at(record):
+            self.console.note(
+                f"Already at turn {position + 1} (the last recorded turn); "
+                f"nothing to rewind. Use /reset <n> to rewind to an earlier turn.",
+                "ok")
+            return
+        self._reset_history(position + 1, record, force=explicit)
+
+    def _transcript_ends_at(self, record):
+        """Whether the live transcript is exactly the state recorded for a turn.
+
+        That is true when the session is still on the record's segment and its
+        last message is the one the record points at -- i.e. a bare ``/reset``
+        has nothing left to drop.
+        """
+        return (_safe_int(record.get("history_file"), -1) == self.history_index
+                and len(self.messages) == _safe_int(record.get("index"), -1) + 1)
 
     def _show_plan(self):
         """Show the current plan/goal the loop maintains (``/plan`` command).
@@ -1633,20 +1905,49 @@ class AgentSession:
                           badge=self._context_badge())
 
     def _persist(self):
-        save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
-        save_summary(self.summary, self.cache_dir, self.unique_id)
-        usage_path = save_usage_segment(self.token_stats, self.cache_dir,
-                                        self.unique_id, self.history_index)
-        total_path = save_total_usage(self.total_usage, self.cache_dir, self.unique_id)
-        self.console.note(
-            f"Saved usage to: {usage_path} (session total: {total_path})", "info")
+        """Write the current segment, recorder and usage totals to disk.
+
+        Each write is attempted independently and none of them may raise: a full
+        disk, a read-only cache dir or a permission hiccup has to degrade to a
+        warning. Quitting must never crash, and a failed transcript save must not
+        stop the usage totals (or the other way round) from being written.
+        """
+        def attempt(label, write):
+            try:
+                return write()
+            except Exception as e:
+                self.console.note(f"Could not save the {label}: {e}", "error")
+                return None
+
+        attempt("history segment", lambda: save_history(
+            self.messages, self.cache_dir, self.unique_id, self.history_index))
+        attempt("history recorder", lambda: save_summary(
+            self.summary, self.cache_dir, self.unique_id))
+        usage_path = attempt("segment usage", lambda: save_usage_segment(
+            self.token_stats, self.cache_dir, self.unique_id, self.history_index))
+        total_path = attempt("session usage", lambda: save_total_usage(
+            self.total_usage, self.cache_dir, self.unique_id))
+        if usage_path or total_path:
+            self.console.note(
+                f"Saved usage to: {usage_path} (session total: {total_path})", "info")
 
     def shutdown(self):
         """Persist and print a final summary (called on quit / exit)."""
         self._persist()
+        segments = history_segment_indices(self.session_dir)
+        # List what is really on disk. The old message claimed
+        # "history_0..{history_index}.json", which was a lie after a /reset had
+        # removed the higher segments (or moved the session back onto an earlier
+        # one) -- it named files that no longer existed and hid the ones that did.
+        if segments:
+            present = (f"history_{segments[0]}.json"
+                       if len(segments) == 1 else
+                       f"history_{segments[0]}..{segments[-1]}.json")
+        else:
+            present = f"history_{self.history_index}.json"
         self.console.note(
             f"Saved session to {self.cache_dir}/{self.unique_id}/ "
-            f"(history_0..{self.history_index}.json + summary_history.json).", "ok")
+            f"({present} + summary_history.json).", "ok")
         self.console.usage_summary(self.total_usage)
 
     # -- single LLM turn ---------------------------------------------------
@@ -1659,6 +1960,9 @@ class AgentSession:
         # rolls the session over to a fresh history segment (history_index + 1)
         # and returns that bump so the recorder can stay flat across it.
         segment_before = dict(self.token_stats)
+        # The segment as it stands *before* compaction: it has to be flushed to
+        # disk as it is being closed (see below), because nothing else writes it.
+        closing_messages = self.messages
         projected = self._projected_input_tokens()
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
@@ -1682,10 +1986,21 @@ class AgentSession:
             # would trigger compaction again immediately.
             self.last_prompt_tokens = 0
             self.last_prompt_message_count = 0
-            # Close the old segment's usage file before moving on, so its spend
-            # is preserved on disk even though the next segment starts at zero.
-            save_usage_segment(self.token_stats, self.cache_dir, self.unique_id,
-                               self.history_index)
+            # Close the old segment's files before moving on: its spend is
+            # preserved for the totals, and its *messages* are flushed so the
+            # recorder keeps pointing at a transcript that really exists on disk.
+            # Nothing else writes a closing segment -- the interactive loop only
+            # persists on quit -- so without this history_{n}.json would be short
+            # by every turn recorded in that segment, and /reset (or a restore)
+            # would rewind to a state the user never saw.
+            try:
+                save_usage_segment(self.token_stats, self.cache_dir, self.unique_id,
+                                   self.history_index)
+                save_history(closing_messages, self.cache_dir, self.unique_id,
+                             self.history_index)
+            except Exception as e:
+                self.console.note(
+                    f"Could not save the closed history segment: {e}", "warn")
             self.history_index = new_index
             self.token_stats = empty_usage()
             # Snapshot the compacted messages into the new segment so its turns
@@ -1785,6 +2100,13 @@ class AgentSession:
                 self.messages)
         elif response_text:
             self._record_turn("assistant", self.messages)
+        else:
+            # A step that produced neither text nor tool calls (a failed call, or
+            # a model that answered with nothing) still appended an assistant
+            # message, so it is recorded as well. The recorder must cover the
+            # *final* message: otherwise a bare /reset sees an unrecorded tail
+            # and refuses to touch a conversation that is in fact settled.
+            self._record_turn("assistant (no response)", self.messages)
 
         return made_tool_calls and self.args.auto_mode
 
@@ -1794,7 +2116,7 @@ class _Abort(Exception):
 
 
 # ---------------------------------------------------------------------------
-# module-level helpers kept for readability / backward compatibility
+# entry point
 # ---------------------------------------------------------------------------
 
 def main():

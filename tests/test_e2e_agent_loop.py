@@ -31,8 +31,9 @@ Scenarios
                                   bump over it, and plan mode's goal/plan
                                   re-injection.
 * ``RestoreSessionEndToEndTest`` -- a persisted session is restored *in place*
-                                  (same id), including the legacy folder that has
-                                  a history but no recorder file, and
+                                  (same id), a folder that does not satisfy the
+                                  restore contract (no recorder) is refused and
+                                  replaced by a fresh session, and
                                   ``--load-last-session`` continues whatever the
                                   ``.mini_tests`` pointer names without asking.
                                   (The tests record their pointer under
@@ -121,8 +122,10 @@ class StubLLM:
     It pops responses from a queue in order and records every call's arguments
     in ``self.calls`` so tests can assert on what the loop actually sent the
     model. Each item in the queue may be either a callable (called with the
-    live ``messages`` list, returning a ``(content, tool_calls, usage)`` tuple)
-    or a pre-built tuple.
+    live ``messages`` list) or a pre-built tuple; either way it spells the two
+    fields a test cares about -- ``(content, tool_calls, usage)`` -- and the stub
+    supplies the fourth (``reasoning_content=None``) so what the loop receives
+    has the real 4-field shape.
     """
 
     def __init__(self, queue):
@@ -135,8 +138,9 @@ class StubLLM:
             raise AssertionError("LLM stub called more times than scripted")
         item = self.queue.pop(0)
         if callable(item):
-            return item(messages)
-        return item
+            item = item(messages)
+        content, tool_calls, usage = item
+        return content, tool_calls, usage, None
 
 
 def run_loop(session, prompt, stub):
@@ -684,6 +688,32 @@ class TokenBudgetCompactionTest(unittest.TestCase):
         self.assertEqual(total["total_tokens"], 2 * USAGE["total_tokens"])
         self.assertEqual(total, session.total_usage)
 
+    def test_a_rollover_flushes_the_closing_segment(self):
+        """``history_0.json`` must hold every message its recorded turns point at.
+
+        The interactive loop only persists on quit, so the compaction is the last
+        chance to write the segment it is closing. Without that flush the file
+        stayed short by every turn recorded in it, and a ``/reset`` (or a restore)
+        rewound to a state the user never saw.
+        """
+        session = self._session(max_context_tokens=1)
+        session.messages = [{"role": "system", "content": "S"},
+                            {"role": "user", "content": "the question"},
+                            {"role": "assistant", "content": "the answer"}]
+        session.summary = [{"turn": 1, "what": "assistant", "history_file": 0, "index": 2}]
+
+        self._run_step(session, [("Summary.", [], USAGE), ("Done.", [], USAGE)])
+        session.shutdown()
+
+        self.assertEqual(session.history_index, 1)
+        session_dir = os.path.join(self.cache_dir, session.unique_id)
+        with open(os.path.join(session_dir, "history_0.json"), "r", encoding="utf-8") as f:
+            closed = json.load(f)
+        self.assertEqual([m.get("content") for m in closed],
+                         ["S", "the question", "the answer"])
+        # Atomic writes: nothing half-written is left lying around.
+        self.assertEqual([n for n in os.listdir(session_dir) if ".tmp." in n], [])
+
     def test_the_stale_prompt_report_is_dropped_after_a_rollover(self):
         session = self._session(max_context_tokens=1)
         session.last_prompt_tokens = 12_345
@@ -711,9 +741,9 @@ class TokenBudgetCompactionTest(unittest.TestCase):
         self.assertEqual(len(session.messages), 502)   # transcript untouched
 
     def test_compaction_ignores_a_max_messages_style_attribute(self):
-        # A leftover/legacy ``max_messages`` on the args namespace must have no
+        # A ``max_messages`` attribute on the args namespace must have no
         # effect: the wiring reads tokens only, so an over-large turn count is
-        # not compacted even when a namespace still carries the old attribute.
+        # not compacted even when something sets that attribute.
         session = self._session(model="gpt-4o")
         session.args.max_messages = 2
         session.messages = ([{"role": "system", "content": "S"}]
@@ -909,34 +939,35 @@ class RestoreSessionEndToEndTest(unittest.TestCase):
 
         self.assertEqual(session.unique_id, original.unique_id)
 
-    def test_legacy_folder_without_recorder_is_restored(self):
-        """A history_*.json without summary_history.json still restores.
+    def test_a_folder_without_a_recorder_is_refused(self):
+        """No summary_history.json means unrestorable: a fresh session, plus a note.
 
-        The recorder is rebuilt from the messages (the documented fallback);
-        before the fix the restore raised AttributeError on the unset
-        ``summary`` / ``messages`` and silently started a brand-new session.
+        There is no rebuild-the-recorder-from-the-transcript path any more: it
+        had to invent turn boundaries, and then a restored session behaved
+        differently under /reset than a recorded one.
         """
-        session_dir = os.path.join(self.cache_dir, "legacy_session")
+        session_dir = os.path.join(self.cache_dir, "bare_session")
         os.makedirs(session_dir)
-        with open(os.path.join(session_dir, "history.json"), "w") as f:
+        with open(os.path.join(session_dir, "history_0.json"), "w") as f:
             json.dump([
                 {"role": "system", "content": "S"},
                 {"role": "user", "content": "old question"},
                 {"role": "assistant", "content": "old answer"},
             ], f)
 
+        console = silent_console()
         args = make_args(self.workdir, self.cache_dir)
         args.restore_session = session_dir
-        session = AgentSession(args, console=silent_console())
+        session = AgentSession(args, console=console)
         session.start_session()
 
-        self.assertEqual(session.unique_id, "legacy_session")
-        self.assertEqual([m["content"] for m in session.messages],
-                         ["S", "old question", "old answer"])
-        self.assertEqual(session.history_index, 0)
-        # The recorder was rebuilt: one assistant turn pointing at the tail.
-        self.assertEqual([r["what"] for r in session.summary], ["assistant"])
-        self.assertEqual(session.summary[0]["index"], 2)
+        # A brand-new session, not the refused folder ...
+        self.assertNotEqual(session.unique_id, "bare_session")
+        self.assertNotEqual(session.session_dir, session_dir)
+        self.assertEqual(session.summary, [])
+        self.assertEqual([m["role"] for m in session.messages], ["system"])
+        # ... and the folder itself was not written into.
+        self.assertEqual(os.listdir(session_dir), ["history_0.json"])
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@
 
 **Purpose:** a no-bloat, minimal coding CLI to enjoy experimenting and researching.
 
-**Install** · [Quick start](#quick-start) · [Modes &amp; safety](#modes--safety) · [Options](#command-line-options) · [Tools](#available-tools) · [Sub-agents](#sub-agents) · [In-session commands](#in-session-commands) · [Development](#development) · [Citation](#citation)
+**Install** · [Quick start](#quick-start) · [Modes &amp; safety](#modes--safety) · [Options](#command-line-options) · [Tools](#available-tools) · [Sub-agents](#sub-agents) · [In-session commands](#in-session-commands) · [Development](#development) · [Docs](#documentation) · [Citation](#citation)
 
 > [!TIP]
 > **New here?** `pip install mini-code-cli`, point it at a model (a local server on
@@ -28,7 +28,7 @@ pip3 install mini-code-cli
 
 - **PyPI:** <https://pypi.org/project/mini-code-cli/>
 - **Python:** `>= 3.10` &nbsp;·&nbsp; **runtime dependency:** `requests` only
-- **From source / contributing:** see [README_DEV.md](README_DEV.md)
+- **From source / contributing:** see [docs/README_DEV.md](docs/README_DEV.md)
 
 ## Quick start
 
@@ -156,8 +156,8 @@ register(SummarizeSubAgent())
 
 Make sure the module is imported (e.g. `import my_subagents`) and it is discovered and exposed
 to the model automatically when `--enable-subagents` is set. See
-`mini_code_cli/subagents/builtin.py` for every knob and `ARCHITECTURE.md` (sections 2–3) for the
-design.
+`mini_code_cli/subagents/builtin.py` for every knob and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (sections 2–3) for the design.
 
 </details>
 
@@ -167,16 +167,35 @@ design.
 | --- | --- |
 | `/history` | list the conversation (turn number, what happened, where) |
 | `/history <n>` | show the full messages recorded for turn `n` |
-| `/reset [<n>]` | rewind to the end of turn `n` (drops everything after it) |
+| `/history last` | ...for the most recent turn |
+| `/reset [<n>]` | rewind to the end of turn `n` (`last` works too); drops everything after it |
 | `/clear` | clear the screen (keeps the conversation history) |
 | `/plan` | show the current goal + plan (plan mode only) |
 | `/help` | show this help |
 | `/quit`, `/exit` | save the session and exit |
 
+> [!NOTE]
+> `/history` and `/reset` are driven by `summary_history.json`, a flat recorder that maps every
+> turn to the `history_{n}.json` segment and message index it lives in — so no full history is
+> read just to list the conversation.
+>
+> * **`<n>` is validated**: `last`, or a positive 1-based turn number. `0`, negatives and
+>   non-numbers are rejected with `No such turn` instead of silently showing a different turn.
+> * **A bare `/reset` never destroys anything**: it reports `Already at turn N` when the
+>   transcript already ends at the last recorded turn, and *warns instead of truncating* if
+>   there are messages that were never recorded. Only `/reset <n>` / `/reset last` rewind.
+> * **A rewind really sticks**: the target `history_{n}.json` is truncated in place (no backup)
+>   and every higher `history_{m}.json` / `usage_{m}.json` segment is deleted, so a restart
+>   cannot resurrect the dropped turns. All history files are written atomically.
+> * **Token usage is never rolled back**: a rewind does not un-spend tokens, and the session
+>   total is preserved. See
+>   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#rewinding-reset-and-what-it-does-to-the-files)
+>   for the files involved.
+
 ## Development
 
 Linting, the test suite, CI and the release process are documented in
-[**README_DEV.md**](README_DEV.md).
+[**docs/README_DEV.md**](docs/README_DEV.md).
 
 ```bash
 python3 scripts/lint.py                                # lint (standard library only)
@@ -187,7 +206,18 @@ Releases are cut by tagging `main`: pushing a `v*` tag triggers
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the sdist + wheel,
 verifies them with `twine check`, and attaches them to a new GitHub release.
 
+## Documentation
 
+Everything beyond this README lives in [`docs/`](docs/):
+
+| Document | What it covers |
+| --- | --- |
+| [**docs/README_DEV.md**](docs/README_DEV.md) | developer guide — local setup, repository layout, linting, the test suite, CI and the release / PyPI upload process |
+| [**docs/ARCHITECTURE.md**](docs/ARCHITECTURE.md) | design — module layout, on-disk conversation state (`history_{n}.json`, `summary_history.json`, usage files), the sub-agent framework and how to extend it |
+
+This README stays the user-facing entry point (install, CLI flags, tools, sub-agents,
+in-session commands, modes &amp; safety); the two documents above go deeper on the developer
+and design side.
 
 ## Modes & safety
 
@@ -233,15 +263,23 @@ Every session is saved under `--cache-dir` (default `~/.cache/mini/sessions/`).
 
 | Flag | Behaviour |
 | --- | --- |
-| `--restore-session PATH` | continue that exact session |
+| `--restore-session PATH` | continue that exact session (a session directory or a bare session id under `--cache-dir`) |
 | `-l`, `--load-last-session` | continue the session recorded in the `.mini/last_session.json` pointer, without asking |
 
-`--load-last-session` resumes under a **brand-new session id**, so the original is never
-overwritten; an explicit `--restore-session` wins if both are given. The "most recent" session
-comes from a single source — the tiny `.mini/last_session.json` pointer written at the end of
-every interactive session inside `--allowed-dir` (deliberately no timestamp fallback: with no
-pointer, a fresh session starts). That pointer lives in the same `.mini` directory as `--skills`,
-but as its own dedicated file, so the two never clash.
+`--load-last-session` continues that session **in place** (same id, same folder, same
+messages), so the conversation you were in is the one you get back; an explicit
+`--restore-session` wins if both are given. The "most recent" session comes from a single
+source — the tiny `.mini/last_session.json` pointer written when a session starts or is
+restored inside `--allowed-dir` (deliberately no timestamp fallback: with no pointer, a fresh
+session starts). That pointer lives in the same `.mini` directory as `--skills`, but as its
+own dedicated file, so the two never clash.
+
+A session folder is restorable only if it has what this version writes: a valid
+`summary_history.json` recorder, plus the `history_{n}.json` segment its last record names
+(usage files are optional). Anything else — a folder from an older release, a hand-assembled
+transcript, a recorder that does not validate, a missing segment — is **refused with a note
+saying why**, and a fresh session is started instead. Nothing is repaired, guessed at, or
+written into the refused folder.
 
 ### Context compaction — `--max-context-tokens`
 

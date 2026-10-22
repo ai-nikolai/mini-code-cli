@@ -2,7 +2,7 @@ name: Release
 
 # Cut a release by tagging a commit on `main` and pushing the tag:
 #   git tag -a v0.1.1.0 -m "release 0.1.1.0" && git push origin v0.1.1.0
-# See README_DEV.md for the full release process.
+# See docs/README_DEV.md for the full release process.
 on:
   push:
     tags:
