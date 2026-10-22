@@ -1,18 +1,24 @@
-PORT=30000
+#!/bin/bash
+#
+# Serve a local model for the agent to talk to, then wait until it answers
+# /health before returning.
+#
+# NOTE: this deliberately serves the *small* checkpoint (35B-A3B, tensor
+# parallel 1) so it fits on a single GPU. README.md documents a larger example
+# (Ornith-1.5-397B-FP8, tensor parallel 4); use that one, or edit this line, if
+# you have the hardware for it.
 
+PORT=30000
 
 echo "Starting Model."
 CUDA_VISIBLE_DEVICES=0 vllm serve ornith-ai/Ornith-1.5-35B-A3B \
     --tensor-parallel-size 1 \
-    --host 0.0.0.0 --port ${PORT} \
-    --tensor-parallel-size 1 \
     --host 0.0.0.0 \
-    --port 30000 \
+    --port "${PORT}" \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_xml \
     --reasoning-parser qwen3 \
     --trust-remote-code > ./vllm.log 2>&1 &
-
 
 TIMEOUT_SECONDS=1200
 INTERVAL_SECONDS=1

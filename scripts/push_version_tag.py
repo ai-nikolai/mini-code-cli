@@ -103,6 +103,14 @@ def read_version(path):
     in: it follows the section headers, so a ``version`` key in some other table
     is ignored rather than mistaken for the release number. Either way a missing
     or unusable version is an error, never a guess.
+
+    This deliberately does *not* reuse ``mini_code_cli.__init__._read_version``:
+    that one falls back to installed distribution metadata (it must, so the
+    welcome banner works from a wheel), whereas a release must be cut from the
+    file in front of us. It is also the reason this script is standalone -- it
+    has to run on a fresh checkout where the package is not installed. The two
+    readers are allowed to differ in that fallback, and
+    ``tests/test_release_script.py`` pins them to the same version otherwise.
     """
     try:
         with open(path, "rb") as handle:
@@ -230,6 +238,11 @@ def check_releasable(remote):
     stays a successful no-op even if the checkout has since moved on. Every
     branch is checked so the message names the one condition that actually
     failed, rather than a generic "cannot release".
+
+    ``.github/workflows/release.yml`` repeats this rule (it must: the tag can be
+    pushed from anywhere, including a laptop that never ran this script). That
+    duplication is deliberate defence in depth -- this check fails in seconds,
+    the workflow's one costs a CI run -- so keep the two in step.
     """
     head = git("rev-parse", "HEAD")
     main_head = remote_branch_head("main", remote)
