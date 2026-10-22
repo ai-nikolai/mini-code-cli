@@ -31,7 +31,7 @@ from . import prompts
 from . import shell_safety_utils
 from . import tools
 from . import utils
-from .utils import oneline
+from .utils import oneline, plural
 from . import ui
 from . import subagents
 from . import skills
@@ -118,7 +118,12 @@ def _safe_int(value, default=0):
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
+    # ``prog`` is pinned so ``--help`` reads the same whether the agent was
+    # started through the ``mini-code`` script, ``python -m mini_code_cli`` or
+    # a test harness (without it, the usage line said ``__main__.py``).
+    parser = argparse.ArgumentParser(
+        prog="mini-code",
+        description="Agent loop for interacting with a language model")
     # MODEL / LLM related
     parser.add_argument("--url", type=str, default=f"{DEFAULT_MODEL_URL}", help=f"API host, default={DEFAULT_MODEL_URL}")
     parser.add_argument("--max-tokens", type=int, help="Maximum tokens for a single LLM response (the reply budget), default=None. Also used as the output headroom reserved when deriving the compaction limit from the model's context window.")
@@ -298,11 +303,6 @@ def _in_flight_tail(messages):
     return []
 
 
-def _plural(count, noun, suffix="s"):
-    """``"1 message"`` / ``"4 messages"`` -- for messages the user reads."""
-    return f"{count} {noun}" + ("" if count == 1 else suffix)
-
-
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
                   current_tokens=None, plan_hook=None, console=None):
@@ -358,12 +358,12 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     # stake; a compaction note that stays silent about that is exactly what makes
     # the rollover look like it might have eaten the message.
     tail = _in_flight_tail(messages)
-    kept_note = (f" The current turn ({_plural(len(tail), 'message')}) is kept "
+    kept_note = (f" The current turn ({plural(len(tail), 'message')}) is kept "
                  f"verbatim." if tail else "")
 
     try:
         console.note(
-            f"Compacting the conversation: {_plural(len(messages), 'message')} "
+            f"Compacting the conversation: {plural(len(messages), 'message')} "
             f"-> a summary ({reason}).{kept_note}", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
 
@@ -404,7 +404,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
             # may still be too large.
             console.note(
                 f"Could not compact history: the summariser returned an empty "
-                f"summary twice. Keeping all {_plural(len(messages), 'message')} "
+                f"summary twice. Keeping all {plural(len(messages), 'message')} "
                 f"and history_{history_index}.json as they are -- nothing was "
                 f"lost, but the next request may still be too large "
                 f"({reason}).", "warn")
@@ -449,7 +449,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         # and *where it went* (which segment file was closed and which was
         # started).
         console.note(f"Summary preview: {utils.oneline(summary, 120)}", "warn")
-        kept = (f"summary + {_plural(len(tail), 'kept message')}" if tail
+        kept = (f"summary + {plural(len(tail), 'kept message')}" if tail
                 else "summary only")
         # Phrased as "old segment -> new segment" rather than "N messages -> M
         # messages": the replacement can be *longer* than what it replaced (a
@@ -457,9 +457,9 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         # counts that sometimes grows reads like a bug.
         console.note(
             f"Compacted history_{history_index}.json "
-            f"({_plural(len(messages), 'message')}) into a summary; "
+            f"({plural(len(messages), 'message')}) into a summary; "
             f"history_{history_index + 1}.json now starts with "
-            f"{_plural(len(compacted), 'message')} ({kept}).", "warn")
+            f"{plural(len(compacted), 'message')} ({kept}).", "warn")
         # A new segment (history_index + 1) is started on compaction: the
         # compacted messages are its snapshot, and every later turn appends
         # to it. The caller records a single high-level 'summary' turn for
@@ -468,7 +468,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     except Exception as e:
         console.note(
             f"Failed to compact history: {e}. Keeping all "
-            f"{_plural(len(messages), 'message')} unchanged.", "error")
+            f"{plural(len(messages), 'message')} unchanged.", "error")
 
     return messages, False, history_index
 
@@ -1960,7 +1960,9 @@ class AgentSession:
         #    just the turns. In verbose mode everything is printed permanently.
         transient = not self.console.verbose
         func = self.tools_dict[name]["function"]
-        result = call_function_with_timeout(func, tool_params, name, timeout_seconds=self.args.tool_timeout)
+        result = call_function_with_timeout(func, tool_params, name,
+                                            timeout_seconds=self.args.tool_timeout,
+                                            console=self.console)
 
         self.console.tool_call_display(name, tool_params, result, transient=transient)
         self._append_tool_result(call_id, str(result))
@@ -2105,8 +2107,8 @@ class AgentSession:
             ("session id", self.unique_id),
             ("saved under", f"{self.cache_dir}/{self.unique_id}/"),
             ("history", f"{where} (segment {self.history_index}), "
-                        f"{_plural(len(self.messages), 'message')}"),
-            ("conversation", _plural(turns, "recorded turn")),
+                        f"{plural(len(self.messages), 'message')}"),
+            ("conversation", plural(turns, "recorded turn")),
             ("tokens", f"{count('prompt_tokens'):,} in / "
                        f"{count('completion_tokens'):,} out "
                        f"({count('total_tokens'):,} total)"),
@@ -2176,7 +2178,7 @@ class AgentSession:
             save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
             self._record_turn(
                 f"summary: history_{new_index - 1}.json "
-                f"({_plural(len(closing_messages), 'message')}) compacted into a "
+                f"({plural(len(closing_messages), 'message')}) compacted into a "
                 f"summary; history_{self.history_index}.json started",
                 self.messages)
 
