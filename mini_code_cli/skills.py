@@ -294,7 +294,10 @@ def run_skill(allowed_dir, skill_name, script_name, args=None):
     argv = shlex.split(args) if args else []
     cmd = [sys.executable, script_path] + argv
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
+        # Run *inside* the skill's own directory: a script that writes or reads
+        # a relative path then stays in the skill folder instead of landing in
+        # whatever directory the agent process happens to have inherited.
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=base,
                                 timeout=DEFAULT_TOOL_TIMEOUT, check=False)
     except Exception as e:
         return f"Error: {e}"

@@ -29,7 +29,7 @@ import shutil
 import sys
 import threading
 
-from .utils import oneline
+from .utils import oneline, plural
 
 # --- ANSI SGR codes ---------------------------------------------------------
 _RESET = "\033[0m"
@@ -348,12 +348,6 @@ class Console:
                 styled_lines.append(text)
         self.print_box(styled_lines, title=title, fg=fg)
 
-    def truncate(self, text, limit):
-        text = str(text)
-        if len(text) > limit:
-            return text[:limit] + "... (truncated)"
-        return text
-
     @staticmethod
     def _oneline(text, limit=None):
         """Collapse ``text`` to one line (delegates to :func:`utils.oneline`)."""
@@ -570,7 +564,7 @@ class Console:
         """Render one attempted tool call: its name, parameters and result."""
         self.emit(self.style(f"{self.glyph('gear')} {name}", fg="magenta", bold=True))
         for key, value in (params or {}).items():
-            snippet = self.truncate(self._oneline(str(value), 100), 100)
+            snippet = self._oneline(str(value), 100)
             key_str = self.style(f"    {key}:", fg="gray", dim=True) if self.color_enabled \
                 else f"    {key}:"
             self.emit(f"{key_str} {snippet}")
@@ -586,7 +580,7 @@ class Console:
                 first = text.splitlines()[0] if text.strip() else "(no output)"
                 arrow = self.style(self.glyph("arrow"), fg=color) if self.color_enabled \
                     else self.glyph("arrow")
-                self.emit(f"    {arrow} {self.truncate(first, 300)}")
+                self.emit(f"    {arrow} {self._oneline(first, 300)}")
 
     def tool_call_display(self, name, params=None, result=None, transient=True):
         """Render one attempted tool call.
@@ -624,7 +618,7 @@ class Console:
                     f"total={usage.get('total_tokens', 0)}")
         if llm_calls is not None:
             calls = int(llm_calls)
-            text += f" | {calls} LLM call{'' if calls == 1 else 's'}"
+            text += f" | {plural(calls, 'LLM call')}"
         label = self.style("tokens", fg="cyan", dim=True) if self.color_enabled else "tokens"
         return f"{label}: {text}"
 
@@ -683,7 +677,7 @@ class Console:
         self.emit(self.style(header, bold=True, fg="cyan"))
         for turn, what, where in rows:
             turn_cell = self.style(turn.rjust(turn_w), fg="magenta", bold=True) if self.color_enabled else turn.rjust(turn_w)
-            what_cell = self.style(self.truncate(what, what_w), dim=True) if self.color_enabled else what.ljust(what_w)
+            what_cell = self.style(self._oneline(what, what_w), dim=True) if self.color_enabled else what.ljust(what_w)
             where_cell = self.style(where, fg="gray", dim=True) if self.color_enabled else where
             self.emit(f"{turn_cell}  {what_cell}  {where_cell}")
         self.emit(self.style("(commands: /history <n> to inspect, /reset <n> to rewind)", dim=True, fg="cyan"))

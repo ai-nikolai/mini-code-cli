@@ -312,6 +312,29 @@ with an empty summary twice, or the call fails, compaction is abandoned and the 
 explicitly — "nothing was lost, but the next request may still be too large" — with the
 transcript and the segment left untouched.
 
+### Exiting — the good-bye box
+
+Quitting (`/quit`, `exit`, or EOF on stdin) saves the session and then prints a short yellow
+box: the version, a sign-off, and what the session left behind — session id, folder, the
+history segments on disk, how many turns were recorded, and the token / call totals.
+
+```
+╔══════════ MiniCodeCLI v0.1.1.2 - goodbye ═════════════════════╗
+║ Goodbye, and thanks for using MiniCodeCLI!                    ║
+║                                                               ║
+║ session id   : 1792666273983619-36ca3c2e                      ║
+║ saved under  : ~/.cache/mini/sessions/1792…-36ca3c2e/         ║
+║ history      : history_0.json (segment 0), 5 messages         ║
+║ conversation : 2 recorded turns                               ║
+║ tokens       : 20 in / 10 out (30 total)                      ║
+║ calls        : 2 LLM, 0 tool                                  ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+It is printed exactly once, and only on a normal exit: a Ctrl-C or an internal error already
+says what went wrong in red, so it does not get a cheerful summary box on top. With `--verbose`
+the old per-field `Token usage (this session)` block is printed above it as well.
+
 
 ## Serving a model locally
 
@@ -337,9 +360,9 @@ If you use `mini-code-cli` in your research or writing, please cite it:
   author       = {Rozanov, Nikolai},
   title        = {mini-code-cli: A minimal, dependency-light coding agent},
   year         = {2026},
-  version      = {0.1.1.0},
+  version      = {0.1.1.2},
   howpublished = {\url{https://github.com/ai-nikolai/mini-code-cli}},
-  note         = {A no-bloat, dependency-free agent CLI for experimenting.}
+  note         = {A no-bloat, dependency-light agent CLI for experimenting.}
 }
 ```
 

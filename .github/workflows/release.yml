@@ -21,10 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0 # full history + tags, needed for the ancestry check below
 
+      # The same rule is enforced client-side by scripts/push_version_tag.py
+      # (check_releasable): a tag may only be cut where HEAD is the tip of
+      # origin/main. That guard exists so a mistake fails in seconds instead of
+      # spending a CI run -- keep the two in step.
       - name: Verify the tag points at a commit on main
         run: |
           set -euo pipefail

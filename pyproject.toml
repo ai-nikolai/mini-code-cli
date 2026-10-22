@@ -11,7 +11,11 @@ dependencies = [
 authors = [
     {name = "Nikolai Rozanov", email = "nikolai.rozanov@gmail.com"},
 ]
-license = {file = "LICENSE"}
+# SPDX expression + explicit licence file (PEP 639). The licence is the
+# AGPL-3.0 text in LICENSE; "-only" because the project does not state
+# "or any later version" anywhere. Needs setuptools >= 77 below.
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 urls = {"Homepage" = "https://github.com/ai-nikolai/mini-code-cli"}
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -24,7 +28,7 @@ classifiers = [
 
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

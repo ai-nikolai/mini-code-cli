@@ -1,6 +1,5 @@
 import requests
 import json
-import sys
 
 
 def oneline(text, limit=None):
@@ -21,6 +20,17 @@ def oneline(text, limit=None):
     if limit is not None and len(one) > limit:
         return one[:limit] + "..."
     return one
+
+
+def plural(count, noun, suffix="s"):
+    """``"1 message"`` / ``"4 messages"`` -- for text a human reads.
+
+    Lives here, next to :func:`oneline`, because both the agent loop (compaction
+    notes, the good-bye box) and the console (usage lines) build user-facing
+    counts; three inline ``'' if n == 1 else 's'`` expressions had already
+    drifted before this was factored out.
+    """
+    return f"{count} {noun}" + ("" if count == 1 else suffix)
 
 
 def _coerce_usage_int(value):
@@ -131,11 +141,14 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    # Note: the request timeout is a *transport* concern and is passed to
+    # ``requests.post(timeout=...)`` below, not put in the JSON body -- it is
+    # not a field of the chat-completions API, and strict gateways reject
+    # unexpected keys.
     payload = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "timeout": timeout,
     }
 
     if max_tokens is not None:
@@ -159,7 +172,10 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         )
         response.raise_for_status()
 
-        result = response.json().get("choices", [{}])[0].get("message", {})
+        # Parse the body once: a second ``response.json()`` call re-decodes it
+        # and can raise on a server that sends a slightly different body.
+        body = response.json()
+        result = body.get("choices", [{}])[0].get("message", {})
         content = result.get("content", "")
         tool_calls = result.get("tool_calls", [])
         # Thinking-mode servers return the chain of thought next to ``content``.
@@ -172,7 +188,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         reasoning_content = result.get("reasoning_content")
 
         # Token usage, when the server reports it (many local servers do not).
-        usage = response.json().get("usage", {}) or {}
+        usage = body.get("usage", {}) or {}
         prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", 0))
         completion_tokens = _coerce_usage_int(usage.get("completion_tokens", 0))
         total_tokens = _coerce_usage_int(
@@ -187,28 +203,51 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         }, reasoning_content
 
     except requests.exceptions.RequestException as e:
-        print(f"HTTP Error: {e}", file=sys.stderr)
-        # Only probe the response further if we actually got one back. A
-        # request-level failure (timeout, connection refused, DNS) leaves
-        # ``response`` as None, and there is nothing to inspect then.
-        if response is not None:
-            try:
-                # Print the status code / raw body to see the detailed error.
-                print(f"Status Code: {response.status_code}", file=sys.stderr)
-                print(f"Response Body: {response.text}", file=sys.stderr)
-                # If the response is JSON, parse and pretty-print it.
-                try:
-                    error_details = response.json()
-                    print("Parsed Error Details:", file=sys.stderr)
-                    print(json.dumps(error_details, indent=2), file=sys.stderr)
-                except json.JSONDecodeError:
-                    print("Response body is not valid JSON.", file=sys.stderr)
-            except Exception as e:
-                print(f"Problem with (error) response: {e}", file=sys.stderr)
+        _report_request_failure(e, response)
         return None, None, None, None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"Error processing response: {e}", file=sys.stderr)
+        _report(f"Error processing the model's response: {e}")
         return None, None, None, None
     except Exception as e:  # noqa: BLE001 -- a network/parse hiccup must not crash the loop
-        print(f"Unexpected error calling OpenAI server: {e}", file=sys.stderr)
+        _report(f"Unexpected error calling the model server: {e}")
         return None, None, None, None
+
+
+def _report(message, level="error"):
+    """Report a request failure through the console, never straight to stderr.
+
+    ``ui`` imports :func:`oneline` from this module, so the console is imported
+    lazily here to keep the import graph acyclic. A single note -- rather than a
+    multi-line ``print`` -- keeps the transient region intact: this can fire
+    while the "… thinking" spinner owns the bottom line, and writing multi-line
+    text underneath it left the screen mangled.
+    """
+    from . import ui  # local: ui imports oneline from here
+    ui.console.note(oneline(message, 300), level)
+
+
+def _report_request_failure(error, response):
+    """Explain an HTTP failure, folding the server's own words into one line.
+
+    Only the response is inspected more closely when there *is* one: a
+    request-level failure (timeout, refused connection, DNS) leaves ``response``
+    as None, and there is nothing to inspect then. The body is the useful part
+    (servers put the real reason there), so it is kept -- collapsed and
+    truncated -- instead of dumping the whole payload into the terminal.
+    """
+    if response is None:
+        _report(f"HTTP error talking to the model server: {error}")
+        return
+    status = getattr(response, "status_code", "?")
+    detail = ""
+    try:
+        body = response.text or ""
+        try:
+            body = json.dumps(response.json())
+        except json.JSONDecodeError:
+            pass  # not JSON: the raw body is the best we have
+        if body.strip():
+            detail = f": {oneline(body, 200)}"
+    except Exception as e:  # a broken response must not break the report
+        detail = f" (and the error body was unreadable: {e})"
+    _report(f"HTTP {status} from the model server: {error}{detail}")
