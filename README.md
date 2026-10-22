@@ -232,60 +232,33 @@ options:
 /quit, /exit        save the session and exit
 ```
 
-## Testing
+## Development
 
-The project ships with a small standard-library test suite (no extra dependencies to install):
+Developer-oriented documentation lives in [**README_DEV.md**](README_DEV.md): local setup,
+repository layout, linting, the test suite, CI, and how to cut a release.
 
-```bash
-# Run the whole suite from the repo root:
-python3 -m unittest discover -s tests -p "test_*.py"
-
-# ...or run a single test file:
-python3 tests/test_tokens.py
-python3 tests/test_e2e_agent_loop.py
-python3 tests/test_interactive.py
-python3 tests/test_subagents.py
-```
-
-### Linting
-
-There is no third-party linter to install: `scripts/lint.py` is itself standard-library only
-and checks that every `*.py` under `mini_code_cli/`, `tests/` and `scripts/` compiles, has
-unambiguous indentation (`tabnanny`), and is tidy (no trailing whitespace, no tab characters,
-a newline at end of file). It exits non-zero if it reports anything:
+Quick pointers:
 
 ```bash
-python3 scripts/lint.py          # lint the defaults
-python3 scripts/lint.py tests    # ...or specific files / directories
+python3 scripts/lint.py                                  # lint (standard library only)
+python3 -m unittest discover -s tests -p "test_*.py"      # run the test suite
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly these two commands on every push and pull request:
-`python3 scripts/lint.py` and the `unittest discover` line above.
+CI runs exactly those two commands on every push and pull request
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-The tests focus on the parts of the agent that are easy to get wrong and worth guarding:
+### Releasing
 
-The suite is hermetic: every test builds its own temporary `--allowed-dir` and cache dir, so
-nothing is written into your real `~/.cache/mini/sessions/` and — importantly — the session
-pointers the tests create go into a `.mini_tests` directory inside the test's temporary allowed
-dir, never into a real `.mini` (that one is yours: your skills folder and `last_session.json`).
+Bump `version` in `pyproject.toml`, merge to `main`, then tag that commit and push the tag:
 
-- **`test_e2e_agent_loop.py`** — the whole loop, driven the way a user drives it
-  (`AgentSession(args).run(...)`), with only the LLM stubbed: real tools run on disk, the
-  `--allowed-dir` sandbox is exercised end to end, plan mode's tracking files are written,
-  sub-agent delegation runs a nested loop, history compaction rolls the segment over
-  (keeping per-segment usage), sessions restore in place, and the `edit` tool / richer
-  tool schemas are covered.
-- **`test_tokens.py`** — the compaction *policy*: the model → context-window table, the
-  budget resolution (explicit / model / conservative fallback), the token estimator, and
-  the trigger itself — which fires on projected tokens (+ the reply reserve) and **never**
-  on the message count.
-- **`test_interactive.py`** — the shell-safety classifier (DENY / ASK / ALLOW tiers) and
-  compaction edge cases (an empty summary is retried, then abandoned without losing the
-  transcript; a failing summariser call never corrupts the segment).
-- **`test_subagents.py`** — sub-agent delegation, isolation of the child session, the
-  `report.md` channel and the intersection of child permissions with the parent's.
+```bash
+git tag -a v0.1.1.0 -m "release 0.1.1.0"
+git push origin v0.1.1.0
+```
 
-This keeps the tool honest as it grows, and makes it safe to experiment with riskier features (like `--enable-shell`) without regressions.
+Pushing a `v*` tag on `main` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which builds the sdist + wheel, checks them with `twine check`, and attaches them to a new GitHub
+release. See [README_DEV.md](README_DEV.md) for the details and for the manual PyPI upload.
 
 ## Other useful commands:
 
