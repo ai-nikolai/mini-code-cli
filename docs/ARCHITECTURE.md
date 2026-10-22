@@ -253,7 +253,11 @@ small:
   path-bearing parameter (like `glob`'s `root` or the shell's `cwd`) must be added there too.
 * **Compaction** is decided in `agent_loop._compaction_trigger` from the projected input
   tokens plus the reply reserve against `config.compaction_budget`; the message count is
-  deliberately not consulted.
+  deliberately not consulted. The replacement transcript is the system prompt, the summary,
+  any plan-mode goal/plan, and then the **turn still in flight** (`_in_flight_tail`): the
+  user message being answered, or the tool exchange the model is waiting on. Summarising that
+  turn away would make the model answer the summary instead of the request -- and the typed
+  line would never reach the new segment, the recorder or a restore.
 * **New permissions behaviour** lives in `permissions.py` and `shell_safety_utils.py`.
 * **New persistence shapes** live in `persistence.py` (best-effort loaders throughout).
 * **New sub-agents** live in `subagents/` (see §2.4).

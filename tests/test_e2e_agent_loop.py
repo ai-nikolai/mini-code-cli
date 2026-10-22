@@ -522,7 +522,7 @@ class CompactionTest(unittest.TestCase):
         messages = self._messages(4)
         out, did_compact, _ = self._compact(
             messages, token_limit=10, current_tokens=50,
-            plan_hook=lambda msgs: msgs.append({"role": "user", "content": "GOAL + PLAN"}))
+            plan_hook=lambda msgs, tail: msgs.append({"role": "user", "content": "GOAL + PLAN"}))
 
         self.assertTrue(did_compact)
         self.assertEqual(out[-1]["content"], "GOAL + PLAN")
@@ -713,6 +713,50 @@ class TokenBudgetCompactionTest(unittest.TestCase):
                          ["S", "the question", "the answer"])
         # Atomic writes: nothing half-written is left lying around.
         self.assertEqual([n for n in os.listdir(session_dir) if ".tmp." in n], [])
+
+    def test_the_typed_turn_survives_the_rollover(self):
+        """The line typed just before a compaction is still the turn answered.
+
+        The bug: the rollover replaced the transcript with (system, summary), so
+        the user message this step existed to answer was summarised away. The
+        model answered the summary ("Understood. What would you like me to
+        do?"), and the typed line was missing from the live transcript, from the
+        new segment, from the recorder's target and therefore from a restore --
+        from the user's side, they typed an instruction and nothing happened.
+        """
+        session = self._session(max_context_tokens=1)
+        typed = "please fix the parser bug in main.py"
+        session.messages.append({"role": "user", "content": typed})
+
+        self._run_step(session, [
+            ("A summary of the work so far.", [], USAGE),   # the compaction call
+            ("Understood. Fixing the parser.", [], USAGE),  # the step's own call
+        ])
+        session.shutdown()
+
+        # 1) the model was asked to answer the typed line, not the summary.
+        self.assertEqual(session.messages[-2], {"role": "user", "content": typed})
+        self.assertIn("A summary of the work so far.", session.messages[-3]["content"])
+
+        # 2) the recorder's last record reaches it, so /history and /reset can.
+        last = session.summary[-1]
+        self.assertEqual(last["history_file"], session.history_index)
+        self.assertIn(typed, [m.get("content") for m in session._segment_upto(last)])
+
+        # 3) it is in the segment the recorder points at, so a restore has it.
+        session_dir = os.path.join(self.cache_dir, session.unique_id)
+        with open(os.path.join(session_dir, f"history_{last['history_file']}.json"),
+                  "r", encoding="utf-8") as f:
+            segment = json.load(f)
+        self.assertIn(typed, [m.get("content") for m in segment])
+
+        args = make_args(self.workdir, self.cache_dir)
+        args.restore_session = session_dir
+        restored = AgentSession(args, console=silent_console())
+        restored.start_session()
+        self.assertEqual([m.get("content") for m in restored.messages],
+                         [m.get("content") for m in session.messages])
+        self.assertIn(typed, [m.get("content") for m in restored.messages])
 
     def test_the_stale_prompt_report_is_dropped_after_a_rollover(self):
         session = self._session(max_context_tokens=1)

@@ -290,6 +290,12 @@ reserve (`--max-tokens`). Unset (default) it is derived from the model's context
 output reserve and a safety margin. Lower it to compact sooner, raise it to compact later — there
 is no message-count cap to configure.
 
+Compaction replaces the older turns with a summary, but it always carries the **turn in flight**
+across the rollover: the message you just typed (or, mid-turn, the tool call the model is
+waiting on) is kept verbatim after the summary. So a compaction that fires just as you send an
+instruction cannot swallow it — the model still answers what you asked, and the turn stays in
+the session file, in `/history` and in a later restore.
+
 
 ## Serving a model locally
 

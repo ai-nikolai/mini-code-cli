@@ -267,6 +267,37 @@ def _compaction_trigger(messages, token_limit, reserved_output_tokens, current_t
     return False, ""
 
 
+def _in_flight_tail(messages):
+    """Return the messages of the turn that is still in flight, or ``[]``.
+
+    Compaction rewrites the transcript, so whatever it drops is gone from the
+    conversation *and* from everything saved afterwards. The last turn is not
+    finished work, though: it is either the instruction being answered right now
+    (the transcript ends with a ``user`` message) or the tool exchange the model
+    is waiting on (it ends with a ``tool`` result). Either way it has to be
+    carried across verbatim, or the model answers the summary instead of the
+    user's request -- and the typed line never reaches the recorder, the new
+    segment or a later restore.
+
+    The suffix starts at the last ``user`` message, which always begins a
+    self-contained turn: every ``assistant`` tool call inside it is followed by
+    its ``tool`` results, so the slice is a valid transcript on its own.
+
+    ``[]`` when the transcript already ends with an ``assistant`` reply: that
+    turn is answered, and re-sending it would ask the model to answer it twice.
+    """
+    if not messages:
+        return []
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") == "assistant":
+        return []
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "user":
+            return list(messages[index:])
+    return []
+
+
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
                   current_tokens=None, plan_hook=None, console=None):
@@ -279,7 +310,9 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     against ``token_limit``. Nothing else triggers compaction: in particular the
     number of messages is not a criterion. Compaction is then done by asking the
     LLM to summarize the history and replacing the old turns with that summary,
-    keeping the original system prompt as the first message. The compaction call
+    keeping the original system prompt as the first message *and the turn that is
+    still in flight* (see :func:`_in_flight_tail`) verbatim after it -- a summary
+    of the user's current request is not the request. The compaction call
     itself is a single, tool-free request, so it cannot trigger further tool
     calls or recurse into compaction.
 
@@ -289,10 +322,12 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     ``plan_hook`` is an optional callable the caller supplies only when running
     under plan mode (in practice ``AgentSession._handle_compaction``). After the
     summary is built the hook re-injects the running goal + plan so the compacted
-    messages carry them forward. It receives the compacted list and must update it
-    *in place*, because that list is what gets returned to the caller. Passing it in -- instead of referencing the
-    owning session -- keeps ``maybe_compact`` a small, module-level, network-free
-    helper that the test-suite can import and exercise directly.
+    messages carry them forward. It receives the compacted list *and* the
+    in-flight tail (see below) and must update the compacted list in place,
+    because that list is what gets returned to the caller. Passing it in --
+    instead of referencing the owning session -- keeps ``maybe_compact`` a
+    small, module-level, network-free helper that the test-suite can import and
+    exercise directly.
     """
     # ``console`` defaults to None so callers may omit it, but every branch below
     # reports through a console. Falling back to the shared one keeps the
@@ -362,13 +397,29 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
             "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
         })
 
+        # The turn in flight has to survive the rollover. Compaction runs at the
+        # *start* of a step, so ``messages`` normally ends with the user message
+        # this step is meant to answer, or with the tool result the model is
+        # waiting on. Replacing the transcript with just (system, summary)
+        # therefore dropped the user's instruction on the floor: the model
+        # answered the summary -- "Understood. What would you like me to do?" --
+        # and the typed line never reached the new segment, the recorder or a
+        # later restore (it survived only inside the *closed* segment, which no
+        # recorder record points at any more).
+        tail = _in_flight_tail(messages)
+
         # In plan mode, re-inject the running plan + current goal so a
         # compaction (which would otherwise drop them) keeps the model
         # working against the goal it is still trying to finish. The hook is
         # wired in only when the caller runs under plan mode; otherwise
-        # compaction degrades to a plain summary.
+        # compaction degrades to a plain summary. It is also handed the tail so
+        # it can restate the *real* instruction rather than the summary text.
         if plan_hook is not None:
-            plan_hook(compacted)
+            plan_hook(compacted, tail)
+
+        # ... and only then the live turn, so the user's actual instruction
+        # reads as the most recent thing the model has to act on.
+        compacted.extend(tail)
 
         console.note(f"History compacted to {len(compacted)} messages.", "warn")
         # A new segment (history_index + 1) is started on compaction: the
@@ -1508,7 +1559,7 @@ class AgentSession:
         return True
 
 
-    def _handle_compaction(self, compacted):
+    def _handle_compaction(self, compacted, tail=()):
         """Re-inject goal + plan into the compacted messages (plan mode).
 
         Plan-mode counterpart to the plan handling inside :meth:`maybe_compact`,
@@ -1516,7 +1567,8 @@ class AgentSession:
         a network-free module-level helper. The loop wires in this method only
         when plan mode is on; it re-injects the goal + plan via
         :meth:`_apply_plan_to_compacted`, which also rewrites the tracking files
-        to match.
+        to match. ``tail`` is the turn that is still in flight, which
+        ``maybe_compact`` appends after the hook's messages.
 
         The hook must update ``compacted`` **in place**: ``maybe_compact``
         returns *that* list to the caller, which then assigns it to
@@ -1524,9 +1576,9 @@ class AgentSession:
         discarded a moment later, silently dropping the goal and plan -- which is
         exactly what happened before this was a slice assignment.
         """
-        compacted[:] = self._apply_plan_to_compacted(compacted)
+        compacted[:] = self._apply_plan_to_compacted(compacted, tail)
 
-    def _apply_plan_to_compacted(self, messages):
+    def _apply_plan_to_compacted(self, messages, tail=()):
         """Re-inject the current goal + plan after a history compaction.
 
         Compaction replaces the transcript with a summary, which would otherwise
@@ -1534,16 +1586,18 @@ class AgentSession:
         back off disk and append them as fresh user turns so the model keeps
         working against the goal it is still trying to finish. The goal is
         appended last so it reads as the most recent instruction the model
-        should act on.
+        should act on -- ``maybe_compact`` then appends the in-flight turn, which
+        is the same instruction verbatim.
         """
         plan_text = self.plan_manager.read_plan()
         goal_text = self.plan_manager.read_goal()
 
-        # Recover the user's latest instruction from the pre-compaction tail, in
-        # case the loop had not recorded a goal yet, so there is always a goal to
-        # restate after compaction.
+        # Recover the user's latest instruction from the *in-flight turn* -- not
+        # from ``messages``, which by now holds the summary -- so a session that
+        # compacts before its goal was recorded still restates the real
+        # instruction instead of the summary text.
         current_input = None
-        for m in reversed(messages):
+        for m in reversed(list(tail or ())):
             if m.get("role") == "user":
                 current_input = m.get("content")
                 break

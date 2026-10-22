@@ -289,9 +289,11 @@ class CompactionTriggerTest(unittest.TestCase):
         self.assertTrue(did_compact)
         self.assertEqual(index, 1)
         # No system prompt to preserve, so the old turns collapse to one summary
-        # turn -- from two ~1k-token messages to one short one.
-        self.assertEqual(len(out), 1)
+        # turn -- plus the second (unanswered) user message, which is the turn in
+        # flight and must reach the model, not just the summariser.
+        self.assertEqual(len(out), 2)
         self.assertIn("A short summary.", out[0]["content"])
+        self.assertEqual(out[1], messages[-1])
         self.assertEqual(self.stats["llm_calls"], 1)
 
     def test_a_large_transcript_under_the_budget_does_not_compact(self):
@@ -365,6 +367,52 @@ class CompactionTriggerTest(unittest.TestCase):
         self.assertEqual(index, 0)
         self.assertEqual(self.stats["llm_calls"], 0)      # no summariser call
 
+    # -- the turn in flight survives the rollover --------------------------
+
+    def test_a_fresh_user_message_is_not_summarised_away(self):
+        """The line just typed must reach the model, not only the summariser.
+
+        Compaction used to return (system, summary) only, so the message the
+        next request was supposed to answer was gone: the model answered the
+        summary instead and the typed line never appeared again.
+        """
+        messages = [{"role": "system", "content": "SYSTEM"},
+                    {"role": "user", "content": "earlier question"},
+                    {"role": "assistant", "content": "earlier answer"},
+                    {"role": "user", "content": "the new instruction"}]
+        out, did_compact, _ = self._compact(
+            messages, token_limit=1_000, current_tokens=4_000)
+
+        self.assertTrue(did_compact)
+        self.assertEqual([m["role"] for m in out], ["system", "user", "user"])
+        self.assertIn("A short summary.", out[1]["content"])
+        self.assertEqual(out[2], {"role": "user", "content": "the new instruction"})
+
+    def test_a_tool_exchange_in_flight_is_carried_over(self):
+        """Compacting mid tool loop keeps the call *and* the result it awaits."""
+        messages = [{"role": "system", "content": "SYSTEM"},
+                    {"role": "user", "content": "read the file"},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+                    {"role": "tool", "tool_call_id": "c1", "content": "file contents"}]
+        out, did_compact, _ = self._compact(
+            messages, token_limit=1_000, current_tokens=4_000)
+
+        self.assertTrue(did_compact)
+        self.assertEqual([m["role"] for m in out],
+                         ["system", "user", "user", "assistant", "tool"])
+        self.assertEqual(out[-1]["content"], "file contents")
+
+    def test_an_answered_turn_adds_nothing(self):
+        """A transcript ending in an assistant reply has no turn in flight."""
+        messages = [{"role": "system", "content": "SYSTEM"},
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "answer"}]
+        out, did_compact, _ = self._compact(
+            messages, token_limit=1_000, current_tokens=4_000)
+
+        self.assertTrue(did_compact)
+        self.assertEqual([m["role"] for m in out], ["system", "user"])
+
     # -- unchanged behaviour ----------------------------------------------
 
     def test_an_explicit_limit_is_honoured(self):
@@ -389,11 +437,14 @@ class CompactionTriggerTest(unittest.TestCase):
     def test_the_plan_hook_still_reinjects_the_goal_and_plan(self):
         out, did_compact, _ = self._compact(
             long_messages(2, 8_000), token_limit=1_000, current_tokens=4_000,
-            plan_hook=lambda msgs: msgs.append(
+            plan_hook=lambda msgs, tail: msgs.append(
                 {"role": "user", "content": "GOAL + PLAN"}))
 
         self.assertTrue(did_compact)
-        self.assertEqual(out[-1]["content"], "GOAL + PLAN")
+        # The goal/plan context sits between the summary and the live turn, so
+        # the user's actual instruction stays the last thing the model reads.
+        self.assertEqual(out[1]["content"], "GOAL + PLAN")
+        self.assertEqual(out[2]["role"], "user")          # the in-flight turn
 
     def test_an_empty_summary_keeps_the_transcript_and_the_segment(self):
         messages = long_messages(2, 8_000)
