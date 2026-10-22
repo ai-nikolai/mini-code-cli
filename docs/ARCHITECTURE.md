@@ -32,6 +32,8 @@ suite.
 | `shell_safety_utils.py` | Heuristic classifier that sorts shell commands into DENY / ASK / ALLOW tiers. |
 | `plan.py` | Plan-mode bookkeeping: reads/writes `CURRENT_GOAL.md` and `CURRENT_PLAN.md`. Every method is a no-op when disabled. |
 | `ui.py` | The whole terminal renderer (banner, turns, notes, permission box, the "… thinking" spinner, transient/non-scrolling tool-call region, history views). Stdlib only; degrades gracefully to ASCII / no-colour. |
+| `tokens.py` | Token accounting: `estimate_messages_tokens`, `project_input_tokens` (the projection that drives compaction) and `accumulate_usage`. Stdlib only, no I/O, so the budget maths is unit-testable. |
+| `skills.py` | The optional skills feature (`--skills`): the `.mini` directory of `skill.md` files, the `SKILLS.md` summary, and the `list_skills` / `read_skill` / `create_skill` / `run_skill` tools. Script execution stays inside the skill directory and is never run through a shell. |
 | `utils.py` | `call_openai_server` (the one place we touch `requests`) and `determine_vllm_model`. |
 | `subagents/` | The pluggable sub-agent framework (see §2). |
 
