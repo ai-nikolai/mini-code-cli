@@ -193,9 +193,6 @@ TWINE_PASSWORD="$PYPI_API_KEY" \
 python3 -m twine upload dist/* --verbose
 ```
 
-The repo ships two convenience wrappers for exactly this, `pypi_build.sh` and `pypi_upload.sh`
-(both are local-only helpers and are not tracked).
-
 To publish automatically on a tag instead, add a job to `release.yml` that either uses
 `pypa/gh-action-pypi-publish` with [trusted publishing](https://docs.pypi.org/trusted-publishers/)
 or fills in the `twine upload` command above from a `PYPI_API_TOKEN` secret; give it
