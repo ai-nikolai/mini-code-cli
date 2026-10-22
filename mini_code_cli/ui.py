@@ -739,6 +739,32 @@ class Console:
         ]
         self.banner(f"MiniCodeCLI v{version}", lines, fg="cyan")
 
+    def farewell(self, version, rows, sign_off=None):
+        """Render the exit banner: a sign-off plus a summary of the session state.
+
+        Deliberately narrower than :meth:`welcome`. Everything the welcome banner
+        shows is about how the session *will* run -- server, model, permissions,
+        allowed dir -- and all of it is irrelevant once the session is over. What
+        the user can still act on is what the session *left behind*: which
+        folder it was saved in, which history segments exist, how much was said
+        and what it cost. So the box carries only the version, a good-bye line
+        and those ``rows``.
+
+        ``rows`` is a list of ``(label, value)`` pairs, laid out in a single
+        colon-aligned column like the welcome banner; the caller supplies the
+        pairs because it owns the state (the console stays free of session
+        policy).
+        """
+        label_w = max((len(str(label)) for label, _ in rows), default=0)
+        lines = [sign_off or "Goodbye, and thanks for using MiniCodeCLI!", ""]
+        lines += [f"{str(label).ljust(label_w)} : {value}" for label, value in rows]
+        # Yellow, not the welcome banner's cyan: this is the one box that
+        # *closes* the session, so it reads as a distinct, valedictory note
+        # rather than the startup banner reappearing. Colours only apply on a
+        # colour-capable TTY (see :meth:`box`), so piped/ASCII output is
+        # unchanged.
+        self.banner(f"MiniCodeCLI v{version} - goodbye", lines, fg="yellow")
+
     def announce_api_key(self, present):
         if present:
             self.note("API key found (MINI_CODE_API_KEY).", "ok")

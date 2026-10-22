@@ -518,6 +518,11 @@ class AgentSession:
 
         self.plan_mode = bool(getattr(self.args, "plan", False))
 
+        # The good-bye box is printed once, from shutdown(). Several exits
+        # funnel through there (quit, exit, EOF, a /quit command) and a repeated
+        # box would read like a second session had ended.
+        self._farewell_shown = False
+
         # Token accounting. ``token_stats`` covers the *current history
         # segment* and is reset when compaction rolls over to a new one;
         # ``total_usage`` is the whole-session accumulator and never decreases.
@@ -1354,8 +1359,12 @@ class AgentSession:
             return
         except KeyboardInterrupt:
             self.console.note("Interrupting: Mini Code Exiting...", "error")
+            self.shutdown(farewell=False)
+            return
         except Exception as e:
             self.console.note(f"Exception {e}. Exiting...", "error")
+            self.shutdown(farewell=False)
+            return
         self.shutdown()
 
     def _emit_tip(self):
@@ -2025,8 +2034,15 @@ class AgentSession:
             self.console.note(
                 f"Saved usage to: {usage_path} (session total: {total_path})", "info")
 
-    def shutdown(self):
-        """Persist and print a final summary (called on quit / exit)."""
+    def shutdown(self, farewell=True):
+        """Persist and print a final summary (called on quit / exit).
+
+        ``farewell=False`` is used by the interrupt / fatal paths in :meth:`run`,
+        which have already told the user (in red) that the session is being torn
+        down: a cheerful "thanks and here is your state" box on top of a crash is
+        the wrong note, and the state it would recap is the state that just
+        failed.
+        """
         self._persist()
         segments = history_segment_indices(self.session_dir)
         # List what is really on disk. The old message claimed
@@ -2042,7 +2058,62 @@ class AgentSession:
         self.console.note(
             f"Saved session to {self.cache_dir}/{self.unique_id}/ "
             f"({present} + summary_history.json).", "ok")
-        self.console.usage_summary(self.total_usage)
+        # The detailed per-field usage block is verbose-only (the console
+        # documents it that way); in the quiet default view the good-bye box
+        # below carries the same totals, so nothing is lost by leaving it out.
+        if self.console.verbose:
+            self.console.usage_summary(self.total_usage)
+        if farewell:
+            self._farewell(segments)
+
+    def _farewell(self, segments=None):
+        """Print the good-bye box: version, sign-off and what the session left.
+
+        Printed once (see ``_farewell_shown``) and only on a normal exit. It
+        restates the state in one glanceable place -- the same facts the user
+        would otherwise have to piece together from the save note, ``/history``
+        and the (verbose-only) usage readout, which in the quiet default view
+        means they saw none of it.
+        """
+        if self._farewell_shown:
+            return
+        self._farewell_shown = True
+        from . import __version__ as version
+
+        if segments is None:
+            segments = history_segment_indices(self.session_dir)
+        if not segments:
+            where = f"history_{self.history_index}.json"
+        elif len(segments) == 1:
+            where = f"history_{segments[0]}.json"
+        else:
+            where = f"history_{segments[0]}..{segments[-1]}.json"
+
+        turns = len(self.summary)
+        usage = self.total_usage or {}
+
+        def count(key):
+            # A display detail on the exit path must never raise: a server that
+            # reported ``null`` usage leaves a None here, and crashing while
+            # saying goodbye would be the worst possible time to fail.
+            try:
+                return int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        rows = [
+            ("session id", self.unique_id),
+            ("saved under", f"{self.cache_dir}/{self.unique_id}/"),
+            ("history", f"{where} (segment {self.history_index}), "
+                        f"{_plural(len(self.messages), 'message')}"),
+            ("conversation", _plural(turns, "recorded turn")),
+            ("tokens", f"{count('prompt_tokens'):,} in / "
+                       f"{count('completion_tokens'):,} out "
+                       f"({count('total_tokens'):,} total)"),
+            ("calls", f"{count('llm_calls'):,} LLM, "
+                      f"{count('tool_calls'):,} tool"),
+        ]
+        self.console.farewell(version, rows)
 
     # -- single LLM turn ---------------------------------------------------
 
