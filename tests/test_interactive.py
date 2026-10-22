@@ -28,10 +28,12 @@ import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
+import mini_code_cli
 from mini_code_cli import agent_loop, persistence, prompts, shell_safety_utils, ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
 from mini_code_cli.config import compaction_budget
@@ -1177,7 +1179,7 @@ def declared_version(path):
     """The version in ``pyproject.toml``, read the way the package reads it."""
     try:
         import tomllib  # Python >= 3.11
-    except ModuleNotFoundError:  # Python 3.10
+    except ImportError:  # Python 3.10 -- ModuleNotFoundError, and a blocked import
         return scan_project_version(path)
     with open(path, "rb") as handle:
         return tomllib.load(handle)["project"]["version"]
@@ -1201,6 +1203,17 @@ class VersionTest(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         path = os.path.join(root, "pyproject.toml")
         self.assertEqual(scan_project_version(path), declared_version(path))
+
+    def test_without_tomllib_the_package_reads_the_file_not_the_metadata(self):
+        """The bug this pins: on 3.10 the package used to skip ``pyproject.toml``
+        entirely (``tomllib`` is 3.11+) and report the *installed* metadata, so a
+        checkout with a stale editable install showed the wrong version -- which
+        is exactly how the 3.10 CI leg was found to disagree with 3.12."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "pyproject.toml")
+        with mock.patch.dict(sys.modules, {"tomllib": None}):
+            blocked = mini_code_cli._version_from_file(path)
+        self.assertEqual(blocked, mini_code_cli.__version__)
 
     def test_the_fallback_ignores_a_version_in_another_table(self):
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as handle:
