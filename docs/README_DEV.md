@@ -148,6 +148,12 @@ git tag -a v0.1.1.1 -m "release 0.1.1.1"     # tag must match the pyproject vers
 git push origin v0.1.1.1                     # <- this triggers the release workflow
 ```
 
+Or let `scripts/push_version_tag.py` do it: it reads the version from `pyproject.toml`, tags
+`HEAD` and pushes the tag, and is a no-op if the tag is already on the remote. It **refuses**
+unless `HEAD` is exactly the tip of `origin/main` (fetched fresh) and `pyproject.toml` is
+committed — the workflow would reject an off-`main` tag anyway, so the script fails first,
+before a red CI run. Use `--dry-run` to see what it would do.
+
 ### 3. What the release workflow does
 
 `.github/workflows/release.yml` is triggered by `push` of any `v*` tag, and runs a single

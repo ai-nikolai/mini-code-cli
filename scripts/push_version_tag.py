@@ -16,6 +16,19 @@ and is safe to run repeatedly:
   * otherwise it creates the annotated tag at ``HEAD`` (or reuses an existing
     local tag that already points there) and pushes just that tag.
 
+Two more refusals protect the release *workflow*, which only publishes tags
+whose commit is on ``main`` (``.github/workflows/release.yml`` re-checks this,
+but failing there costs a whole CI run and leaves a red mark on the repo):
+
+  * ``HEAD`` must be **exactly the tip** of ``<remote>/main`` (fetched fresh,
+    not the possibly stale local ref). A commit that is merely *on* main is not
+    enough -- tagging an older commit would release code that is not what main
+    points at -- and a commit that is not on main at all would be rejected by
+    CI, so the script says so here instead;
+  * ``pyproject.toml`` must have no uncommitted changes: the version is read
+    from the working tree, so tagging with a dirty file could publish a version
+    that exists in no commit.
+
 It refuses to push a local tag that points at a *different* commit: that means
 the version was bumped without a new tag name, and pushing it would move the
 release backwards.
@@ -167,6 +180,101 @@ def local_tag_commit(tag):
     return result.stdout.strip()
 
 
+def current_branch():
+    """The checked-out branch name, or ``"HEAD"`` when it is detached."""
+    try:
+        return git("rev-parse", "--abbrev-ref", "HEAD")
+    except TagError:
+        return "HEAD"
+
+
+def is_ancestor(commit, descendant):
+    """True when ``commit`` is reachable from ``descendant``.
+
+    ``git merge-base --is-ancestor`` answers with its exit code, so it cannot go
+    through :func:`git`, which treats every non-zero exit as an error.
+    """
+    result = subprocess.run(["git", "merge-base", "--is-ancestor",
+                             commit, descendant],
+                            cwd=ROOT, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return result.returncode == 0
+
+
+def remote_branch_head(branch, remote):
+    """The commit ``<remote>/<branch>`` points at *right now*, fetched fresh.
+
+    The local ``refs/remotes/<remote>/<branch>`` can be arbitrarily stale (the
+    very bug this guard exists for: a tag pushed seconds before main was
+    fast-forwarded), so the remote is asked directly rather than trusting what
+    the last fetch happened to record.
+    """
+    try:
+        git("fetch", "--no-tags", remote, f"refs/heads/{branch}")
+        return git("rev-parse", "FETCH_HEAD^{commit}")
+    except TagError as e:
+        raise TagError(f"cannot resolve {remote}/{branch} "
+                       f"(is the remote/branch name right?): {e}")
+
+
+def pyproject_is_dirty():
+    """True when ``pyproject.toml`` has uncommitted or untracked changes."""
+    out = git("status", "--porcelain", "--", PYPROJECT)
+    return bool(out.strip())
+
+
+def check_releasable(remote):
+    """Refuse unless ``HEAD`` is the tip of ``<remote>/main`` and the tree is clean.
+
+    Runs *after* the "tag already on the remote" early return, so a repeated run
+    stays a successful no-op even if the checkout has since moved on. Every
+    branch is checked so the message names the one condition that actually
+    failed, rather than a generic "cannot release".
+    """
+    head = git("rev-parse", "HEAD")
+    main_head = remote_branch_head("main", remote)
+
+    if not is_ancestor(head, main_head):
+        branch = current_branch()
+        if branch == "main":
+            # The other half of the same mistake: releasing from a local main
+            # that has commits the remote has not got yet.
+            raise TagError(
+                f"HEAD ({head[:12]}) is not on {remote}/main ({main_head[:12]}), "
+                f"even though you are on 'main': it has commits that have not "
+                f"been pushed.\n"
+                f"The release workflow only publishes tags whose commit is on "
+                f"main, so this tag would fail in CI.\n"
+                f"Push them first: git push {remote} main (then re-run this "
+                f"script).")
+        where = ("HEAD is detached" if branch == "HEAD"
+                 else f"the checked-out branch is {branch!r}")
+        raise TagError(
+            f"HEAD ({head[:12]}) is not on {remote}/main ({main_head[:12]}), "
+            f"and {where}.\n"
+            f"The release workflow only publishes tags whose commit is on "
+            f"main, so this tag would fail in CI -- fix it here instead.\n"
+            f"Merge or push this work onto main first, e.g.:\n"
+            f"  git switch main && git merge --ff-only {head[:12]}\n"
+            f"then re-run this script from main.")
+
+    if head != main_head:
+        raise TagError(
+            f"HEAD ({head[:12]}) is behind {remote}/main ({main_head[:12]}).\n"
+            f"Tagging it would release an older commit than main, and the "
+            f"version in {PYPROJECT} would describe code that is not main's "
+            f"tip.\n"
+            f"Run 'git pull --ff-only' and re-run this script.")
+
+    if pyproject_is_dirty():
+        raise TagError(
+            f"{PYPROJECT} has uncommitted or untracked changes.\n"
+            f"This script reads the version from the working tree, but a tag "
+            f"describes a committed state -- releasing now would publish a "
+            f"version that exists in no commit.\n"
+            f"Commit (or restore) {PYPROJECT} first.")
+
+
 def push_tag(version, remote="origin", dry_run=False):
     """Ensure ``v<version>`` is on ``remote``; return the process exit code."""
     tag = f"v{version}"
@@ -186,6 +294,13 @@ def push_tag(version, remote="origin", dry_run=False):
                     f"in {PYPROJECT} if this commit needs its own tag")
         print(f"{tag} already exists on {remote}{where}{note}; skipping.")
         return 0
+
+    # Nothing to push is settled above, so from here the tag *will* be created:
+    # it must describe main's tip and a committed version, or CI would reject it
+    # (this is the check that catches tagging from a feature branch, or tagging
+    # a local commit that has not reached main yet). Enforced for --dry-run too,
+    # otherwise the dry run would promise a push that a real run refuses.
+    check_releasable(remote)
 
     local = local_tag_commit(tag)
     if local and local != head:
