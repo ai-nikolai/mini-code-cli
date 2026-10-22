@@ -257,7 +257,12 @@ small:
   any plan-mode goal/plan, and then the **turn still in flight** (`_in_flight_tail`): the
   user message being answered, or the tool exchange the model is waiting on. Summarising that
   turn away would make the model answer the summary instead of the request -- and the typed
-  line would never reach the new segment, the recorder or a restore.
+  line would never reach the new segment, the recorder or a restore. The console is the only
+  record a user gets of the rollover, so every compaction note is `warn`-level (visible
+  without `--verbose`) and states what was folded away (a truncated summary preview), how much
+  (the closing segment's message count), where it went (`history_{n}.json` closed,
+  `history_{n+1}.json` started) and that the turn in flight was kept verbatim; the failure
+  paths say explicitly that the transcript and the segment are unchanged.
 * **New permissions behaviour** lives in `permissions.py` and `shell_safety_utils.py`.
 * **New persistence shapes** live in `persistence.py` (best-effort loaders throughout).
 * **New sub-agents** live in `subagents/` (see §2.4).

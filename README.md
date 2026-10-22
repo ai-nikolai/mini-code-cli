@@ -296,6 +296,22 @@ waiting on) is kept verbatim after the summary. So a compaction that fires just 
 instruction cannot swallow it — the model still answers what you asked, and the turn stays in
 the session file, in `/history` and in a later restore.
 
+Because a rollover leaves no trace in the transcript (the old turns really are gone), the
+console says in plain terms what happened — all of it without `--verbose`:
+
+```
+[!] Compacting the conversation: 42 messages -> a summary (51000 tokens in, 8192 reserved for the reply > 52000 budget). The current turn (1 message) is kept verbatim.
+[!] Summary preview: The user asked for a token-based compaction trigger, then fixed ...
+[!] Compacted history_0.json (42 messages) into a summary; history_1.json now starts with 3 messages (summary + 1 kept message).
+```
+
+So you can see *what* was folded away (a preview of the summary itself), *how much* (the
+message count of the segment that was closed), *where it went* (`history_0.json` closed,
+`history_1.json` started) and that nothing you just typed was lost. If the summariser answers
+with an empty summary twice, or the call fails, compaction is abandoned and the note says so
+explicitly — "nothing was lost, but the next request may still be too large" — with the
+transcript and the segment left untouched.
+
 
 ## Serving a model locally
 

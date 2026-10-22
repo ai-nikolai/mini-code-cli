@@ -144,8 +144,8 @@ merge to `main` through a pull request.
 ```bash
 git checkout main
 git pull --ff-only origin main
-git tag -a v0.1.1.0 -m "release 0.1.1.0"     # tag must match the pyproject version, prefixed with "v"
-git push origin v0.1.1.0                     # <- this triggers the release workflow
+git tag -a v0.1.1.1 -m "release 0.1.1.1"     # tag must match the pyproject version, prefixed with "v"
+git push origin v0.1.1.1                     # <- this triggers the release workflow
 ```
 
 ### 3. What the release workflow does

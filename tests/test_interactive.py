@@ -941,6 +941,35 @@ class CompactionEdgeCaseTest(unittest.TestCase):
                                    console=self.console())
         return result, stub
 
+    def test_success_reports_what_was_compacted_where_and_what_was_kept(self):
+        """The default (non-verbose) console has to answer the user's questions.
+
+        A rollover leaves no trace in the transcript, so the notes are the only
+        thing the user has: they must say *what* was folded away (a summary
+        preview), *how much* (before -> after), *where it went* (which segment
+        file was closed and which was started) and that the instruction being
+        answered was not lost. All of it is ``warn``, i.e. visible without
+        ``--verbose``.
+        """
+        messages = [{"role": "system", "content": "S"},
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                    {"role": "user", "content": "the new instruction"}]
+        (out, did_compact, index), _ = self._compact(
+            messages, ["The user asked a question and got an answer."])
+        text = self.output()
+
+        self.assertTrue(did_compact)
+        self.assertEqual(len(out), 3)            # system + summary + turn in flight
+        # the summary content itself, not just a message count
+        self.assertIn("Summary preview: The user asked a question", text)
+        # how much was folded away, and which segment file it went into
+        self.assertIn("Compacted history_0.json (4 messages) into a summary", text)
+        self.assertIn("history_1.json now starts with 3 messages", text)
+        self.assertIn("summary + 1 kept message", text)
+        # and that the instruction this step is answering survived the rollover
+        self.assertIn("The current turn (1 message) is kept verbatim", text)
+
     def test_compaction_prompt_tolerates_missing_content(self):
         """A tool-call-only turn (content None or absent) must not raise KeyError."""
         messages = [
@@ -972,6 +1001,9 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         self.assertEqual(len(stub.calls), 2)           # exactly one retry
         self.assertEqual(self.stats["llm_calls"], 2)   # both attempts were billed
         self.assertIn("Could not compact history", self.output())
+        # ... and it must say that nothing was lost, not just that it failed.
+        self.assertIn("nothing was lost", self.output())
+        self.assertIn("Keeping all 3 messages and history_0.json", self.output())
 
     def test_empty_summary_then_a_real_one_still_compacts(self):
         """A single empty reply is recovered from by the retry."""
@@ -1002,6 +1034,7 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         self.assertEqual(index, 0)
         self.assertIs(out, messages)
         self.assertIn("Failed to compact history", self.output())
+        self.assertIn("Keeping all 3 messages unchanged", self.output())
 
 
 if __name__ == "__main__":

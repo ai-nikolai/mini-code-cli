@@ -298,6 +298,11 @@ def _in_flight_tail(messages):
     return []
 
 
+def _plural(count, noun, suffix="s"):
+    """``"1 message"`` / ``"4 messages"`` -- for messages the user reads."""
+    return f"{count} {noun}" + ("" if count == 1 else suffix)
+
+
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
                   current_tokens=None, plan_hook=None, console=None):
@@ -346,8 +351,20 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         # bare messages would crash them.
         return messages, False, history_index
 
+    # The turn this step is answering -- the instruction just typed, or the tool
+    # exchange the model is waiting on -- is carried across the rollover (see
+    # :func:`_in_flight_tail`). It is computed *before* the slow summary call so
+    # the console can tell the user right away that nothing they just sent is at
+    # stake; a compaction note that stays silent about that is exactly what makes
+    # the rollover look like it might have eaten the message.
+    tail = _in_flight_tail(messages)
+    kept_note = (f" The current turn ({_plural(len(tail), 'message')}) is kept "
+                 f"verbatim." if tail else "")
+
     try:
-        console.note(f"Compacting conversation history ({reason}) -> summary...", "warn")
+        console.note(
+            f"Compacting the conversation: {_plural(len(messages), 'message')} "
+            f"-> a summary ({reason}).{kept_note}", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
 
         # The summariser sometimes answers with nothing at all. An empty summary
@@ -359,7 +376,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         # the over-cap transcript was retried, and paid for, on every step.
         summary = ""
         for attempt in (1, 2):
-            console.start_thinking("compacting")
+            console.start_thinking("compacting history")
             try:
                 reply, _, compact_usage, _ = utils.unpack_llm_result(
                     utils.call_openai_server(
@@ -382,9 +399,14 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
                 console.note("The summariser returned an empty summary; retrying once.", "warn")
 
         if not summary:
+            # Say plainly what did *not* happen: nothing was dropped and the
+            # segment did not move -- only the shrink did, so the next request
+            # may still be too large.
             console.note(
                 f"Could not compact history: the summariser returned an empty "
-                f"summary twice. Keeping all {len(messages)} messages "
+                f"summary twice. Keeping all {_plural(len(messages), 'message')} "
+                f"and history_{history_index}.json as they are -- nothing was "
+                f"lost, but the next request may still be too large "
                 f"({reason}).", "warn")
             return messages, False, history_index
 
@@ -405,8 +427,8 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         # answered the summary -- "Understood. What would you like me to do?" --
         # and the typed line never reached the new segment, the recorder or a
         # later restore (it survived only inside the *closed* segment, which no
-        # recorder record points at any more).
-        tail = _in_flight_tail(messages)
+        # recorder record points at any more). ``tail`` was computed before the
+        # summary call so the opening note could already promise this.
 
         # In plan mode, re-inject the running plan + current goal so a
         # compaction (which would otherwise drop them) keeps the model
@@ -421,14 +443,32 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         # reads as the most recent thing the model has to act on.
         compacted.extend(tail)
 
-        console.note(f"History compacted to {len(compacted)} messages.", "warn")
+        # What the user is shown has to answer the three questions a rollover
+        # raises: *what* was folded away (the summary itself), *how much* (the
+        # closing segment's message count, and what the new one starts with),
+        # and *where it went* (which segment file was closed and which was
+        # started).
+        console.note(f"Summary preview: {utils.oneline(summary, 120)}", "warn")
+        kept = (f"summary + {_plural(len(tail), 'kept message')}" if tail
+                else "summary only")
+        # Phrased as "old segment -> new segment" rather than "N messages -> M
+        # messages": the replacement can be *longer* than what it replaced (a
+        # system prompt, the summary and the kept turn), and a bare pair of
+        # counts that sometimes grows reads like a bug.
+        console.note(
+            f"Compacted history_{history_index}.json "
+            f"({_plural(len(messages), 'message')}) into a summary; "
+            f"history_{history_index + 1}.json now starts with "
+            f"{_plural(len(compacted), 'message')} ({kept}).", "warn")
         # A new segment (history_index + 1) is started on compaction: the
         # compacted messages are its snapshot, and every later turn appends
         # to it. The caller records a single high-level 'summary' turn for
         # this index so the recorder stays flat across the rollover.
         return compacted, True, history_index + 1
     except Exception as e:
-        console.note(f"Failed to compact history: {e}", "error")
+        console.note(
+            f"Failed to compact history: {e}. Keeping all "
+            f"{_plural(len(messages), 'message')} unchanged.", "error")
 
     return messages, False, history_index
 
@@ -2054,14 +2094,19 @@ class AgentSession:
                              self.history_index)
             except Exception as e:
                 self.console.note(
-                    f"Could not save the closed history segment: {e}", "warn")
+                    f"Could not save the closed history segment "
+                    f"history_{self.history_index}.json: {e}. The compacted "
+                    f"conversation is unaffected, but /reset back into that "
+                    f"segment may be incomplete.", "warn")
             self.history_index = new_index
             self.token_stats = empty_usage()
             # Snapshot the compacted messages into the new segment so its turns
             # are preserved, and record the summary as the first turn of it.
             save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
             self._record_turn(
-                f"summary: history compacted to {len(self.messages)} messages",
+                f"summary: history_{new_index - 1}.json "
+                f"({_plural(len(closing_messages), 'message')}) compacted into a "
+                f"summary; history_{self.history_index}.json started",
                 self.messages)
 
         # Show a "… thinking" spinner while the LLM works (in-place, non-scrolling;
