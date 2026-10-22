@@ -27,6 +27,7 @@ dataset commit, and the resolved revision is recorded in the run manifest.
 import json
 import os
 
+from .. import runtime as runtime_module
 from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
 
 
@@ -44,22 +45,46 @@ class SweBenchSuite(Suite):
 
     def preflight(self, model, require_binary=True):
         problems = []
-        if require_binary and not _module_available("swebench"):
+        if not require_binary:
+            return problems
+        if not _module_available("swebench"):
             problems.append(f"suite 'swebench': the swebench package is not "
                             f"importable ({self.install_hint})")
-        if require_binary and not _module_available("docker"):
-            problems.append("suite 'swebench': docker (SDK) is not importable "
-                            f"({self.install_hint})")
+        chosen = runtime_module.resolve(self._runtime_hint())
+        if chosen is None or not runtime_module.available(chosen):
+            problems.append(
+                "suite 'swebench': no container runtime is usable "
+                f"({' or '.join(runtime_module.RUNTIMES)} not on PATH); the agent "
+                "runs inside the instance image")
+        elif chosen == "apptainer":
+            problems.append(
+                "suite 'swebench': the official grader "
+                "(swebench.harness.run_evaluation) drives the Docker SDK, which "
+                "is not available here; with apptainer only the agent/patch side "
+                "can run (set options.skip_evaluation to make that explicit)")
         return problems
 
+    def _runtime_hint(self):
+        return getattr(self, "runtime", None)
+
     def notes(self, model):
-        return [
+        chosen = runtime_module.resolve(self._runtime_hint())
+        notes = [
             "the agent runs inside the instance image, so the endpoint must be "
             "reachable from a container and the agent CLI must be installed there "
             "(options.install_script, or a prebuilt image)",
             "grading is the upstream harness's: patches are applied and the "
             "instance tests run in the official container",
         ]
+        if chosen:
+            notes.append(f"container runtime: {chosen} "
+                         f"({runtime_module.image_ref(chosen, 'swebench/...')})")
+            notes += runtime_module.translation_notes(
+                chosen, limits=getattr(self, "docker", None))
+        else:
+            notes.append("no container runtime found (docker/apptainer); `plan` "
+                         "still shows the command shape, `run` will fail")
+        return notes
 
     # -- instances -------------------------------------------------------
 
@@ -108,7 +133,8 @@ class SweBenchSuite(Suite):
         commands = self._instance_commands(trial, instances, run_dir, adapter,
                                            timeouts)
         commands.append(self.predictions_command(trial, run_dir))
-        commands.append(self.evaluate_command(trial, run_dir))
+        if not (trial.suite.options or {}).get("skip_evaluation"):
+            commands.append(self.evaluate_command(trial, run_dir))
         return commands
 
     def _instance_commands(self, trial, instances, run_dir, adapter, timeouts=None):
@@ -117,6 +143,10 @@ class SweBenchSuite(Suite):
         runs_dir = self.ensure_dir(os.path.join(run_dir, "instances"))
         image_template = options.get("image_template", self.DEFAULT_IMAGE_TEMPLATE)
         agent_timeout = int((timeouts or {}).get("instance_seconds", 5_400))
+        # `plan` on a machine with no runtime should still show *a* command line;
+        # docker is the spelling the upstream harnesses assume, and preflight is
+        # what reports the missing binary.
+        container = trial.container_runtime or "docker"
         commands = []
 
         for instance in instances:
@@ -131,22 +161,24 @@ class SweBenchSuite(Suite):
                 # instance, before the agent runs.
                 commands.append(PlannedCommand(
                     label=f"swebench: install agent for {instance_id}",
-                    argv=["docker", "run", "--rm", "--network", "none",
-                          "-v", f"{options['install_script']}:/tmp/install.sh:ro",
-                          image, "bash", "/tmp/install.sh"],
+                    argv=runtime_module.container_argv(
+                        container, image, ["bash", "/tmp/install.sh"],
+                        env=options.get("install_env"),
+                        limits=dict(trial.docker, network="none"),
+                        mounts=[(options["install_script"], "/tmp/install.sh:ro")]),
                     timeout=int(options.get("install_timeout_sec", 1_800))))
 
             commands.append(PlannedCommand(
                 label=f"swebench: agent {instance_id}",
-                argv=["docker", "run", "--rm",
-                      "--name", f"bench-{trial.run_id}-{_short(instance_id)}",
-                      *_docker_limits(trial.docker),
-                      *_network_args(trial.docker),
-                      "-w", "/testbed",
-                      *_env_args(adapter.env(trial.model)),
-                      image,
-                      *adapter.argv(_problem_statement(instance), trial.model,
-                                    workspace="/testbed", container=True)],
+                argv=runtime_module.container_argv(
+                    container, image,
+                    adapter.argv(_problem_statement(instance), trial.model,
+                                 workspace="/testbed", container=True),
+                    container_name=f"bench-{trial.run_id}-{_short(instance_id)}",
+                    env=adapter.env(trial.model),
+                    limits=trial.docker,
+                    network=trial.docker.get("network"),
+                    workdir="/testbed"),
                 cwd=run_dir,
                 timeout=agent_timeout,
                 artifacts=(log_path,),
@@ -156,12 +188,12 @@ class SweBenchSuite(Suite):
             # including new files (hence `git add -A`), from the instance itself.
             commands.append(PlannedCommand(
                 label=f"swebench: capture patch {instance_id}",
-                argv=["docker", "run", "--rm",
-                      *_docker_limits(trial.docker),
-                      "-v", f"{workdir}:/out",
-                      "-w", "/testbed",
-                      image, "bash", "-lc",
-                      "git add -A && git diff --cached > /out/model.patch"],
+                argv=runtime_module.container_argv(
+                    container, image,
+                    ["bash", "-lc", "git add -A && git diff --cached > /out/model.patch"],
+                    limits=trial.docker,
+                    mounts=[(workdir, "/out")],
+                    workdir="/testbed"),
                 cwd=run_dir,
                 timeout=int(options.get("patch_timeout_sec", 600)),
                 artifacts=(patch_path,),
@@ -300,26 +332,3 @@ def _problem_statement(instance):
     return str(instance.get("problem_statement") or instance.get("text") or "")
 
 
-def _docker_limits(docker):
-    docker = docker or {}
-    args = []
-    if docker.get("cpus"):
-        args += ["--cpus", str(docker["cpus"])]
-    if docker.get("memory"):
-        args += ["--memory", str(docker["memory"])]
-    if docker.get("pids_limit"):
-        args += ["--pids-limit", str(docker["pids_limit"])]
-    return args
-
-
-def _network_args(docker):
-    network = (docker or {}).get("network")
-    return ["--network", str(network)] if network else []
-
-
-def _env_args(env):
-    """``-e NAME=value`` pairs, with ``{env:NAME}`` placeholders left for the runner."""
-    args = []
-    for name, value in (env or {}).items():
-        args += ["-e", f"{name}={value}"]
-    return args

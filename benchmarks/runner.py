@@ -37,6 +37,7 @@ import uuid
 
 from . import config as config_module
 from . import docker as docker_module
+from . import runtime as runtime_module
 from .agents import get_adapter
 from .results import read_results, summarise, write_results, write_summary
 from .suites import get_suite
@@ -112,6 +113,8 @@ class Runner:
                      f"dataset={suite.dataset_label(trial.suite)}")
             self.say(f"   agent={adapter.label} model={trial.model.name} "
                      f"({trial.model.base_url}, {trial.model.api})")
+            self.say(f"   runtime={trial.container_runtime or 'none installed'}"
+                     f" (config: {self.config.runtime})")
             for note in suite.notes(trial.model) + adapter.notes(trial.model):
                 self.say(f"   note: {note}")
             try:
@@ -135,8 +138,12 @@ class Runner:
 
     # -- execution -------------------------------------------------------
 
-    def run(self, trials, run_id=None):
-        """Execute every trial, collecting outcomes; returns the manifest."""
+    def run(self, trials, run_id=None, csv_path=None):
+        """Execute every trial, collecting outcomes; returns the manifest.
+
+        ``csv_path`` also writes the summary table as CSV (by convention
+        ``benchmarks/results/<run-id>.csv``, which is git-ignored).
+        """
         run_id = run_id or self.new_run_id(
             sorted({t.suite.name for t in trials}),
             sorted({t.agent.label for t in trials}),
@@ -165,10 +172,14 @@ class Runner:
             for t in trials]
         self._write_manifest(run_dir, manifest)
         rows = summarise(manifest["trials"], outcomes_by_trial)
-        json_path, md_path = write_summary(run_dir, rows, manifest)
+        json_path, md_path = write_summary(run_dir, rows, manifest,
+                                          csv_path=csv_path)
         self.say("")
         self.say(f"summary: {json_path}")
         self.say(f"report:  {md_path}")
+        if csv_path:
+            self.say(f"csv:     {csv_path}")
+            self.say(f"analyse: python -m benchmarks.analyze {csv_path}")
         return manifest
 
     def _run_trial(self, trial, trial_dir):
@@ -187,7 +198,30 @@ class Runner:
         if not self.dry_run:
             self.container_guard(adapter)
 
-        commands = suite.commands(trial, os.getcwd(), trial_dir, adapter)
+        try:
+            commands = suite.commands(trial, os.getcwd(), trial_dir, adapter)
+        except Exception as e:  # noqa: BLE001 - one broken suite must not hide the rest
+            # A trial that cannot even expand (missing instance list, no runtime,
+            # unresolvable agent) is a *result*: it is recorded as a failed command
+            # so the report shows "cmd fail: 1, n: 0" instead of silently omitting
+            # the cell, and the message is kept in the trial directory.
+            if not self.dry_run:
+                _write_json(os.path.join(trial_dir, "trial.json"), {
+                    "run_id": trial.run_id,
+                    "suite": trial.suite.to_dict(),
+                    "agent": adapter.metadata(),
+                    "model": trial.model.to_dict(),
+                    "failed_commands": [{"label": "expand trial",
+                                         "status": "error", "log": None}],
+                    "error": str(e),
+                })
+                with open(os.path.join(trial_dir, "DONE"), "w",
+                          encoding="utf-8") as handle:
+                    handle.write(_now() + "\n")
+            self.say(f"   ! cannot expand this trial: {e}")
+            return [], [{"label": f"expand trial: {e}", "status": "error",
+                         "log": None}]
+
         _write_json(os.path.join(trial_dir, "trial.json"), {
             "run_id": trial.run_id,
             "suite": trial.suite.to_dict(),
@@ -249,6 +283,10 @@ class Runner:
             "python": sys.version.split()[0],
             "platform": sys.platform,
             "docker": docker_module.docker_version(),
+            "runtime": (self.config.resolved_runtime()
+                        or self.config.runtime),
+            "runtime_version": runtime_module.version(
+                self.config.resolved_runtime() or ""),
             "image_digests": digests,
             "config": self.config.to_dict(),
             "config_source": self.config.source,

@@ -36,6 +36,10 @@ def local_model(name="local", base="http://127.0.0.1:30000", api="openai"):
 def minimal_config(**overrides):
     data = {
         "output_dir": "benchmarks/runs",
+        # Pin the runtime: the command shapes below are Docker's, and a test must
+        # not change its assertions depending on which runtime the host happens to
+        # have installed (apptainer machines are supported, and tested separately).
+        "runtime": "docker",
         "suites": [{"name": "terminal-bench", "dataset": "terminal-bench",
                     "version": "2.1", "limit": 2}],
         "models": [{"name": "local", "model": "m", "base_url": "http://127.0.0.1:1",
@@ -291,7 +295,9 @@ class TerminalBenchSuiteTests(unittest.TestCase):
 
     def test_harbor_custom_agent_goes_through_the_bridge(self):
         argv = self.harbor_argv().argv
-        self.assertEqual(argv[argv.index("--agent-import-path") + 1],
+        # `-a` takes a built-in agent name *or* an import path, and is the
+        # spelling harbor 0.24 does not deprecate.
+        self.assertEqual(argv[argv.index("-a") + 1],
                          "benchmarks.harbor_agents:CommandAgent")
         kwargs = [argv[i + 1] for i, item in enumerate(argv)
                   if item == "--agent-kwarg"]

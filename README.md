@@ -339,52 +339,14 @@ the old per-field `Token usage (this session)` block is printed above it as well
 ## Benchmarks (academic evaluation)
 
 `benchmarks/` runs coding agents against **Terminal-Bench 2.x** and **SWE-bench Verified** and
-compares them: mini-code with several settings, Claude Code, Pi, plus a deterministic `mock`
-agent for plumbing checks. It is an orchestration layer, not a reimplementation — every
-benchmark is executed by its own official harness (`harbor` for Terminal-Bench 2.x, `tb` for the
-1.x core datasets, `swebench.harness.run_evaluation` for SWE-bench), and every agent is driven
-through its own CLI.
+compares them — mini-code with several settings, Claude Code, Pi and a deterministic `mock`
+agent — by wrapping each benchmark's own official harness (`harbor`, `tb`,
+`swebench.harness.run_evaluation`). It supports Docker and Apptainer, exports a CSV, and ships an
+analyser for the results.
 
-Install the optional dependencies (never part of the CLI's own install):
-
-```bash
-python -m pip install -r requirements-bench.txt   # terminal-bench, swebench, vllm, litellm
-```
-
-```bash
-python -m benchmarks list                      # suites, agents, settings
-python -m benchmarks validate -c benchmarks/configs/default.json
-python -m benchmarks plan   -c benchmarks/configs/default.json --limit 1   # dry run: prints commands
-python -m benchmarks prepare -c benchmarks/configs/default.json --suite swebench
-python -m benchmarks run    -c benchmarks/configs/default.json --run-id my-run
-python -m benchmarks report --run benchmarks/runs/my-run
-python -m benchmarks models -c benchmarks/configs/default.json             # vLLM / LiteLLM commands
-```
-
-| Piece | Where | Notes |
-| --- | --- | --- |
-| configs | `benchmarks/configs/` | `default.json` (two suites, four agents), `mini_code_settings.json` (the setting matrix), `offline.json` (no keys, no network) |
-| mini-code settings | `benchmarks/agents/mini_code.py` | `default`, `auto-shell`, `plan`, `subagents`, `skills`, `long-context`, `short-tool-timeout`, `all` |
-| artifacts | `benchmarks/runs/<run-id>/` | `manifest.json` (git SHA, dataset, docker digests), per-trial `trial.json` + `logs/`, `results.jsonl`, `summary.{json,md}` |
-
-Two things to know before running anything:
-
-* **`plan` is the default way to look at a run.** It prints the exact argv (never a shell
-  string), the environment variable *names* it sets and the Docker calls, without downloading a
-  dataset or starting a container.
-* **Agent execution is refused outside a container** unless `--allow-host` is passed: several
-  settings (`--sudo`, `bypassPermissions`) are only safe in a disposable environment. Logs,
-  results and summaries are written with credential values redacted.
-
-Claude Code speaks the Anthropic Messages API only, so a local model needs the LiteLLM proxy
-(`benchmarks/models.py`) in front of vLLM, while mini-code and Pi can use the OpenAI-compatible
-endpoint directly (`benchmarks/configs/pi_models.json` shows Pi's provider entry).
-
-Terminal-Bench 2.x runs through `harbor` (`harbor run -d terminal-bench@2.1 ...`); Claude Code
-and Pi are harbor's own agents there, while mini-code goes through the installed-agent bridge in
-`benchmarks/harbor_agents.py`. Set `options.harness` to `"tb"` on the suite to run the older
-`terminal-bench-core` task sets with the `tb` CLI and the `benchmarks/tb_agents.py` bridge.
-Because harbor is young and fast-moving, start with `plan` and a single `--limit 1` trial.
+Everything is documented in **[benchmarks/README.md](benchmarks/README.md)**: prerequisites, the
+exact commands (`plan`, `run --csv`, `analyze`), the Docker and Apptainer variants, the fixed-model
+smoke config (`benchmarks/configs/ornith_30b.json`), and what a run produces.
 
 ## Serving a model locally
 

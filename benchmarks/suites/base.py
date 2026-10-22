@@ -24,7 +24,7 @@ class Trial:
     """One cell of the matrix: a suite, an agent setting, a model, a limit."""
 
     def __init__(self, suite, agent, model, limit=None, timeouts=None,
-                 docker=None):
+                 docker=None, runtime=None):
         self.suite = suite
         self.agent = agent
         self.model = model
@@ -34,6 +34,16 @@ class Trial:
         # makes `plan` a pure function of the config).
         self.timeouts = dict(timeouts or {})
         self.docker = dict(docker or {})
+        # "auto" | "docker" | "apptainer"; suites ask `runtime.resolve` for the
+        # concrete name, so a suite never has to care which one is installed.
+        self.runtime = runtime
+
+    @property
+    def container_runtime(self):
+        """The concrete runtime for this trial (``None`` when none is installed)."""
+        from ..runtime import resolve
+
+        return resolve(self.runtime)
 
     @property
     def run_id(self):

@@ -24,6 +24,9 @@ vllm.log
 # Run artifacts, cached datasets, container build contexts and generated
 # predictions are large or machine-specific; nothing here belongs in the repo.
 benchmarks/runs/
+# Summary CSVs / analyser output: machine-specific numbers belong next to the run
+# that produced them, not in the repository (the *method* is what is tracked).
+benchmarks/results/
 benchmarks/datasets/
 benchmarks/.cache/
 benchmarks/**/build_context/

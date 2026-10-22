@@ -11,6 +11,7 @@ Two rules shape this module:
   their own scoring rules (a TB task is resolved by its tests, a SWE-bench
   instance by the harness), and this module just counts.
 """
+import csv
 import json
 import os
 import re
@@ -124,8 +125,82 @@ def _row(trial, outcomes):
     }
 
 
-def write_summary(run_dir, rows, manifest=None):
-    """Write ``summary.json`` and ``summary.md`` into ``run_dir``; return both paths."""
+#: Column order of the CSV export. Stable on purpose: a spreadsheet, a diff and
+#: `benchmarks.analyze` all read the same file, so the order is part of the API.
+CSV_COLUMNS = (
+    "suite", "agent", "setting", "model", "run_id",
+    "n", "resolved", "unresolved", "errors", "timeouts", "command_errors",
+    "rate", "mean_seconds",
+)
+
+#: Where a CSV goes when the caller does not name one. Untracked (``.gitignore``):
+#: results are machine-specific and large, the *method* is what belongs in git.
+DEFAULT_CSV_DIR = os.path.join("benchmarks", "results")
+
+
+def default_csv_path(run_id, directory=DEFAULT_CSV_DIR):
+    """``benchmarks/results/<run-id>.csv`` -- the conventional export location."""
+    from .config import _slug
+
+    return os.path.join(directory, f"{_slug(run_id)}.csv")
+
+
+def to_csv(rows, path):
+    """Write the summary rows as CSV (header always present, even with no rows).
+
+    A header-only file is the honest record of "the run produced no outcomes":
+    it can still be concatenated with other runs and read by every tool that
+    understands CSV, which an empty file cannot.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory or ".", exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(CSV_COLUMNS),
+                                extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key) for key in CSV_COLUMNS})
+    return path
+
+
+def read_csv(path):
+    """Read a ``summary.csv`` back into rows (numbers restored as numbers)."""
+    rows = []
+    if not os.path.isfile(path):
+        return rows
+    with open(path, newline="", encoding="utf-8") as handle:
+        for record in csv.DictReader(handle):
+            row = dict(record)
+            for key in ("n", "resolved", "unresolved", "errors", "timeouts",
+                        "command_errors"):
+                row[key] = _as_int(row.get(key))
+            for key in ("rate", "mean_seconds"):
+                row[key] = _as_float(row.get(key))
+            rows.append(row)
+    return rows
+
+
+def _as_int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def write_summary(run_dir, rows, manifest=None, csv_path=None):
+    """Write ``summary.json``/``summary.md`` (and optionally a CSV); return paths.
+
+    The CSV is written **outside** the run directory by default
+    (``benchmarks/results/<run-id>.csv``) so a spreadsheet can glob one folder
+    without walking every artifact of every run.
+    """
     json_path = os.path.join(run_dir, "summary.json")
     md_path = os.path.join(run_dir, "summary.md")
     payload = {"run_id": (manifest or {}).get("run_id"),
@@ -136,6 +211,8 @@ def write_summary(run_dir, rows, manifest=None):
         handle.write("\n")
     with open(md_path, "w", encoding="utf-8") as handle:
         handle.write(render_markdown(rows, manifest))
+    if csv_path:
+        to_csv(rows, csv_path)
     return json_path, md_path
 
 

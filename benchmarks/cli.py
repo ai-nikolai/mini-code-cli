@@ -20,7 +20,8 @@ import sys
 from . import __version__, docker as docker_module, models as models_module
 from .agents import ADAPTERS, AgentError, get_adapter
 from .config import ConfigError, load_config, parse_config, validate_config
-from .results import read_results, summarise, write_summary
+from .results import (default_csv_path, read_results, summarise, to_csv,
+                      write_summary)
 from .runner import Runner, _execute, _write_json
 from .suites import ALIASES, SUITES, SuiteError, get_suite
 
@@ -56,9 +57,23 @@ def build_parser():
                      help="redo trials that already finished")
     run.add_argument("--dry-run", action="store_true",
                      help="print the commands instead of executing them")
+    run.add_argument("--csv", nargs="?", const="auto", default=None,
+                     metavar="PATH",
+                     help="also write the summary as CSV "
+                          "(default: benchmarks/results/<run-id>.csv)")
+
+    analyze = sub.add_parser(
+        "analyze", help="summarise result CSVs (see also: python -m benchmarks.analyze)",
+        add_help=False)
+    analyze.add_argument("analyze_args", nargs=argparse.REMAINDER,
+                         help="paths and flags, forwarded to benchmarks.analyze")
 
     report = sub.add_parser("report", help="rebuild a run's summary")
     report.add_argument("--run", required=True, help="run directory")
+    report.add_argument("--csv", nargs="?", const="auto", default=None,
+                        metavar="PATH",
+                        help="also write the summary as CSV "
+                             "(default: benchmarks/results/<run-id>.csv)")
 
     show_models = sub.add_parser("models", help="print serving commands")
     show_models.add_argument("--name", default=None,
@@ -98,7 +113,11 @@ def _dispatch(args, parser):
     if args.command == "list":
         return _cmd_list()
     if args.command == "report":
-        return _cmd_report(args.run)
+        return _cmd_report(args.run, args.csv)
+    if args.command == "analyze":
+        from .analyze import main as analyze_main
+
+        return analyze_main(args.analyze_args)
 
     config = _require_config(args)
     if args.command == "models":
@@ -115,7 +134,8 @@ def _dispatch(args, parser):
             return EXIT_OK
         runner = Runner(config, dry_run=False, allow_host=args.allow_host,
                         resume=not args.no_resume)
-        runner.run(trials, run_id=args.run_id)
+        csv_path = _csv_target(args.csv, args.run_id)
+        runner.run(trials, run_id=args.run_id, csv_path=csv_path)
         return EXIT_OK
     runner = Runner(config, dry_run=True)
     runner.plan(trials)
@@ -204,7 +224,7 @@ def _cmd_models(config, name=None):
     return EXIT_OK
 
 
-def _cmd_report(run_dir):
+def _cmd_report(run_dir, csv_target=None):
     manifest_path = os.path.join(run_dir, "manifest.json")
     if not os.path.isfile(manifest_path):
         print(f"error: no manifest.json in {run_dir}", file=sys.stderr)
@@ -217,15 +237,31 @@ def _cmd_report(run_dir):
         path = os.path.join(run_dir, "trials", trial["run_id"], "results.jsonl")
         outcomes[trial["run_id"]] = read_results(path)
     rows = summarise(trials, outcomes)
-    json_path, md_path = write_summary(run_dir, rows, manifest)
+    csv_path = _csv_target(csv_target, manifest.get("run_id")
+                           or os.path.basename(os.path.abspath(run_dir)))
+    json_path, md_path = write_summary(run_dir, rows, manifest,
+                                       csv_path=csv_path)
     print(f"report: {json_path}")
     print(f"report: {md_path}")
+    if csv_path:
+        to_csv(rows, csv_path)
+        print(f"csv:    {csv_path}")
+        print(f"analyse: python -m benchmarks.analyze {csv_path}")
     return EXIT_OK
 
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _csv_target(value, run_id):
+    """Resolve ``--csv``: ``None`` -> no CSV, ``"auto"`` -> the default path."""
+    if value is None:
+        return None
+    if value == "auto":
+        return default_csv_path(run_id)
+    return value
+
 
 def _models_for(config, agent_spec):
     """The models a (suite, agent) pair will actually be combined with."""
