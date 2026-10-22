@@ -11,7 +11,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Cite](https://img.shields.io/badge/cite-BibTeX-blueviolet?style=flat-square&logo=latex&logoColor=white)](#citation)
 
-**Purpose:** a no-bloat, minimal coding CLI to enjoy experimenting and researching.
+**Purpose:** a no-bloat, minimal coding CLI to enjoy experimenting and researching!
 
 **Install** · [Quick start](#quick-start) · [Modes &amp; safety](#modes--safety) · [Options](#command-line-options) · [Tools](#available-tools) · [Sub-agents](#sub-agents) · [In-session commands](#in-session-commands) · [Development](#development) · [Docs](#documentation) · [Citation](#citation)
 
