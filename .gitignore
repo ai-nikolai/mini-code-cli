@@ -18,3 +18,4 @@ CURRENT_PLAN.md
 .mini/last_session.json
 
 vllm.log
+.mini_tests/

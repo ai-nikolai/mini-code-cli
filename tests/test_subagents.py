@@ -3,7 +3,7 @@
 The point of this module is one property: **a sub-agent must never need a human.**
 A delegated session is started in *background mode*, which means it
 
-  * never consults the ``.mini`` resume pointer and never shows the resume
+  * never consults the ``.mini_tests`` resume pointer and never shows the resume
     prompt (so it cannot block waiting for a choice at startup),
   * never reads a "You:" line (nothing to type, no EOF loop), and
   * auto-denies any tool call that would otherwise ask for permission, rather
@@ -28,12 +28,18 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import ui, utils
+from mini_code_cli import persistence, ui, utils
 from mini_code_cli.agent_loop import AgentSession
 from mini_code_cli.subagents import SubAgent, clear_registry, register
 from mini_code_cli.persistence import save_history, save_summary
 
 from test_e2e_agent_loop import USAGE, StubLLM, make_args, run_loop, silent_console, tool_call
+
+
+# The pointer these tests plant must never land in a real ``.mini`` directory
+# (the user's skills folder + resume pointer): it goes to ``.mini_tests``,
+# inside the test's own temporary --allowed-dir. See mini_code_cli/persistence.py.
+persistence.SESSION_DIRNAME = ".mini_tests"
 
 
 class SubAgentTestCase(unittest.TestCase):
@@ -89,15 +95,16 @@ class NoUserInputTest(SubAgentTestCase):
         marker = os.path.join(self.workdir, "bg.txt")
         register(self.EchoSubAgent())
 
-        # A stale .mini pointer exists: a naive child would find it and offer to
-        # resume. background_mode must ignore it entirely.
+        # A stale session pointer exists: a naive child would find it and offer
+        # to resume. background_mode must ignore it entirely.
         pointed = os.path.join(self.cache_dir, "old_session")
         os.makedirs(pointed, exist_ok=True)
         save_history([{"role": "system", "content": "OLD"},
                       {"role": "user", "content": "old question"}],
                      self.cache_dir, "old_session", 0)
-        os.makedirs(os.path.join(self.workdir, ".mini"), exist_ok=True)
-        with open(os.path.join(self.workdir, ".mini", "last_session.json"), "w") as f:
+        pointer = persistence.pointer_dir(self.workdir)
+        os.makedirs(pointer, exist_ok=True)
+        with open(os.path.join(pointer, persistence.LAST_SESSION_FILENAME), "w") as f:
             json.dump({"session_dir": pointed}, f)
 
         stub = StubLLM([
@@ -130,12 +137,13 @@ class NoUserInputTest(SubAgentTestCase):
         self.assertNotEqual(child_ids[0], "old_session")
 
     def test_background_session_skips_pointer_and_prompt(self):
-        """start_session() on a background session ignores the .mini pointer."""
+        """start_session() on a background session ignores the session pointer."""
         pointed = os.path.join(self.cache_dir, "old_session")
         os.makedirs(pointed, exist_ok=True)
         save_history([{"role": "system", "content": "OLD"}], self.cache_dir, "old_session", 0)
-        os.makedirs(os.path.join(self.workdir, ".mini"), exist_ok=True)
-        with open(os.path.join(self.workdir, ".mini", "last_session.json"), "w") as f:
+        pointer = persistence.pointer_dir(self.workdir)
+        os.makedirs(pointer, exist_ok=True)
+        with open(os.path.join(pointer, persistence.LAST_SESSION_FILENAME), "w") as f:
             json.dump({"session_dir": pointed}, f)
 
         args = make_args(self.workdir, self.cache_dir)
@@ -143,7 +151,7 @@ class NoUserInputTest(SubAgentTestCase):
         with mock.patch.object(AgentSession, "show_resume_choice",
                                side_effect=AssertionError("prompted")), \
              mock.patch("mini_code_cli.agent_loop.find_last_session_dir",
-                        side_effect=AssertionError("consulted the .mini pointer")):
+                        side_effect=AssertionError("consulted the session pointer")):
             background.start_session()
 
         self.assertNotEqual(background.unique_id, "old_session")
@@ -155,8 +163,9 @@ class NoUserInputTest(SubAgentTestCase):
         os.makedirs(pointed, exist_ok=True)
         save_history([{"role": "system", "content": "OLD"},
                       {"role": "user", "content": "old question"}], self.cache_dir, "old_session", 0)
-        os.makedirs(os.path.join(self.workdir, ".mini"), exist_ok=True)
-        with open(os.path.join(self.workdir, ".mini", "last_session.json"), "w") as f:
+        pointer = persistence.pointer_dir(self.workdir)
+        os.makedirs(pointer, exist_ok=True)
+        with open(os.path.join(pointer, persistence.LAST_SESSION_FILENAME), "w") as f:
             json.dump({"session_dir": pointed}, f)
 
         args = make_args(self.workdir, self.cache_dir)

@@ -46,7 +46,7 @@ mini-code --enable-shell --auto-mode --agent-md "./skill.md" --allowed-dir "./" 
 - allowed-dir: this specifies which dirs the agent can read and write from, that does not stop the shell comands! (though dangerous shell commands are still blocked by the classifier above).
 - ask-permission: asks user permission before every tool call. For shell commands, commands in the ALLOW tier skip the prompt, DENY is blocked, and ASK always prompts.
 - system-prompt: you can override the default prompt by using a string. (Note: Agent.md is always appended after the system prompt.)
-- load-last-session: instead of starting a fresh conversation, automatically continue your most recently active session from the default cache dir. It resumes under a brand-new session id, so the original session is never overwritten. An explicit `--restore-session` (a specific path) takes precedence if both are given. The "most recent" session is resolved in two steps: at the end of every interactive session, its path is recorded in a tiny `.mini/last_session.json` pointer inside the `--allowed-dir`, and `--load-last-session` consults that pointer first; only if there is no pointer (e.g. a fresh allowed dir, or the `--skills` feature disabled) does it fall back to the timestamp heuristic (the session whose history was modified most recently). The `.mini` pointer is the same directory the `--skills` feature uses, but it is a single dedicated file, so the two never clash.
+- load-last-session: instead of starting a fresh conversation, automatically continue your most recently active session from the default cache dir. It resumes under a brand-new session id, so the original session is never overwritten. An explicit `--restore-session` (a specific path) takes precedence if both are given. The "most recent" session is resolved from a single source: at the end of every interactive session, its path is recorded in a tiny `.mini/last_session.json` pointer inside the `--allowed-dir`, and `--load-last-session` continues whatever that pointer names (there is deliberately no timestamp fallback over the cache dir — with no pointer, a fresh session simply starts). The `.mini` pointer is the same directory the `--skills` feature uses, but it is a single dedicated file, so the two never clash.
 - **Interactive session offer:** if a previous session exists in the cache dir but you did **not** explicitly ask to resume one (i.e. neither `--load-last-session` nor `--restore-session` was passed), the prompt asks what you'd like to do before the conversation starts: 1) **Resume** the previous session (splice its history in under a brand-new session id and continue it), 2) **Start a new** session (empty history), or 3) **Exit** (start nothing). Ctrl-C / EOF at the offer is treated as a graceful exit. This is distinct from `--load-last-session`, which silently resumes the most recent session without asking.
 - plan: `--plan` enables **plan mode**. The loop keeps two human-readable tracking files in the session directory: `CURRENT_GOAL.md` (the user's latest instruction) and `CURRENT_PLAN.md` (a step-by-step plan the loop generates for the active goal, marked finished once the goal is done). These files are authored by the *loop*, not the agent (they live outside `--allowed-dir`), and you can inspect them anytime with `/plan` (only meaningful in plan mode). After the work looks done, plan mode reviews the plan's completion and re-queues any outstanding tasks before returning to you. Plan mode also changes how history compaction works: after the history is compacted to a summary, the current `CURRENT_PLAN.md` and the user's last instruction (`CURRENT_GOAL.md`) are re-injected into the messages so the agent keeps working against the same goal. When the session ends, the active goal is marked finished in `CURRENT_PLAN.md`.
 - max-context-tokens: the input-token budget that triggers **history compaction**. Compaction is decided by **tokens only** — never by the number of messages — because it is the tokens that make a request overflow the model's context window (a few large tool outputs can fill a window that hundreds of short turns would not). The size of the next request is projected from the server-reported `prompt_tokens` plus an estimate for whatever was appended since, plus the output reserve (`--max-tokens`). Unset (default) derives the limit from the model's context window minus the output reserve and a safety margin; lower it to compact sooner, raise it to compact later. There is no message-count cap to configure.
@@ -156,10 +156,10 @@ options:
                         find it in env variable: MINI_CODE_API_KEY.
   --cache-dir CACHE_DIR
                         The cache dir for the session histories.
-                        default=~/.cache/mini_code/sessions/
+                        default=~/.cache/mini/sessions/
   --restore-session RESTORE_SESSION
                         The location of a previous session to continue. (e.g. 
-                        ~/.cache/mini_code/sessions/1792028090823027-
+                        ~/.cache/mini/sessions/1792028090823027-
                         a9d77653/)
   -l, --load-last-session
                         Continue the most recent previous session recorded in
@@ -248,6 +248,11 @@ python3 tests/test_subagents.py
 ```
 
 The tests focus on the parts of the agent that are easy to get wrong and worth guarding:
+
+The suite is hermetic: every test builds its own temporary `--allowed-dir` and cache dir, so
+nothing is written into your real `~/.cache/mini/sessions/` and — importantly — the session
+pointers the tests create go into a `.mini_tests` directory inside the test's temporary allowed
+dir, never into a real `.mini` (that one is yours: your skills folder and `last_session.json`).
 
 - **`test_e2e_agent_loop.py`** — the whole loop, driven the way a user drives it
   (`AgentSession(args).run(...)`), with only the LLM stubbed: real tools run on disk, the

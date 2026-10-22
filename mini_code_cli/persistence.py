@@ -31,7 +31,7 @@ import re
 import time
 
 from . import ui
-from .config import DEFAULT_CACHE_LOCATION
+from .config import DEFAULT_CACHE_LOCATION, SESSION_DIRNAME
 
 
 # ---------------------------------------------------------------------------
@@ -90,30 +90,44 @@ def generate_unique_id():
 
 
 # ---------------------------------------------------------------------------
-# latest-session pointer (.mini)
+# latest-session pointer (``<allowed_dir>/.mini/last_session.json``)
 # ---------------------------------------------------------------------------
-
-# The .mini directory (inside the user's --allowed-dir) holds a tiny pointer to
+#
+# The session directory (inside the user's --allowed-dir) holds a tiny pointer to
 # the most recent session. A previous session is restored *only* from this
 # pointer -- there is deliberately NO timestamp/mtime fallback over the cache dir
 # (find_last_session_dir below is pointer-only).
 #
-# NOTE: .mini is also the skills feature's directory. The pointer is a single
+# NOTE: by default this is the same ``.mini`` directory the skills feature uses
+# (see :data:`mini_code_cli.config.SESSION_DIRNAME`). The pointer is a single
 # dedicated file inside it (LAST_SESSION_FILENAME), so the two never collide and
 # the skills code (which only reads <skill-name>/ + SKILLS.md) is unaffected.
-SKILLS_DIRNAME = ".mini"
+#
+# ``SESSION_DIRNAME`` is a module-level *variable* (not just an import) so a test
+# suite can point it somewhere of its own -- tests use ``.mini_tests`` so a test
+# run can never write into a real ``.mini`` (the user's skills + resume pointer).
 LAST_SESSION_FILENAME = "last_session.json"
 
 
+def pointer_dir(allowed_dir):
+    """Return the absolute pointer/session-metadata dir inside ``allowed_dir``.
+
+    No side effects (nothing is created); ``None`` when ``allowed_dir`` is empty.
+    """
+    if not allowed_dir:
+        return None
+    return os.path.join(os.path.abspath(allowed_dir), SESSION_DIRNAME)
+
+
 def _last_session_dir_store(allowed_dir):
-    """Return the .mini directory for ``allowed_dir`` (creating it if needed).
+    """Return the pointer directory for ``allowed_dir`` (creating it if needed).
 
     Best-effort: never raises. Returns None if the directory cannot be ensured,
     in which case the pointer is simply not consulted/updated.
     """
-    if not allowed_dir:
+    store = pointer_dir(allowed_dir)
+    if store is None:
         return None
-    store = os.path.join(os.path.abspath(allowed_dir), SKILLS_DIRNAME)
     try:
         os.makedirs(store, exist_ok=True)
         return store
@@ -123,7 +137,7 @@ def _last_session_dir_store(allowed_dir):
 
 
 def save_last_session_pointer(allowed_dir, session_dir):
-    """Record ``session_dir`` as the latest session in ``allowed_dir/.mini``.
+    """Record ``session_dir`` as the latest session in ``<allowed_dir>/.mini``.
 
     Writes a tiny JSON file (the absolute path plus a timestamp) so a later
     ``--load-last-session`` run can resume the most recent session without
@@ -161,16 +175,15 @@ def save_last_session_pointer(allowed_dir, session_dir):
 
 
 def load_last_session_pointer(allowed_dir):
-    """Read the latest-session pointer recorded under ``allowed_dir/.mini``.
+    """Read the latest-session pointer recorded under ``<allowed_dir>/.mini``.
 
     Returns the recorded session directory (a path into the cache folder), or
     None if no pointer exists or it cannot be read. Best-effort: a missing or
-    malformed pointer simply yields None so the caller falls back to the
-    timestamp heuristic.
+    malformed pointer simply yields None.
     """
-    if not allowed_dir:
+    store = pointer_dir(allowed_dir)
+    if store is None:
         return None
-    store = os.path.join(os.path.abspath(allowed_dir), SKILLS_DIRNAME)
     path = os.path.join(store, LAST_SESSION_FILENAME)
     if not os.path.isfile(path):
         return None

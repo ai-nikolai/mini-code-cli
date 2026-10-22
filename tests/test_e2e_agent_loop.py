@@ -34,7 +34,9 @@ Scenarios
                                   (same id), including the legacy folder that has
                                   a history but no recorder file, and
                                   ``--load-last-session`` continues whatever the
-                                  ``.mini`` pointer names without asking.
+                                  ``.mini_tests`` pointer names without asking.
+                                  (The tests record their pointer under
+                                  ``.mini_tests``, never a real ``.mini``.)
 """
 
 import argparse
@@ -50,6 +52,14 @@ from mini_code_cli import persistence, tools, ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
 from mini_code_cli.tools import grep as grep_tool
 from mini_code_cli.subagents import SubAgent, register, clear_registry
+
+
+# The suite must never create a real ``.mini`` directory: that name belongs to
+# the user (their skills folder + ``last_session.json`` resume pointer). Every
+# session pointer the tests record therefore goes into ``.mini_tests`` instead,
+# under the test's own temporary --allowed-dir. (The session histories
+# themselves already live in per-test temporary cache dirs.)
+persistence.SESSION_DIRNAME = ".mini_tests"
 
 
 USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
@@ -620,9 +630,9 @@ class TokenBudgetCompactionTest(unittest.TestCase):
             setattr(args, key, value)
         session = AgentSession(args, console=silent_console())
         # A second session in the same --allowed-dir would otherwise find the
-        # .mini pointer the first one wrote and *ask* whether to resume. A test
-        # must never read stdin (that blocked the suite when run without a TTY),
-        # so answer the offer explicitly.
+        # .mini_tests pointer the first one wrote and *ask* whether to resume.
+        # A test must never read stdin (that blocked the suite when run without
+        # a TTY), so answer the offer explicitly.
         with mock.patch.object(AgentSession, "show_resume_choice", return_value="new"):
             session.start_session()
         return session
@@ -836,9 +846,10 @@ class RestoreSessionEndToEndTest(unittest.TestCase):
                          original.total_usage["total_tokens"])
 
     def test_load_last_session_continues_the_previous_session(self):
-        """--load-last-session: the whole point of the .mini pointer.
+        """--load-last-session: the whole point of the session pointer.
 
-        Session A runs one real turn, which records A in --allowed-dir/.mini.
+        Session A runs one real turn, which records A in
+        ``--allowed-dir/.mini_tests``.
         Session B is then built with --load-last-session (and no
         --restore-session): it must continue A *in place* -- same id, same
         messages -- rather than start a fresh session, and must not ask.

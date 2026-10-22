@@ -8,7 +8,14 @@ import os
 from typing import NamedTuple
 
 # Where session histories live on disk by default.
-DEFAULT_CACHE_LOCATION = os.path.expanduser("~/.cache/mini_code/sessions/")
+DEFAULT_CACHE_LOCATION = os.path.expanduser("~/.cache/mini/sessions/")
+
+# Directory (relative to --allowed-dir) holding the agent's own bookkeeping:
+# the latest-session pointer (``.mini/last_session.json``) and, by default, the
+# ``--skills`` folder. One name, so the two features share a single directory
+# exactly like they always have -- the pointer is a dedicated file, so they
+# never collide.
+SESSION_DIRNAME = ".mini"
 
 # The LLM server the CLI talks to by default (a local vLLM/SGLang endpoint).
 DEFAULT_MODEL_URL = "http://0.0.0.0:30000"

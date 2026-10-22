@@ -31,6 +31,12 @@ from mini_code_cli.agent_loop import AgentSession, maybe_compact
 from test_e2e_agent_loop import USAGE, StubLLM, make_args, run_loop, tool_call
 
 
+# The pointer this suite exercises must never land in a real ``.mini``
+# directory (that is the user's skills folder + resume pointer), so it is
+# recorded under ``.mini_tests`` instead. See mini_code_cli/persistence.py.
+persistence.SESSION_DIRNAME = ".mini_tests"
+
+
 class _SessionCase(unittest.TestCase):
     """Tmpdirs, a captured console, and a one/two-turn session builder."""
 
@@ -153,7 +159,7 @@ class LatestSessionPointerTest(_SessionCase):
     """The readers restore is built on. Best-effort: never raise, always safe."""
 
     def pointer_dir(self):
-        return os.path.join(os.path.abspath(self.workdir), persistence.SKILLS_DIRNAME)
+        return persistence.pointer_dir(self.workdir)
 
     def write_pointer(self, payload):
         os.makedirs(self.pointer_dir(), exist_ok=True)
@@ -238,8 +244,8 @@ class LatestSessionPointerTest(_SessionCase):
                          os.path.abspath(second))
 
     def test_writer_warns_instead_of_raising_when_the_store_is_unusable(self):
-        """A best-effort write: a broken .mini path warns, never raises."""
-        blocker = os.path.join(self.workdir, persistence.SKILLS_DIRNAME)
+        """A best-effort write: a broken .mini_tests path warns, never raises."""
+        blocker = os.path.join(self.workdir, persistence.SESSION_DIRNAME)
         with open(blocker, "w") as f:      # a *file* where the dir should be
             f.write("not a directory")
 
