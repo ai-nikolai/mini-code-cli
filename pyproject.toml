@@ -13,6 +13,14 @@ authors = [
 ]
 license = {file = "LICENSE"}
 urls = {"Homepage" = "https://github.com/ai-nikolai/mini-code-cli"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 
 
 [build-system]
