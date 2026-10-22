@@ -1153,20 +1153,64 @@ class FarewellBoxTest(_SessionCase):
         self.assertNotIn("Goodbye, and thanks", text)
 
 
+def scan_project_version(path):
+    """Read ``[project] version`` by scanning lines -- the 3.10 fallback.
+
+    ``tomllib`` exists from 3.11 only, and CI runs 3.10 as well, so this is the
+    code path that leg takes; it is factored out (rather than inlined) so the
+    test below exercises it on *every* interpreter, not just the oldest one.
+    Section tracking is the point: a ``version`` key in some other table must not
+    be mistaken for the project's.
+    """
+    section = None
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped.startswith("["):
+                section = stripped
+            elif section == "[project]" and stripped.startswith("version"):
+                return stripped.split("=", 1)[1].strip().strip('"')
+    raise AssertionError(f"no version in [project] of {path}")
+
+
+def declared_version(path):
+    """The version in ``pyproject.toml``, read the way the package reads it."""
+    try:
+        import tomllib  # Python >= 3.11
+    except ModuleNotFoundError:  # Python 3.10
+        return scan_project_version(path)
+    with open(path, "rb") as handle:
+        return tomllib.load(handle)["project"]["version"]
+
+
 class VersionTest(unittest.TestCase):
 
     def test_the_package_version_matches_pyproject(self):
         # ``pyproject.toml`` is the single source of truth (the welcome banner
         # reads it through ``__init__``), and the release workflow refuses a tag
         # that disagrees with it -- so a forgotten bump should fail here first.
-        import tomllib
-
         from mini_code_cli import __version__
 
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "pyproject.toml"), "rb") as handle:
-            declared = tomllib.load(handle)["project"]["version"]
-        self.assertEqual(__version__, declared)
+        self.assertEqual(__version__, declared_version(os.path.join(root, "pyproject.toml")))
+
+    def test_the_310_fallback_agrees_with_the_real_file(self):
+        # Exercised on every interpreter, so a broken fallback cannot hide until
+        # the 3.10 leg runs -- and a stray ``version`` in another table must not
+        # win.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "pyproject.toml")
+        self.assertEqual(scan_project_version(path), declared_version(path))
+
+    def test_the_fallback_ignores_a_version_in_another_table(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as handle:
+            handle.write('[tool.other]\nversion = "9.9.9"\n\n'
+                         '[project]\nname = "demo"\nversion = "1.2.3"\n')
+            scratch = handle.name
+        try:
+            self.assertEqual(scan_project_version(scratch), "1.2.3")
+        finally:
+            os.unlink(scratch)
 
 
 class ModuleEntryPointTest(unittest.TestCase):
