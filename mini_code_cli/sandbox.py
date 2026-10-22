@@ -45,12 +45,16 @@ def is_within_allowed_dir(file_path, allowed_dir):
 # Maps each filesystem tool to the names of its path-bearing arguments, so the
 # --allowed-dir sandbox can be enforced uniformly. Keeping this in one place
 # means a future tool cannot silently bypass the sandbox by using a different
-# argument name (e.g. ``glob``'s ``pattern`` instead of ``file_path``).
+# argument name (e.g. ``glob``'s ``pattern`` instead of ``file_path``), and a
+# new path-bearing parameter (``glob``'s ``root``, ``run_shell_command``'s
+# ``cwd``) is only safe if it is listed here too.
 _FILE_TOOL_PATH_ARGS = {
     "read_file": ["file_path"],
     "write_file": ["file_path"],
+    "edit": ["file_path"],
     "grep": ["file_path"],
-    "glob": ["pattern"],
+    "glob": ["pattern", "root"],
+    "run_shell_command": ["cwd"],
 }
 
 

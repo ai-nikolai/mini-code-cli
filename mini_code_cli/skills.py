@@ -32,12 +32,16 @@ import shutil
 import subprocess
 import functools
 
+from .config import SESSION_DIRNAME
+
 # Default timeout (seconds) for a script run via run_skill.
 DEFAULT_TOOL_TIMEOUT = 120
 
 # Layout constants. Keeping them here (and re-exported) means prompts.py and the
-# agent loop can refer to the same names rather than hard-coding them twice.
-SKILLS_DIRNAME = ".mini"
+# agent loop can refer to the same names rather than hard-coding them twice. The
+# directory name itself comes from :mod:`mini_code_cli.config`, the one place
+# that defines it (the latest-session pointer lives in the same directory).
+SKILLS_DIRNAME = SESSION_DIRNAME
 SUMMARY_FILENAME = "SKILLS.md"
 SKILL_FILENAME = "skill.md"
 SCRIPT_SUFFIX = ".py"

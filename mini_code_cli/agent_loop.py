@@ -31,31 +31,36 @@ from . import prompts
 from . import shell_safety_utils
 from . import tools
 from . import utils
+from .utils import oneline
 from . import ui
 from . import subagents
 from . import skills
 from . import plan as plan_utils
+from . import tokens as tokens_mod
 from .config import (
     DEFAULT_CACHE_LOCATION,
     DEFAULT_MODEL_URL,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOOL_TIMEOUT,
     DEFAULT_HTTP_TIMEOUT,
-    DEFAULT_MAX_MESSAGES,
+    compaction_budget,
 )
 from .persistence import (
     save_history,
     save_summary,
-    save_usage,
+    save_usage_segment,
+    save_total_usage,
     load_history,
     load_history_from_dir,
     load_summary_from_dir,
-    load_usage_from_dir,
+    load_usage_segment,
+    load_total_usage_from_dir,
+    empty_usage,
     find_last_session_dir,
-    # save_last_session_pointer,
+    save_last_session_pointer,
     accumulate_usage,
     generate_unique_id,
-    _restore_dir,
+    resolve_session_dir,
 )
 from .sandbox import is_within_allowed_dir, tool_paths_are_allowed, _FILE_TOOL_PATH_ARGS
 from .permissions import (
@@ -97,15 +102,15 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Agent loop for interacting with a language model")
     # MODEL / LLM related
     parser.add_argument("--url", type=str, default=f"{DEFAULT_MODEL_URL}", help=f"API host, default={DEFAULT_MODEL_URL}")
-    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for LLM response, default=None")
+    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for a single LLM response (the reply budget), default=None. Also used as the output headroom reserved when deriving the compaction limit from the model's context window.")
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help=f"Temperature for LLM, default={DEFAULT_TEMPERATURE}")
     parser.add_argument("--model", type=str, help="Model name, default=None")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
 
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
-    parser.add_argument("--restore-session", type=str, help="The location of a previous session to continue. (e.g. ~/.cache/mini_code/sessions/1792028090823027-a9d77653/)")
-    parser.add_argument("-l","--load-last-session", action="store_true", help="Load the most recent previous session from the cache dir and continue it (under a new session id), instead of starting fresh. --restore-session takes precedence if also given.")
+    parser.add_argument("--restore-session", type=str, help="The location of a previous session to continue. (e.g. ~/.cache/mini/sessions/1792028090823027-a9d77653/)")
+    parser.add_argument("-l","--load-last-session", action="store_true", help="Continue the most recent previous session recorded in the --allowed-dir .mini pointer, in place and without the resume prompt, instead of starting fresh. --restore-session takes precedence if also given.")
 
     # Agent behaviour related
     parser.add_argument("--system-prompt", type=str, help="Replace system prompt, with a custom system prompt.")
@@ -119,10 +124,10 @@ def parse_args():
     parser.add_argument("--allowed-dir", type=str, default=".", help="Allowed directory for file operations, default='./'")
     parser.add_argument("-s", "--enable-shell", action="store_true", help="Allow shell execution. default= False")
     parser.add_argument("-g","--enable-subagents", action="store_true", help="Allow the agent to delegate work to sub-agents (exposed as extra tools). default= False")
-    parser.add_argument("--skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
+    parser.add_argument("--skills", dest="enable_skills", action="store_true", help="Enable the skills feature: a local .mini directory (inside --allowed-dir) of skill.md files, skill sub-dirs, a high-level SKILLS.md summary, and executable Python scripts, exposed to the agent as list_skills/read_skill/create_skill/run_skill tools. default= False")
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
-    parser.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES, help=f"History length (in messages) before the conversation is compacted into a summary. Lower it to compact sooner on small context windows. default={DEFAULT_MAX_MESSAGES}")
+    parser.add_argument("--max-context-tokens", type=int, default=None, help="Input-token budget before the conversation is compacted into a summary. This is the primary compaction trigger: it is compared against the projected size of the next request (the server-reported prompt tokens, plus an estimate for whatever was appended since) plus the output reserve (--max-tokens, or a default). Unset (default): derived from the model's context window minus the output reserve and a safety margin, falling back to a conservative window for unknown models. Lower it to compact sooner.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --subagents, --shell, --automode, --sudo")
@@ -139,8 +144,8 @@ def parse_args():
         args.enable_shell = True
         args.sudo = True
         args.auto_mode = True
-        args.skills = True
-    
+        args.enable_skills = True
+
     if args.all_last:
         args.load_last_session = True
 
@@ -151,79 +156,134 @@ def parse_args():
 # banners / helpers
 # ---------------------------------------------------------------------------
 
-def style_line_prompt(text):
-    """A short, styled inline prompt (used for the 'You:' line)."""
-    return ui.console.style(text, bold=True, fg="cyan") + " "
-
-
-def print_help(allowed_dir, server_url, args, unique_id, cache_dir, model_name):
+def print_help(args):
+    """Print the interactive command list (``/help``)."""
     ui.console.rule("help", fg="cyan")
-    if not args.auto_mode:
-        help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
+    if args.auto_mode:
+        help_message = ("Auto-mode: the agent keeps calling the LLM until no "
+                        "further tool calls are possible.")
     else:
-        help_message = "Auto-mode: the agent keeps calling the LLM until no further tool calls are possible."
+        help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
     ui.console.emit(ui.console.style(help_message, dim=True, fg="cyan"))
     ui.console.emit(ui.console.style("History / navigation commands:", bold=True, fg="cyan"))
-    ui.console.emit("  /history         list the conversation (turn number, what happened, where)")
-    ui.console.emit("  /history <n>      show the full messages recorded for turn n")
-    ui.console.emit("  /plan             show the current goal + plan (plan mode only)")
-    ui.console.emit("  /reset [<n>]      rewind to the end of turn n (drops everything after it)")
-    ui.console.emit("  /clear            clear the screen (keeps the conversation history)")
-    ui.console.emit("  /help             show this help")
-    ui.console.emit("  /quit, /exit      save the session and exit")
-    if args.enable_subagents or args.verbose:
+    for command, description in (
+        ("/history", "list the conversation (turn number, what happened, where)"),
+        ("/history <n>", "show the full messages recorded for turn n"),
+        ("/plan", "show the current goal + plan (plan mode only)"),
+        ("/reset [<n>]", "rewind to the end of turn n (drops everything after it)"),
+        ("/clear", "clear the screen (keeps the conversation history)"),
+        ("/help", "show this help"),
+        ("/quit, /exit", "save the session and exit"),
+    ):
+        ui.console.emit(f"  {command:16} {description}")
+    if getattr(args, "enable_subagents", False) or args.verbose:
         ui.console.emit(ui.console.style("Sub-agents:", bold=True, fg="cyan"))
         for sa in subagents.get_registry().values():
             ui.console.emit(f"  {sa.name:16} {sa.description}")
-    if args.enable_skills or args.verbose:
+    if getattr(args, "enable_skills", False) or args.verbose:
         ui.console.emit(ui.console.style("Skills:", bold=True, fg="cyan"))
         for name in skills.SKILL_TOOL_NAMES:
             ui.console.emit(f"  {name:16} (from the local .mini directory)")
     ui.console.rule(char="═", fg="cyan")
 
 
-def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None):
-    """Render the startup info banner through the UI."""
-    version = __import__('mini_code_cli').__version__
+def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None,
+                  console=None):
+    """Render the startup info banner through the UI.
+
+    Everything the session was configured with (where it saves, which server and
+    model it talks to, and -- most importantly -- whether tools run unattended)
+    is summarised in one box before the first prompt, so a surprising setting is
+    visible immediately instead of only being discoverable via /help.
+    """
+    from . import __version__ as version
 
     if getattr(args, "sudo", False):
         permission_mode = "SUDO MODE: no permission prompts (DENY commands still blocked)."
-    elif args.ask_permission:
+    elif getattr(args, "ask_permission", False):
         permission_mode = "All tool calls require permission."
     else:
         permission_mode = "Tool calls execute without asking."
-    agent_mode = "Agent is in manual-mode." if not args.auto_mode else "Agent is in auto-mode."
-    shell_mode = "Shell disabled." if not args.enable_shell else "Shell enabled."
+    auto_mode = bool(getattr(args, "auto_mode", False))
+    agent_mode = "Agent is in auto-mode." if auto_mode else "Agent is in manual-mode."
+    shell_mode = "Shell disabled." if not getattr(args, "enable_shell", False) else "Shell enabled."
 
-    ui.console.welcome(version, unique_id, cache_dir, allowed_dir,
-                       server_url, model_name, permission_mode, agent_mode, shell_mode)
-
-
-def _make_tool_call_note(console, count):
-    console.note(f"LLM is trying to call {count} tool(s).", "info")
+    (console or ui.console).welcome(version, unique_id, cache_dir, allowed_dir,
+                                    server_url, model_name, permission_mode,
+                                    agent_mode, shell_mode)
 
 
 # ---------------------------------------------------------------------------
 # history compaction
 # ---------------------------------------------------------------------------
 
-def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats, history_index=0, max_messages=DEFAULT_MAX_MESSAGES, plan_hook=None, console=None):
-    """Compact the conversation history once it grows beyond ``max_messages``.
+def _compaction_trigger(messages, token_limit, reserved_output_tokens, current_tokens):
+    """Decide whether the history is too big, and say why.
+
+    Token pressure is the *only* trigger: an over-full context window makes the
+    next request fail outright, and it is the number of tokens -- not the number
+    of turns -- that decides that. A handful of large tool outputs can fill a
+    window that a hundred short exchanges would not, so counting messages is a
+    poor proxy for it (and compacts perfectly healthy conversations).
+
+    The projection adds ``reserved_output_tokens`` to the current input size,
+    because the reply has to fit in the same window: a request that leaves no
+    room to answer is already too big.
+
+    Returns ``(triggered, reason)``; ``reason`` is a short human-readable string
+    for the console note when it fires.
+    """
+    if token_limit and int(token_limit) > 0:
+        limit = int(token_limit)
+        reserve = max(int(reserved_output_tokens or 0), 0)
+        tokens = current_tokens
+        if tokens is None:
+            tokens = tokens_mod.estimate_messages_tokens(messages)
+        projected = max(int(tokens), 0) + reserve
+        if projected > limit:
+            return True, (f"{projected} tokens in, {reserve} reserved for the reply "
+                          f"> {limit} budget")
+    return False, ""
+
+
+def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
+                  history_index=0, token_limit=None, reserved_output_tokens=0,
+                  current_tokens=None, plan_hook=None, console=None):
+    """Compact the conversation history once it no longer fits the context window.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
-    When the history gets too large we ask the LLM to summarize it and replace the
-    old turns with that summary, keeping the original system prompt as the first
-    message. The compaction call itself is a single, tool-free request, so it
-    cannot trigger further tool calls or recurse into compaction.
+    The trigger is the *projected input size* of the next request -- the estimate
+    for ``messages`` (or ``current_tokens``, a better number the caller already
+    has) plus ``reserved_output_tokens`` headroom for the reply -- compared
+    against ``token_limit``. Nothing else triggers compaction: in particular the
+    number of messages is not a criterion. Compaction is then done by asking the
+    LLM to summarize the history and replacing the old turns with that summary,
+    keeping the original system prompt as the first message. The compaction call
+    itself is a single, tool-free request, so it cannot trigger further tool
+    calls or recurse into compaction.
+
+    ``token_limit=None`` disables the guard entirely (a no-op, useful to callers
+    that only sometimes enable compaction). See :func:`_compaction_trigger`.
 
     ``plan_hook`` is an optional callable the caller supplies only when running
     under plan mode (in practice ``AgentSession._handle_compaction``). After the
     summary is built the hook re-injects the running goal + plan so the compacted
-    messages carry them forward. Passing it in -- instead of referencing the
+    messages carry them forward. It receives the compacted list and must update it
+    *in place*, because that list is what gets returned to the caller. Passing it in -- instead of referencing the
     owning session -- keeps ``maybe_compact`` a small, module-level, network-free
     helper that the test-suite can import and exercise directly.
     """
-    if len(messages) <= max_messages:
+    # ``console`` defaults to None so callers may omit it, but every branch below
+    # reports through a console. Falling back to the shared one keeps the
+    # documented signature usable -- without this a bare maybe_compact() call hit
+    # "'NoneType' object has no attribute 'start_thinking'" inside the try block,
+    # which the except then swallowed as a failed compaction.
+    if console is None:
+        console = ui.console
+
+    triggered, reason = _compaction_trigger(
+        messages, token_limit, reserved_output_tokens, current_tokens)
+    if not triggered:
         # No compaction: keep the same segment (history_index) and signal the
         # caller with (messages, did_compact=False, unchanged_index). Returning
         # the full triple here is required -- callers unpack all three, so a
@@ -231,47 +291,72 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         return messages, False, history_index
 
     try:
-        ui.console.note(f"Compacting conversation history ({len(messages)} messages -> summary)...", "warn")
+        console.note(f"Compacting conversation history ({reason}) -> summary...", "warn")
         summary_prompt = prompts.compaction_prompt(messages)
-        console.start_thinking("compacting")
-        summary, _, compact_usage = utils.call_openai_server(
-            [{"role": "user", "content": summary_prompt}],
-            max_tokens=1024,
-            temperature=0.0,
-            model=model,
-            server_url=server_url,
-            api_key=api_key,
-            timeout=llm_timeout,
-        )
-        console.stop_thinking()
 
-        accumulate_usage(token_stats, compact_usage)
-        if summary:
-            system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-            compacted = []
-            if system_content:
-                compacted.append({"role": "system", "content": system_content})
-            compacted.append({
-                "role": "user",
-                "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
-            })
+        # The summariser sometimes answers with nothing at all. An empty summary
+        # must never be mistaken for a successful compaction: the caller would
+        # think the history had been shrunk while the over-long transcript was
+        # kept, and the rollover would be lost. Retry once, then give up loudly
+        # (keeping the messages and the segment index) so the user can see that
+        # compaction is not working -- previously this fell through silently and
+        # the over-cap transcript was retried, and paid for, on every step.
+        summary = ""
+        for attempt in (1, 2):
+            console.start_thinking("compacting")
+            try:
+                reply, _, compact_usage, _ = utils.unpack_llm_result(
+                    utils.call_openai_server(
+                        [{"role": "user", "content": summary_prompt}],
+                        max_tokens=1024,
+                        temperature=0.0,
+                        model=model,
+                        server_url=server_url,
+                        api_key=api_key,
+                        timeout=llm_timeout,
+                    ))
+            finally:
+                console.stop_thinking()
 
-            # In plan mode, re-inject the running plan + current goal so a
-            # compaction (which would otherwise drop them) keeps the model
-            # working against the goal it is still trying to finish. The hook is
-            # wired in only when the caller runs under plan mode; otherwise
-            # compaction degrades to a plain summary.
-            if plan_hook is not None:
-                plan_hook(compacted)
-            
-            ui.console.note(f"History compacted to {len(compacted)} messages.", "warn")
-            # A new segment (history_index + 1) is started on compaction: the
-            # compacted messages are its snapshot, and every later turn appends
-            # to it. The caller records a single high-level 'summary' turn for
-            # this index so the recorder stays flat across the rollover.
-            return compacted, True, history_index + 1
+            accumulate_usage(token_stats, compact_usage)
+            summary = (reply or "").strip()
+            if summary:
+                break
+            if attempt == 1:
+                console.note("The summariser returned an empty summary; retrying once.", "warn")
+
+        if not summary:
+            console.note(
+                f"Could not compact history: the summariser returned an empty "
+                f"summary twice. Keeping all {len(messages)} messages "
+                f"({reason}).", "warn")
+            return messages, False, history_index
+
+        system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+        compacted = []
+        if system_content:
+            compacted.append({"role": "system", "content": system_content})
+        compacted.append({
+            "role": "user",
+            "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
+        })
+
+        # In plan mode, re-inject the running plan + current goal so a
+        # compaction (which would otherwise drop them) keeps the model
+        # working against the goal it is still trying to finish. The hook is
+        # wired in only when the caller runs under plan mode; otherwise
+        # compaction degrades to a plain summary.
+        if plan_hook is not None:
+            plan_hook(compacted)
+
+        console.note(f"History compacted to {len(compacted)} messages.", "warn")
+        # A new segment (history_index + 1) is started on compaction: the
+        # compacted messages are its snapshot, and every later turn appends
+        # to it. The caller records a single high-level 'summary' turn for
+        # this index so the recorder stays flat across the rollover.
+        return compacted, True, history_index + 1
     except Exception as e:
-        ui.console.note(f"Failed to compact history: {e}", "error")
+        console.note(f"Failed to compact history: {e}", "error")
 
     return messages, False, history_index
 
@@ -297,74 +382,131 @@ class AgentSession:
         self.allowed_dir = os.path.abspath(args.allowed_dir)
         self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
+        # Mint the session id eagerly: the startup banner is printed *before* the
+        # resume offer is answered, so it must be able to name the session that
+        # early. start_new_session() reuses this id; a successful restore
+        # overwrites it, which is why the "[<id>]" line (printed after
+        # start_session) can differ from the id in the banner.
+        self.unique_id = generate_unique_id()
+        self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+
         self.console = console if console is not None else ui.console
         self.console.verbose = getattr(args, "verbose", False)
 
         # LLM / server configuration.
         self.server_url = f"{args.url}"
-        try:
-            model_name = utils.determine_vllm_model(self.server_url)
-        except:
-            model_name = None
-            pass
-        self.model = model_name if model_name else args.model
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
-        
+        self.model = self._resolve_model(args)
+
         self._register_tools(args)
 
         # report_path is set on a *sub-agent child* session (by
-        # SubAgent._build_child_args) 
+        # SubAgent._build_child_args)
         self.report_path = getattr(args, "report_path", None)
 
         self.plan_mode = bool(getattr(self.args, "plan", False))
 
-        # Token accounting for the whole session.
-        self.token_stats = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "llm_calls": 0,
-            "tool_calls": 0,
-        }
+        # Token accounting. ``token_stats`` covers the *current history
+        # segment* and is reset when compaction rolls over to a new one;
+        # ``total_usage`` is the whole-session accumulator and never decreases.
+        # Keeping the two apart is what lets usage survive a compaction.
+        self.token_stats = empty_usage()
+        self.total_usage = empty_usage()
+
+        # Compaction budget. History is compacted when the *projected input size*
+        # of the next request would not leave room for the reply inside the
+        # model's context window -- not when the message count crosses a
+        # threshold, because it is tokens that make a request fail. Resolving it
+        # once, here, means every step (and the console) agrees on one number.
+        self.compaction_budget = compaction_budget(
+            model=self.model,
+            explicit_limit=getattr(args, "max_context_tokens", None),
+            max_output_tokens=getattr(args, "max_tokens", None),
+        )
+        # How large the last request's prompt was, per the server's own count,
+        # and how many messages that request held. Together these let
+        # project_input_tokens() track the growing transcript instead of
+        # re-estimating from characters every step (see _note_prompt_size).
+        self.last_prompt_tokens = 0
+        self.last_prompt_message_count = 0
 
         self.background_mode = background_mode
 
         self.restore_session = getattr(self.args, "restore_session", None) #specific session
-        
-    def start_session(self):
-        """Loads existing session, detects existing session and asks or starts a new session."""
-        loading_success = False
-        if self.restore_session:
-            try:
-                restore_directory = _restore_dir(self.restore_session)        
-                loading_success = self.restore_previous_session(restore_directory)
-            except Exception as e:
-                pass
-            
-        else:
-            try:
-                detected = self._detect_last_session()
-                if detected and not self.background_mode:
-                    answer = self.show_resume_choice()
-                    if answer == "resume":
-                        self.console.note("Resuming the session.", "warn")
-                        restore_directory = _restore_dir(detected)     
-                        loading_success = self.restore_previous_session(restore_directory)
-                    elif answer == "exit":
-                        self.console.note("User chose to exit! Exiting.", "warn")
-                        raise SystemExit("") # Exit gracefully instead of crashing
-                    else:
-                        self.console.note("Will start with new session!", "warn")
+        # --load-last-session is an explicit *instruction* to continue the session
+        # recorded in --allowed-dir/.mini, so it resumes without the interactive
+        # offer (a piped/non-TTY stdin would otherwise answer that offer with EOF
+        # and exit without doing anything). --restore-session still wins.
+        self.load_last_session = bool(getattr(self.args, "load_last_session", False))
 
-            except Exception as e:
-                pass
-                   
-        if not loading_success:
+    def start_session(self):
+        """Restore a previous session when there is one, else start fresh.
+
+        A *background* session (a sub-agent's, see ``background_mode``) short
+        circuits the detection entirely: it neither consults the ``.mini`` resume
+        pointer nor offers the interactive resume prompt, so it always begins a
+        fresh isolated session. That is what makes delegation safe to run
+        unattended -- there is a single place that decides this.
+        """
+        if self.background_mode and not self.restore_session:
             self.start_new_session()
+            return
+
+        if self.restore_session:
+            if self._try_restore(resolve_session_dir(self.restore_session, self.cache_dir)):
+                return
+        elif not self.background_mode:
+            # Resolving or offering the resume must never stop the CLI from
+            # starting: any hiccup there is reported and we start fresh.
+            try:
+                detected = find_last_session_dir(self.allowed_dir)
+                if detected and self._resume_previous(detected):
+                    return
+            except Exception as e:
+                self.console.note(f"Could not resume the previous session: {e}", "warn")
+        self.start_new_session()
+
+    def _try_restore(self, restore_directory):
+        """Restore a session in place, returning whether it worked.
+
+        A restore failure is not fatal: the caller falls back to a fresh session,
+        so a corrupt or half-written folder never blocks the CLI from starting.
+        """
+        try:
+            return bool(self.restore_previous_session(restore_directory))
+        except Exception:
+            return False
+
+    def _resume_previous(self, detected):
+        """Continue the detected session if the user wants to; True if restored.
+
+        ``--load-last-session`` makes that explicit, so it continues without
+        asking (a piped/non-TTY stdin would otherwise answer the offer with EOF
+        and exit without doing anything). Otherwise the interactive offer
+        decides, and "exit" leaves the CLI without starting a session.
+        """
+        if self.load_last_session:
+            self.console.note("Continuing the last session (--load-last-session).", "warn")
+            return self._try_restore(resolve_session_dir(detected, self.cache_dir))
+
+        answer = self.show_resume_choice()
+        if answer == "exit":
+            self.console.note("User chose to exit! Exiting.", "warn")
+            raise SystemExit("")
+        if answer != "resume":
+            self.console.note("Will start with new session!", "warn")
+            return False
+        self.console.note("Resuming the session.", "warn")
+        return self._try_restore(resolve_session_dir(detected, self.cache_dir))
 
     def start_new_session(self):
-        """A function to start a new session."""
-        self.unique_id = generate_unique_id()
+        """Start a fresh session under ``self.unique_id``.
+
+        The id is normally minted in ``__init__`` (see there) and simply reused
+        here; it is re-minted only when it is missing, which is what happens
+        after a failed restore has cleared it.
+        """
+        self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
 
         self.plan_manager = plan_utils.PlanManager(
@@ -377,6 +519,10 @@ class AgentSession:
 
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
         save_summary(self.summary, self.cache_dir, self.unique_id)
+
+        # Record this session in --allowed-dir/.mini so a later
+        # --load-last-session (or the interactive resume offer) can find it.
+        self._save_last_session_pointer()
 
 
     def restore_previous_session(self, restore_directory):
@@ -399,11 +545,23 @@ class AgentSession:
                 self.session_dir, enabled=self.plan_mode)
             self.summary = []
             self.history_index = 0
-            self._restore_usage_if_available(restore_directory)
             restored = load_history_from_dir(restore_directory) if restore_directory else None
 
             self.messages = restored if restored is not None else self._build_initial_messages()
+            # No prompt has been sent in *this* process yet, so any remembered
+            # size would be stale: start from a plain estimate of the restored
+            # transcript (which is what project_input_tokens falls back to).
+            self.last_prompt_tokens = 0
+            self.last_prompt_message_count = 0
+            # The recorder restore decides which segment we are on, so usage --
+            # which is stored per segment -- has to be restored after it.
             self._load_summary_if_restored(restore_directory)
+            self._restore_usage_if_available(restore_directory)
+
+            # Continuing a session in place makes it the latest one again: keep
+            # the pointer aimed at it so a later --load-last-session finds the
+            # conversation the user is actually working in.
+            self._save_last_session_pointer()
 
             return True
 
@@ -414,15 +572,31 @@ class AgentSession:
             return False
 
 
-    def _detect_last_session(self):
-        """Resolve the most recent previous session dir, once.
+    def _resolve_model(self, args):
+        """Pick the model id: the one the user named, else the server's default.
 
-        There is deliberately NO timestamp/mtime fallback over the cache dir: a
-        previous session is restored only via the ``.mini`` pointer (an explicit
-        record of the session the user last worked in). Returns the path, or None.
-        Called at most once per session (see __init__).
+        The ``/v1/models`` probe is *lazy*: it only runs when ``--model`` was not
+        given, so a normal run with an explicit model makes no extra request and
+        cannot be delayed by an unreachable server. It is also exception-safe --
+        a failed probe warns once and falls back to ``args.model`` (possibly
+        None) instead of killing the session. It used to be a bare ``except:``
+        around an unconditional probe, which swallowed KeyboardInterrupt and
+        turned every construction into a network round-trip.
         """
-        return find_last_session_dir(self.allowed_dir)
+        if args.model:
+            return args.model
+        try:
+            detected = utils.determine_vllm_model(
+                self.server_url, api_key=self.api_key or None,
+                timeout=getattr(args, "llm_timeout", DEFAULT_HTTP_TIMEOUT))
+        except Exception as e:
+            self.console.note(
+                f"Could not detect a model served at {self.server_url} ({e}); "
+                f"falling back to --model.", "warn")
+            return args.model
+        if detected:
+            self.console.note(f"Using the model served at {self.server_url}: {detected}", "info")
+        return detected or args.model
 
     def _register_tools(self, args):
         """Wire up which tools the LLM may call, and register the opt-in ones.
@@ -489,17 +663,112 @@ class AgentSession:
         return messages
 
     def _restore_usage_if_available(self, restore_directory):
-        """Seed this session's token totals from a sibling usage.json, if the
-        restored session had one, so the running summary stays continuous.
+        """Restore the per-segment and whole-session token totals.
 
-        Best-effort only: token accounting is loaded on top of (never in place
-        of) the in-memory totals, and any problem here is ignored silently so a
-        missing or malformed usage file can never break a restore.
+        ``token_stats`` comes from the segment we restored onto
+        (``usage_{history_index}.json``) and ``total_usage`` from
+        ``total_usage.json`` (falling back to the sum of all segments), so the
+        running summary stays continuous across a restore *and* across the
+        compaction that may have happened before it. Best-effort: any problem
+        leaves the totals at zero rather than breaking the restore.
         """
-        saved = load_usage_from_dir(restore_directory)
-        for key in self.token_stats:
-            if key in saved:
-                self.token_stats[key] += int(saved[key] or 0)
+        segment = load_usage_segment(restore_directory, self.history_index)
+        total = load_total_usage_from_dir(restore_directory)
+        # A restored segment can never have cost more than the recorded total.
+        for key in total:
+            total[key] = max(total[key], segment[key])
+        self.token_stats = segment
+        self.total_usage = total
+
+    def _record_usage(self, usage):
+        """Bill one LLM call to both the current segment and the session total."""
+        accumulate_usage(self.token_stats, usage)
+        accumulate_usage(self.total_usage, usage)
+
+    def _note_prompt_size(self, usage, message_count=None):
+        """Remember how large the last request's prompt was.
+
+        The server's reported ``prompt_tokens`` is exact, so it is worth far more
+        than a characters/4 guess -- but it only describes the transcript as it
+        was at that moment. Recording the message count alongside it is what lets
+        :func:`tokens.project_input_tokens` keep using that number later in the
+        turn: it adds an estimate for the messages appended since, instead of
+        throwing the real count away and re-guessing the whole transcript.
+
+        ``message_count`` defaults to the current transcript length. A call that
+        reports nothing (many local servers) or fails leaves the previous
+        estimate in place, which then simply ages into the heuristic path.
+        """
+        if not usage:
+            return
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        if prompt_tokens <= 0:
+            return
+        if message_count is None:
+            message_count = len(self.messages)
+        self.last_prompt_tokens = prompt_tokens
+        self.last_prompt_message_count = int(message_count)
+
+    def _projected_input_tokens(self):
+        """Best estimate of how large the next request's prompt will be."""
+        return tokens_mod.project_input_tokens(
+            self.messages, self.last_prompt_tokens, self.last_prompt_message_count)
+
+    def _context_fraction(self):
+        """How much of the model's context window the next request would fill.
+
+        Returns a 0.0-1.0 fraction (clamped), or ``None`` when it cannot be
+        computed. It divides the *same* projection the compaction trigger uses
+        against the same window, so the bar the user sees and the moment
+        compaction fires can never disagree -- a bar stuck at 20% while the
+        transcript is compacted would be worse than no bar at all.
+
+        Note this counts input only, i.e. it answers "how full is the window
+        with what we are about to send", not "including the reply that is about
+        to be written"; that reserve is what the compaction limit already
+        accounts for.
+        """
+        window = self.compaction_budget.context_window
+        if not window or window <= 0:
+            return None
+        try:
+            used = self._projected_input_tokens()
+        except Exception:
+            # A display detail must never be able to break a turn.
+            return None
+        return min(max(used / float(window), 0.0), 1.0)
+
+    def _context_badge(self):
+        """The context-occupancy badge for the Assistant header ("" if unusable).
+
+        The percentage is occupancy of the whole window (what the user asked
+        for: "how much of the context is in use"), but the colour thresholds are
+        derived from the compaction limit, so amber/red mean "compaction is
+        near" -- i.e. they point at the point where something actually happens.
+        With a fixed 60/85% of the window the red zone would be unreachable: the
+        budget keeps a reserve plus a margin, so history is compacted at roughly
+        84% of the window and never gets near 100%.
+        """
+        fraction = self._context_fraction()
+        if fraction is None:
+            return ""
+        window = self.compaction_budget.context_window
+        danger = min(max(self.compaction_budget.token_limit / float(window), 0.0), 1.0)
+        return self.console.context_bar(fraction, warn=danger * 0.85, danger=danger)
+
+    def _bill_compaction(self, segment_before):
+        """Carry the compaction call's spend over into the session total.
+
+        :func:`maybe_compact` is only handed the segment dict, so the tokens the
+        summariser spent land there and nowhere else. The rollover that follows
+        zeroes the segment counters, so without this the summarisation cost would
+        silently vanish from the session total. Deltas are per key because
+        :func:`accumulate_usage` only ever adds.
+        """
+        for key, before in segment_before.items():
+            delta = self.token_stats.get(key, 0) - before
+            if delta > 0:
+                self.total_usage[key] = self.total_usage.get(key, 0) + delta
 
     def _load_summary_if_restored(self, restore_directory):
         """Restore the high-level recorder and segment index for a restore.
@@ -571,8 +840,8 @@ class AgentSession:
         that turn, or None if the segment could not be loaded (never raises: a
         missing or moved segment must not crash navigation).
         """
-        directory = os.path.join(self.cache_dir, self.unique_id)
-        segment_path = os.path.join(directory, f"history_{record.get('history_file', 0)}.json")
+        segment_path = os.path.join(
+            self.session_dir, f"history_{record.get('history_file', 0)}.json")
         try:
             with open(segment_path, "r", encoding="utf-8") as f:
                 segment = json.load(f)
@@ -624,12 +893,21 @@ class AgentSession:
             fg="red",
         )
 
+    def print_welcome(self):
+        """Render the startup banner for this session."""
+        print_welcome(self.allowed_dir, self.server_url, self.args,
+                      self.unique_id, self.cache_dir, self.model,
+                      console=self.console)
+
     def print_announcements(self):
-        """Print the info / warning banners that depend on the CLI flags."""
-        if self.api_key:
-            self.console.announce_api_key(present=True)
-        else:
-            self.console.announce_api_key(present=False)
+        """Print the info / warning banners that depend on the CLI flags.
+
+        All of these use the ``ok`` / ``warn`` levels (never ``info``) so they
+        still reach the user in the quiet, default (non-verbose) view: a missing
+        API key, unrestricted shell execution and --sudo are exactly the things
+        that must not be hidden behind --verbose.
+        """
+        self.console.announce_api_key(present=bool(self.api_key))
 
         if shell_forces_ask_permission(self.args):
             self.console.announce_shell()
@@ -641,7 +919,16 @@ class AgentSession:
         if self.enable_subagents:
             self.console.note(
                 f"Sub-agents enabled ({len(self.subagents_registry)} available: "
-                f"{', '.join(self.subagents_registry)}).", "info")
+                f"{', '.join(self.subagents_registry)}).", "ok")
+
+    def _print_session_id(self):
+        """Print the session's unique id as a minimal "Assistant" turn.
+
+        The id is rendered as an assistant-styled (green) turn carrying *only*
+        the id in brackets, so the user can see / copy the id this conversation
+        is being saved under without adding another line to the banner.
+        """
+        self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
 
     def show_resume_choice(self):
         """Prompt for the resume choice and return its label.
@@ -674,122 +961,135 @@ class AgentSession:
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
-        # Called in the beginning to init the session.
+        # Startup output comes FIRST, before the session is resolved. The banner
+        # and the flag-dependent warnings (API key / shell / --sudo / an unknown
+        # model) describe how this process is configured -- how much the agent
+        # may do unattended -- so the user must see them *before* being asked
+        # whether to resume an older conversation (and before anything can
+        # consume stdin). None of them depends on which session is finally used:
+        # they read args, allowed_dir, cache_dir, server_url and the resolved
+        # model, plus the provisional id minted in __init__.
+        self.print_welcome()
+        self.print_announcements()
+        self._warn_compaction_budget()
+
+        # Only now resolve the session (resume offer / restore / fresh start),
+        # because all of that can consume input and can replace the id. The id
+        # line and the tip therefore come after it and show the id actually in
+        # use (the banner may have shown the provisional one).
         self.start_session()
-
-
-        # Hint at startup so the high-level history feature is discoverable:
-        # /history browses the recorder, /history <n> inspects a turn, and
-        # /reset <n> rewinds the conversation to that turn's state.
-        tip = ("Tip: /history to browse the conversation, /history <n> to inspect a "
-               "turn, /reset <n> to rewind. Type /help for all commands.")
-        if getattr(self.args, "plan", False):
-            tip = ("Tip: /plan to show the current goal + plan (plan mode), "
-                   "/history to browse the conversation, /history <n> to inspect a "
-                   "turn, /reset <n> to rewind. Type /help for all commands.")
-        self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
+        self._print_session_id()
+        self._emit_tip()
 
         # The --prompt value is a one-shot initial turn: it is sent verbatim and
         # then cleared, so later turns come from the user (manual mode) or are
         # produced automatically by the loop (auto mode).
         pending = initial_prompt
-
-        running = True
-        while running:
-            try:
-                # 1) Get the user's turn: the one-shot preset, or a fresh line.
+        try:
+            while True:
+                user_input = pending if pending is not None else self._read_user_line()
+                if user_input is None or user_input.lower() in self.EXIT_COMMANDS:
+                    self.console.note("Thank you. Goodbye! Saving history...", "info")
+                    break
                 if pending is not None:
                     self.console.rule(title="Preset prompt", char="=", fg="cyan")
                     self.console.short_divider()
-                    self.console.turn("You", pending, accent="cyan")
-                    user_input = pending
+                    self.console.turn("You", user_input, accent="cyan")
                     pending = None
-                else:
-                    user_input = self._read_user_line()
-                    if user_input is None or user_input.lower() in self.EXIT_COMMANDS:  # EOF / Ctrl-C at the prompt
-                        self.console.note("Thank you. Goodbye! Saving history...", "info")
-                        running = False
-                        break
+                # Interactive slash commands are handled in place and never
+                # reach the LLM.
+                if user_input.startswith("/") and self._handle_command(user_input):
+                    continue
+                self._run_turn(user_input)
+        except _Abort:
+            # Ctrl-C during a permission prompt already saved the session.
+            return
+        except KeyboardInterrupt:
+            self.console.note("Interrupting: Mini Code Exiting...", "error")
+        except Exception as e:
+            self.console.note(f"Exception {e}. Exiting...", "error")
+        self.shutdown()
 
-                    # Interactive slash commands are handled in place and never
-                    # reach the LLM. _handle_command returns True when the input
-                    # was such a command, so we just re-prompt (continue).
-                    if user_input.startswith("/") and self._handle_command(user_input):
-                        continue
-                
-                self.messages.append({"role": "user", "content": user_input})
+    def _emit_tip(self):
+        """Point at the history/navigation commands once, at startup."""
+        tip = ("Tip: /history to browse the conversation, /history <n> to inspect a "
+               "turn, /reset <n> to rewind. Type /help for all commands.")
+        if self.plan_mode:
+            tip = ("Tip: /plan to show the current goal + plan (plan mode), "
+                   "/history to browse the conversation, /history <n> to inspect a "
+                   "turn, /reset <n> to rewind. Type /help for all commands.")
+        self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
-                if self.plan_mode:
-                    self.console.note(
-                            "Generating plan for agent.", "info")
-                    self._record_goal_request(user_input)
-                    self._generate_plan_and_inject(user_input)
-                    self.console.note(
-                            "Plan generated.", "info")
-                running_turn = True
-                while running_turn:
-                    self.console.note(
-                            "Entering single turn loop.", "info")
-                    # actually stepping through the agentic steps.
-                    should_continue = self._step()
-                    self._persist()
-                    if should_continue:
-                        self.console.note(
-                            "Continuing with LLM calls until no more tool calls.", "info")
-                    else:
-                        self.console.note(
-                            "LLM seems to have to an end of the task.", "info")
+    def _warn_compaction_budget(self):
+        """Warn when the compaction budget came from the unknown-model fallback.
 
-                        if self.plan_mode:
-                            self.console.note(
-                                "Reviewing the plan, if everything is done.", "info")
-                            self._review_plan_completion() 
-                            should_continue = self._step()
-                            self._persist()
-
-                        # A response with no tool calls means the turn is over. This must
-                        # happen regardless of plan mode: previously the assignment sat inside
-                        # `if self.plan_mode`, so non-plan sessions never left the turn loop and
-                        # re-called the model forever.
-                        if not should_continue:
-                            running_turn = False  # escape the turn loop
-            
-            except _Abort:
-                # Ctrl-C during a permission prompt already shut the session
-                # down; just unwind the loop quietly.
-                running = False
-
-            except KeyboardInterrupt:
-                self.console.note("Interrupting: Mini Code Exiting...", "error")
-                self.shutdown()
-                running = False
-                # Ctrl-C mid-loop just saves and re-prompts rather than crashing.
-            except Exception as e:
-                self.console.note(f"Exception {e}. Exiting...", "error")
-                self.shutdown()
-                running = False
-        self.console.note(
-            "EOF.", "info")
-
-    def _print_session_id(self):
-        """Print the session's unique id as a minimal "Assistant" turn.
-
-        Instead of a banner/header the id is rendered as an assistant-styled
-        (green) turn carrying *only* the id in brackets, so the user can see /
-        copy the id this conversation is being saved under without the noise of
-        the extra "saved under" line.
+        An unknown model gets a deliberately conservative window, so the user
+        should know the limit is a guess they can override rather than a
+        measured value. This is a startup warning (it describes the run's
+        configuration, not a turn), so it is printed with the other
+        announcements rather than after the session has been settled.
         """
-        self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
+        if self.compaction_budget.source == "default":
+            self.console.note(
+                f"Unknown model {self.model!r}: assuming a "
+                f"{self.compaction_budget.context_window:,}-token context window, so "
+                f"history compacts at {self.compaction_budget.token_limit:,} input "
+                f"tokens (+{self.compaction_budget.reserved_output_tokens:,} reserved "
+                f"for the reply). Override with --max-context-tokens.", "warn")
 
-    # def _save_last_session_pointer(self):
-    #     """Record this session's directory in --allowed-dir/.mini.
+    def _run_turn(self, user_input):
+        """Run one user turn: record it, step until the model stops, then review.
 
-    #     Writes the .mini pointer that a later --load-last-session consults first
-    #     (see save_last_session_pointer). Best-effort: never raises, so a pointer
-    #     hiccup can never break the interactive session.
-    #     """
-    #     save_last_session_pointer(self.allowed_dir,
-    #                               os.path.join(self.cache_dir, self.unique_id))
+        A step that makes no tool calls ends the turn. In plan mode the loop then
+        asks the model to review the plan and takes one more step, so the review
+        can drive further work. The extra step happens *outside* the plan-mode
+        branch's result: a reply with no tool calls must always end the turn,
+        otherwise non-plan sessions re-call the model forever.
+        """
+        self.messages.append({"role": "user", "content": user_input})
+
+        if self.plan_mode:
+            self.console.note("Generating plan for agent.", "info")
+            self._record_goal_request(user_input)
+            self._generate_plan_and_inject(user_input)
+            self.console.note("Plan generated.", "info")
+
+        while True:
+            should_continue = self._step()
+            self._persist()
+            if should_continue:
+                self.console.note(
+                    "Continuing with LLM calls until no more tool calls.", "info")
+                continue
+            self.console.note("LLM seems to have to an end of the task.", "info")
+            if not self.plan_mode:
+                return
+            self.console.note("Reviewing the plan, if everything is done.", "info")
+            self._review_plan_completion()
+            self._persist()
+            # One more step so the review can drive further work. Persist before
+            # deciding so the review step's messages are recorded even when it
+            # ends the turn (a no-tool-call reply must never be left unsaved).
+            should_continue = self._step()
+            self._persist()
+            if not should_continue:
+                return
+
+    def _save_last_session_pointer(self):
+        """Record this session's directory in --allowed-dir/.mini.
+
+        Writes the .mini pointer that a later --load-last-session (or the resume
+        offer) reads via :func:`persistence.find_last_session_dir`. Best-effort:
+        never raises, so a pointer hiccup can never break the session.
+
+        Skipped for *background* sessions: a sub-agent's isolated child session
+        must never become the user's "last session", or delegating once would
+        silently redirect the user's next --load-last-session into a throwaway
+        sub-agent folder.
+        """
+        if self.background_mode or not self.allowed_dir:
+            return
+        save_last_session_pointer(self.allowed_dir, self.session_dir)
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
@@ -815,14 +1115,21 @@ class AgentSession:
         child_plan = PlanManager(os.path.join(self.cache_dir, self.unique_id), enabled=True)
         child_plan.write_goal(initial_task)
         steps = 0
+        # How the run ended, so the caller can explain a truncated answer
+        # instead of reporting "no output" (the common case when the cap is hit
+        # mid-tool-call, where there is no final assistant text at all).
+        self.stop_reason = "finished"
+        self.steps_taken = 0
         try:
             while True:
                 should_continue = self._step()
                 self._persist()
                 steps += 1
+                self.steps_taken = steps
                 if max_steps and steps >= max_steps:
                     self.console.note(
                         f"Sub-agent reached max_steps ({max_steps}); stopping.", "warn")
+                    self.stop_reason = "max_steps"
                     break
                 if not should_continue:
                     break
@@ -856,25 +1163,36 @@ class AgentSession:
         plan_prompt_text = prompts.plan_prompt(self.messages, current_instruction)
         plan_text = ""
         try:
-            ui.console.note("Generating a plan for the current goal...", "info")
+            self.console.note("Generating a plan for the current goal...", "info")
             self.console.start_thinking("planning")
-            response, _, usage = utils.call_openai_server(
-                [{"role": "user", "content": plan_prompt_text}],
-                # The generated plan can be long: leave it unlimited (the server
-                # decides the cap) rather than capping the step-by-step authoring.
-                max_tokens=None,
-                temperature=0.0,
-                model=self.model,
-                server_url=self.server_url,
-                api_key=self.api_key,
-                timeout=self.args.llm_timeout,
-            )
+            # The loop's own bookkeeping requests (plan authoring / review /
+            # compaction) are single user turns with no ``tools``, so the
+            # server's thinking-mode rule does not require any assistant
+            # reasoning text here; the field is simply not forwarded.
+            response, _, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": plan_prompt_text}],
+                    # The generated plan can be long: leave it unlimited (the
+                    # server decides the cap) rather than capping the
+                    # step-by-step authoring.
+                    max_tokens=None,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                ))
             self.console.stop_thinking()
 
-            accumulate_usage(self.token_stats, usage)
+            self._record_usage(usage)
+            # The plan prompt is one message holding a flattened copy of the whole
+            # transcript, so its prompt_tokens is a safe (slightly high) upper
+            # bound on the transcript's own size -- worth keeping, since it is a
+            # real count from this model rather than a character estimate.
+            self._note_prompt_size(usage, len(self.messages))
             plan_text = response or ""
         except Exception as exc:
-            ui.console.note("Could not generate a plan: %s" % exc, "warn")
+            self.console.note(f"Could not generate a plan: {exc}", "warn")
 
         self.plan_manager.write_plan(plan_text)
         if plan_text and plan_text.strip():
@@ -901,22 +1219,24 @@ class AgentSession:
             self.messages, self.plan_manager.goal or "")
         summary = ""
         try:
-            ui.console.note("Reviewing the current plan...", "info")
+            self.console.note("Reviewing the current plan...", "info")
             self.console.start_thinking("reviewing plan")
-            response, _, usage = utils.call_openai_server(
-                [{"role": "user", "content": plan_prompt_text}],
-                max_tokens=1024,
-                temperature=0.0,
-                model=self.model,
-                server_url=self.server_url,
-                api_key=self.api_key,
-                timeout=self.args.llm_timeout,
-            )
+            response, _, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": plan_prompt_text}],
+                    max_tokens=1024,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                ))
             self.console.stop_thinking()
-            accumulate_usage(self.token_stats, usage)
+            self._record_usage(usage)
+            self._note_prompt_size(usage, len(self.messages))
             summary = response or ""
         except Exception as exc:
-            ui.console.note("Could not review the plan: %s" % exc, "warn")
+            self.console.note(f"Could not review the plan: {exc}", "warn")
 
         # Persist the review summary to the plan document and re-inject it so
         # the model works from the review result.
@@ -934,14 +1254,20 @@ class AgentSession:
     def _handle_compaction(self, compacted):
         """Re-inject goal + plan into the compacted messages (plan mode).
 
-        Thin plan-mode counterpart to the inlined plan handling inside
-        :meth:`maybe_compact`, which takes a ``plan_hook`` rather than the
-        owning session so it can stay a network-free module-level helper. The
-        loop wires in this method only when plan mode is on; it simply
-        re-injects the goal + plan via :meth:`_apply_plan_to_compacted`, which
-        also rewrites the tracking files to match.
+        Plan-mode counterpart to the plan handling inside :meth:`maybe_compact`,
+        which takes a ``plan_hook`` rather than the owning session so it can stay
+        a network-free module-level helper. The loop wires in this method only
+        when plan mode is on; it re-injects the goal + plan via
+        :meth:`_apply_plan_to_compacted`, which also rewrites the tracking files
+        to match.
+
+        The hook must update ``compacted`` **in place**: ``maybe_compact``
+        returns *that* list to the caller, which then assigns it to
+        ``self.messages``. Rebinding (``self.messages = ...``) instead would be
+        discarded a moment later, silently dropping the goal and plan -- which is
+        exactly what happened before this was a slice assignment.
         """
-        self.messages = self._apply_plan_to_compacted(compacted)
+        compacted[:] = self._apply_plan_to_compacted(compacted)
 
     def _apply_plan_to_compacted(self, messages):
         """Re-inject the current goal + plan after a history compaction.
@@ -986,23 +1312,19 @@ class AgentSession:
         normally sits outside --allowed-dir. This exempts that single, known file
         so the sub-agent can actually write it (otherwise the sandbox would block
         the write and the parent would never receive the report). Scoped tightly:
-        only when this is a child session (report_path set), only read_file /
-        write_file, and only when the resolved path is exactly the report file.
+        only when this is a child session (report_path set), only the file tools
+        (read_file / write_file / edit), and only when the resolved path is
+        exactly the report file.
         """
-        if not self.report_path or name not in ("read_file", "write_file"):
+        if not self.report_path or name not in ("read_file", "write_file", "edit"):
             return False
         path = tool_params.get("file_path", "")
         if not path:
             return False
         try:
-            resolved = os.path.realpath(path)
+            return os.path.realpath(path) == os.path.realpath(self.report_path)
         except (ValueError, TypeError):
             return False
-        try:
-            expected = os.path.realpath(self.report_path)
-        except (ValueError, TypeError):
-            return False
-        return resolved == expected
 
     # -- interactive input -------------------------------------------------
 
@@ -1012,15 +1334,27 @@ class AgentSession:
         An empty (blank) line is not a real instruction, so it is ignored and the
         user is asked again rather than sending an empty turn to the model.
         """
-        self.console.short_divider()
+        if self.background_mode:
+            # Nothing may block on input in an unattended session: report EOF so
+            # any loop that reaches here unwinds instead of hanging.
+            return None
 
-        user_input = self.console.read_line(style_line_prompt("You:"))
+        # A loop, not recursion: holding Enter used to recurse once per blank
+        # line, so a long run of empty input could exhaust the interpreter stack.
+        while True:
+            self.console.short_divider()
 
-        if not user_input.strip():
+            user_input = self.console.read_line(
+                self.console.style("You:", bold=True, fg="cyan") + " ")
+
+            # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
+            # must not be dereferenced here (a piped or closed stdin would
+            # otherwise crash the loop instead of exiting cleanly).
+            if user_input is None:
+                return None
+            if user_input.strip():
+                return user_input
             self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
-            return self._read_user_line()
-
-        return user_input
 
     def _handle_command(self, user_input):
         """Handle an interactive slash command before it reaches the LLM.
@@ -1047,14 +1381,16 @@ class AgentSession:
         cmd, arg = parts[0].lower(), parts[1] if len(parts) > 1 else ""
 
         if cmd == "history":
-            self._inspect_history(arg) if arg else self._show_history()
+            if arg:
+                self._inspect_history(arg)
+            else:
+                self._show_history()
             return True
         if cmd in ("reset", "rewind"):
             self._do_reset(arg)
             return True
         if cmd == "help":
-            print_help(self.allowed_dir, self.server_url, self.args,
-                       self.unique_id, self.cache_dir, self.model)
+            print_help(self.args)
             return True
         if cmd in self.CLEAR_COMMANDS:
             self._clear_and_show_last()
@@ -1141,11 +1477,11 @@ class AgentSession:
     # -- tool execution ----------------------------------------------------
 
     def _run_tool_calls(self, tool_calls):
-        _make_tool_call_note(self.console, len(tool_calls))
+        self.console.note(f"LLM is trying to call {len(tool_calls)} tool(s).", "info")
         # Show a "… calling tool" spinner (in-place, non-scrolling) while the
         # tool(s) execute, mirroring the thinking spinner that covers the LLM
         # call. Always stopped (finally) so it can never leak into the next turn.
-        
+
         try:
             for call in tool_calls:
                 self._run_one_tool_call(call)
@@ -1154,17 +1490,34 @@ class AgentSession:
 
     def _run_one_tool_call(self, call):
 
+        call = call or {}
+        # ``or {}`` (not merely a default) because a malformed server response can
+        # carry an explicit ``"function": null``; indexing through that used to
+        # raise AttributeError and kill the whole session instead of reporting a
+        # bad tool call back to the model.
+        function = call.get("function") or {}
         call_id = call.get("id", "")
-        name = call.get("function", {}).get("name", "")
-        params_str = call.get("function", {}).get("arguments", "{}")
+        name = function.get("name", "") or ""
+        params_str = function.get("arguments", "{}")
         self.console.start_tool_call(tool_name=name)
 
         try:
             tool_params = json.loads(params_str)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             self.console.note(f"Error parsing arguments for tool {name}", "error")
             self._append_tool_result(call_id,
-                f"Error: Unknown tool: {name}, params {params_str}")
+                f"Error: the arguments for tool {name} were not valid JSON "
+                f"({params_str!r}). Pass a JSON object of named parameters.")
+            return
+
+        # The arguments must be a JSON object (a model occasionally emits a bare
+        # list/string). Treat that as a normal tool error rather than crashing on
+        # ``tool_params.get(...)`` below.
+        if not isinstance(tool_params, dict):
+            self.console.note(f"Tool {name} was called with non-object arguments.", "error")
+            self._append_tool_result(call_id,
+                f"Error: the arguments for tool {name} must be a JSON object of "
+                f"named parameters, got {type(tool_params).__name__}.")
             return
 
         # Sub-agent: delegate the task to a sub-agent (which spins up its own
@@ -1183,15 +1536,15 @@ class AgentSession:
         # 1) Sandbox: keep every filesystem tool inside --allowed-dir. (In plan
         #    mode the tracking files are maintained by the loop directly -- not
         #    through agent tools -- so nothing here needs an exemption.)
-        if not tool_paths_are_allowed(name, tool_params, self.allowed_dir):
-            if self._is_report_file(name, tool_params):
-                pass  # allow a sub-agent's own report.md under the cache dir
-            else:
-                self.console.note(
-                    f"File operation not allowed outside allowed directory: {self.allowed_dir}", "error")
-                self._append_tool_result(call_id,
-                    f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
-                return
+        if (not tool_paths_are_allowed(name, tool_params, self.allowed_dir)
+                and not self._is_report_file(name, tool_params)):
+            # The one exemption is a sub-agent's own report.md, which lives under
+            # the cache dir (outside --allowed-dir) so the parent can read it.
+            self.console.note(
+                f"File operation not allowed outside allowed directory: {self.allowed_dir}", "error")
+            self._append_tool_result(call_id,
+                f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
+            return
 
         # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
         shell_cmd = None
@@ -1209,6 +1562,17 @@ class AgentSession:
         # 3) Permission prompt. Either the user asked for prompts on every call,
         #    or the shell-safety classifier flagged this command as risky (ASK).
         if needs_permission(self.args, shell_cmd, tier):
+            if self.background_mode:
+                # A sub-agent has no human to ask (and forwarding the prompt to
+                # the parent would hang an unattended parent). Refuse instead of
+                # running: background mode never widens what the session may do.
+                self.console.note(
+                    f"Background session: refusing {name} (would need permission).", "warn")
+                self._append_tool_result(call_id,
+                    f"Refused: tool {name} requires user confirmation, which is not "
+                    f"available in this unattended (background) session. Use a "
+                    f"non-interactive alternative.")
+                return
             ok = self._ask_permission(name, params_str, shell_cmd, tier, reason)
             if not ok:
                 self._append_tool_result(call_id,
@@ -1231,7 +1595,7 @@ class AgentSession:
         subagent = self.subagents_registry[name]
         task = tool_params.get("task", "")
         max_steps = tool_params.get("max_steps")
-        self.console.note(f"Delegating to sub-agent '{name}' (task: {_oneline(task, 80)})", "info")
+        self.console.note(f"Delegating to sub-agent '{name}' (task: {oneline(task, 80)})", "info")
         try:
             result = subagent.run(task, parent=self, max_steps=max_steps)
             self.console.note(f"Sub-agent '{name}' finished.", "ok")
@@ -1261,13 +1625,21 @@ class AgentSession:
         # visually separated (the assistant may reply several times in a row
         # in auto-mode, or right after a tool-call summary).
         self.console.divider()
-        self.console.turn("Assistant", text, accent="green")
+        # The context-occupancy bar rides on the header, so "how full is the
+        # window" is visible exactly when the user is reading a reply -- and it
+        # refreshes every turn because it is recomputed from the projection
+        # (which is reset after a compaction, so the bar drops back down there).
+        self.console.turn("Assistant", text, accent="green",
+                          badge=self._context_badge())
 
     def _persist(self):
         save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
         save_summary(self.summary, self.cache_dir, self.unique_id)
-        usage_path = save_usage(self.token_stats, self.cache_dir, self.unique_id)
-        self.console.note(f"Saved usage to: {usage_path}", "info")
+        usage_path = save_usage_segment(self.token_stats, self.cache_dir,
+                                        self.unique_id, self.history_index)
+        total_path = save_total_usage(self.total_usage, self.cache_dir, self.unique_id)
+        self.console.note(
+            f"Saved usage to: {usage_path} (session total: {total_path})", "info")
 
     def shutdown(self):
         """Persist and print a final summary (called on quit / exit)."""
@@ -1275,7 +1647,7 @@ class AgentSession:
         self.console.note(
             f"Saved session to {self.cache_dir}/{self.unique_id}/ "
             f"(history_0..{self.history_index}.json + summary_history.json).", "ok")
-        print_usage_summary(self.token_stats)
+        self.console.usage_summary(self.total_usage)
 
     # -- single LLM turn ---------------------------------------------------
 
@@ -1286,16 +1658,36 @@ class AgentSession:
         # Keep long sessions within the model's context window. Compaction
         # rolls the session over to a fresh history segment (history_index + 1)
         # and returns that bump so the recorder can stay flat across it.
+        segment_before = dict(self.token_stats)
+        projected = self._projected_input_tokens()
         self.messages, did_compact, new_index = maybe_compact(
             self.messages, self.server_url, self.model, self.api_key,
             self.args.llm_timeout, self.token_stats, self.history_index,
-            # getattr keeps argparse-like namespaces without the attribute
-            # (older callers / tests) working, falling back to the default.
-            max_messages=getattr(self.args, "max_messages", DEFAULT_MAX_MESSAGES),
-            plan_hook=self._handle_compaction if self.plan_mode else None, console=self.console
+            token_limit=self.compaction_budget.token_limit,
+            reserved_output_tokens=self.compaction_budget.reserved_output_tokens,
+            current_tokens=projected,
+            plan_hook=self._handle_compaction if self.plan_mode else None,
+            console=self.console,
         )
+        # The compaction call itself was billed to the segment that is being
+        # closed, so fold its delta into the session total here (the rollover
+        # below zeroes the segment counters).
+        self._bill_compaction(segment_before)
+
         if did_compact:
+            # The transcript was replaced, so the last prompt-size report now
+            # describes a conversation that no longer exists. Dropping it makes
+            # the next projection a plain estimate of the (much shorter)
+            # compacted history rather than a stale, over-large number that
+            # would trigger compaction again immediately.
+            self.last_prompt_tokens = 0
+            self.last_prompt_message_count = 0
+            # Close the old segment's usage file before moving on, so its spend
+            # is preserved on disk even though the next segment starts at zero.
+            save_usage_segment(self.token_stats, self.cache_dir, self.unique_id,
+                               self.history_index)
             self.history_index = new_index
+            self.token_stats = empty_usage()
             # Snapshot the compacted messages into the new segment so its turns
             # are preserved, and record the summary as the first turn of it.
             save_history(self.messages, self.cache_dir, self.unique_id, self.history_index)
@@ -1305,20 +1697,24 @@ class AgentSession:
 
         # Show a "… thinking" spinner while the LLM works (in-place, non-scrolling;
         # a no-op on non-TTY / ASCII output). Stopped right after the call returns.
+        # Capture the transcript length *before* the call: this is exactly how
+        # many messages the reported prompt_tokens describe.
+        sent_message_count = len(self.messages)
         self.console.start_thinking()
-        response_text, tool_calls, usage = utils.call_openai_server(
-            self.messages,
-            max_tokens=self.args.max_tokens,
-            temperature=self.args.temperature,
-            model=self.model,
-            server_url=self.server_url,
-            tools=self.llm_tools,
-            api_key=self.api_key,
-            timeout=self.args.llm_timeout,
-        )
+        response_text, tool_calls, usage, reasoning_content = utils.unpack_llm_result(
+            utils.call_openai_server(
+                self.messages,
+                max_tokens=self.args.max_tokens,
+                temperature=self.args.temperature,
+                model=self.model,
+                server_url=self.server_url,
+                tools=self.llm_tools,
+                api_key=self.api_key,
+                timeout=self.args.llm_timeout,
+            ))
         self.console.stop_thinking()
 
-        # A failed LLM call returns (None, None, None): treat it as "nothing
+        # A failed LLM call returns (None, None, None, None): treat it as "nothing
         # happened this step" so the loop degrades gracefully (records a note
         # and re-prompts) instead of crashing.
         if usage is None:
@@ -1327,13 +1723,15 @@ class AgentSession:
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
-                "tool_calls": self.token_stats["tool_calls"],
+                "tool_calls": self.total_usage["tool_calls"],
             }
 
-        accumulate_usage(self.token_stats, usage)
+        self._record_usage(usage)
+        self._note_prompt_size(usage, sent_message_count)
         made_tool_calls = bool(tool_calls)
         if made_tool_calls:
             self.token_stats["tool_calls"] += len(tool_calls)
+            self.total_usage["tool_calls"] += len(tool_calls)
             # The model predicted more tool calls: once the work settles down a
             # completion review is due again (finalized_plan).
             self.finalized_plan = True
@@ -1341,15 +1739,27 @@ class AgentSession:
         if response_text:
             self._print_assistant(response_text)
 
+        # Append the assistant turn exactly as the server returned it. The
+        # thinking-mode ``reasoning_content`` belongs on this message and must
+        # be sent back verbatim on every later request that carries ``tools``:
+        # DeepSeek V3.2+ rejects the follow-up with HTTP 400
+        # ("The `reasoning_content` in the thinking mode must be passed back to
+        # the API") when an earlier assistant turn dropped it. It is stored but
+        # never rendered -- it is the model's private scratchpad, not the reply,
+        # so ``_print_assistant`` is still fed only ``response_text``.
+        # The field is added *only* when the server actually returned it (an
+        # empty string counts: that is what such a model returns when it did no
+        # reasoning), so non-thinking models and older transcripts keep exactly
+        # the message shape they had before.
+        assistant_message = {"role": "assistant", "content": response_text}
         if tool_calls:
-            self.messages.append({
-                "role": "assistant",
-                "content": response_text,
-                "tool_calls": tool_calls,
-            })
+            assistant_message["tool_calls"] = tool_calls
+        if reasoning_content is not None:
+            assistant_message["reasoning_content"] = reasoning_content
+        self.messages.append(assistant_message)
+
+        if tool_calls:
             self._run_tool_calls(tool_calls)
-        else:
-            self.messages.append({"role": "assistant", "content": response_text})
 
         if not response_text and not made_tool_calls:
             self.console.note("Warning: no response was given by the LLM.", "error")
@@ -1357,12 +1767,13 @@ class AgentSession:
         # Mirror the running tool-call total into this call's usage dict so the
         # per-call usage line reports the actual tool-call count (the server
         # does not, so usage.get("tool_calls") would always be 0 otherwise).
-        usage["tool_calls"] = self.token_stats["tool_calls"]
+        usage["tool_calls"] = self.total_usage["tool_calls"]
         # Print the usage line LAST, transiently, so it always sits at the very
         # bottom of the screen. That way the next step can clear it in place
         # (cursor up + wipe + reprint) instead of jumping up past the assistant
         # turn above it -- which is what made the screen keep scrolling.
-        self.console.usage_line(usage, transient=False)
+        self.console.usage_line(usage, transient=False,
+                                llm_calls=self.total_usage["llm_calls"])
 
         # Append this step's turn to the high-level recorder. On compaction the
         # recorder was already seeded for the new segment above, so this becomes
@@ -1385,16 +1796,6 @@ class _Abort(Exception):
 # ---------------------------------------------------------------------------
 # module-level helpers kept for readability / backward compatibility
 # ---------------------------------------------------------------------------
-
-def _oneline(text, limit):
-    one = " ".join(line.strip() for line in str(text).splitlines())
-    one = " ".join(one.split())
-    return one[:limit] + "..." if len(one) > limit else one
-
-
-def print_usage_summary(token_stats):
-    ui.console.usage_summary(token_stats)
-
 
 def main():
     args = parse_args()

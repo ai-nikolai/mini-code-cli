@@ -103,7 +103,7 @@ class SoftwareEngineeringSubAgent(SubAgent):
         "in the project. It can read/write files and run shell commands (tests, "
         "builds, etc.) to verify the work. Hands back a summary of the changes."
     )
-    tools = ["read_file", "write_file", "grep", "glob", "run_shell_command"]
+    tools = ["read_file", "write_file", "edit", "grep", "glob", "run_shell_command"]
     enable_shell = True
     max_steps = 20
 
@@ -147,7 +147,7 @@ class GenericSubAgent(SubAgent):
         "one. It can read/write files and run shell commands, so it suits most "
         "one-off jobs. Hands back a summary of what it did."
     )
-    tools = ["read_file", "write_file", "grep", "glob", "run_shell_command"]
+    tools = ["read_file", "write_file", "edit", "grep", "glob", "run_shell_command"]
     enable_shell = True
     max_steps = 12
 

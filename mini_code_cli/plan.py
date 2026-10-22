@@ -1,21 +1,17 @@
-"""mini_code_cli.plan -- support for ``--plan`` mode.
+"""mini_code_cli.plan -- the tracking files behind ``--plan`` mode.
 
-In plan mode the *loop* keeps two small, human-readable tracking files in the
-session directory (``cache_dir/<unique_id>`` -- i.e. the *cache* dir,
-independent of ``--allowed-dir``):
+In plan mode the *loop* keeps two small, human-readable files in the session
+directory (``cache_dir/<unique_id>``, independent of ``--allowed-dir``):
 
-  * ``CURRENT_GOAL.md``  -- the user's latest instruction / goal.
-  * ``CURRENT_PLAN.md``  -- a running log of the requests made, plus the
-    current, generated step-by-step plan for the active goal and a review of
-    whether it is complete (marked finished once the goal is complete).
+  * ``CURRENT_GOAL.md`` -- the user's latest instruction.
+  * ``CURRENT_PLAN.md`` -- the generated step-by-step plan, plus the last
+    plan-completion review.
 
-:class:`PlanManager` is what the *loop* uses to read/write those files directly
-(plain ``open`` -- not through any agent tool -- so the records land even when
-the allowed dir is elsewhere). The agent itself does not author these files:
-the loop writes the goal after each user request, asks the model (with no
-tools) to author the plan from the whole conversation, saves it, re-sends it
-into the conversation, re-injects both after a history compaction, reviews
-completion once the work looks done, and marks the goal finished on shutdown.
+:class:`PlanManager` is what the loop uses to read/write them directly (plain
+``open``, not through an agent tool, so the records land even when the allowed
+dir is elsewhere). The agent never authors these files: the loop writes the
+goal, asks the model to author the plan, re-injects both after a compaction,
+records the completion review, and marks the goal finished on shutdown.
 """
 
 import os
@@ -24,28 +20,30 @@ from datetime import datetime
 PLAN_FILENAME = "CURRENT_PLAN.md"
 GOAL_FILENAME = "CURRENT_GOAL.md"
 
-# A marker section that holds the latest plan-completion review.
+_PLAN_HEADER = "# Current Plan"
+_GOAL_HEADER = "# Current Goal"
 _SUMMARY_HEADER = "# Plan completion summary"
 
 
+def _stamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 class PlanManager:
-    """Reads/writes ``CURRENT_PLAN.md`` and ``CURRENT_GOAL.md`` for a session.
+    """Reads/writes ``CURRENT_PLAN.md`` and ``CURRENT_GOAL.md`` for one session.
 
     ``session_dir`` is the session's on-disk folder. When ``enabled`` is False
     every method is a no-op, so callers can use the manager unconditionally.
-
-    Best-effort throughout: a tracking hiccup must never break the agent loop.
+    Every write is best-effort: a tracking hiccup must never break the loop.
     """
 
     def __init__(self, session_dir, enabled=True, goal=None):
         self.session_dir = session_dir
         self.enabled = enabled
         self.goal = goal
-        # The last plan the loop generated for the current goal. Kept in memory
-        # so a compaction re-injection (and the plan file) share one source.
+        # Last plan / last review generated for this goal, kept in memory so a
+        # compaction re-injection and the files share one source.
         self.plan = None
-        # The last plan-completion review the loop generated (see
-        # write_plan_summary), so a compaction re-injection can restate it.
         self.review_summary = None
 
     @property
@@ -56,149 +54,97 @@ class PlanManager:
     def goal_path(self):
         return os.path.join(self.session_dir, GOAL_FILENAME)
 
-    def _append(self, text):
-        """Append one dated line to CURRENT_PLAN.md (creating it if needed).
+    # -- writing ------------------------------------------------------------
 
-        Used by ``mark_finished`` (and ``write_plan_summary`` for its header
-        note). Best-effort and never raises: a plan-tracking hiccup must never
-        break the agent loop.
+    def write_goal(self, goal):
+        """Persist the user's latest instruction (overwriting the previous goal)."""
+        if not self.enabled:
+            return
+        self.goal = goal
+        self._write(self.goal_path, f"{_GOAL_HEADER}\n\n{(goal or '').strip()}\n")
+
+    def write_plan(self, plan):
+        """Store the generated step-by-step plan for the current goal."""
+        if not self.enabled:
+            return
+        self.plan = plan or ""
+        body = self.plan.strip()
+        body = f"{body}\n" if body else ""
+        self._write(self.plan_path,
+                    f"{_PLAN_HEADER}\n\n{body}\n_Updated: {_stamp()}_\n")
+
+    def write_plan_summary(self, summary):
+        """Record the plan-completion review under a fixed section header.
+
+        The review replaces any previous one while the plan above it is
+        preserved, so the file always shows the current plan + latest verdict.
         """
         if not self.enabled:
             return
-        try:
-            os.makedirs(self.session_dir, exist_ok=True)
-            if not os.path.exists(self.plan_path):
-                with open(self.plan_path, "w", encoding="utf-8") as f:
-                    f.write("# Current Plan\n\n")
-            with open(self.plan_path, "a", encoding="utf-8") as f:
-                f.write(text + "\n")
-        except OSError:
-            pass
+        summary = summary or ""
+        self.review_summary = summary
+        current = self._read(self.plan_path) or ""
+        head = current.split(_SUMMARY_HEADER, 1)[0]
+        if _PLAN_HEADER not in head:
+            head = f"{_PLAN_HEADER}\n"
+        review = (
+            f"{_SUMMARY_HEADER}\n"
+            f"_Updated: {_stamp()}_\n"
+            f"{summary.strip() or '(no summary generated)'}\n"
+        )
+        self._write(self.plan_path, head.rstrip("\n") + "\n\n" + review)
+
+    def mark_finished(self, goal=None):
+        """Append a timestamped "finished" entry to ``CURRENT_PLAN.md``."""
+        if not self.enabled:
+            return
+        goal = goal or self.goal or (self._read(self.goal_path) or "").strip() or "current goal"
+        head = (self._read(self.plan_path) or f"{_PLAN_HEADER}\n").rstrip("\n")
+        self._write(self.plan_path, f"{head}\n\n- [{_stamp()}] Task finished: {goal}\n")
+
+    # -- reading ------------------------------------------------------------
+
+    def read_goal(self):
+        return self._read(self.goal_path)
+
+    def read_plan(self):
+        """Return the plan text from disk, falling back to the last generated one."""
+        if not self.enabled:
+            return None
+        text = self._read(self.plan_path)
+        return text if text and text.strip() else self.plan
+
+    def read_current_status(self):
+        """Return goal + plan + last review as one flat block (for ``/plan``).
+
+        The tracking files live outside ``--allowed-dir``, so the model has no
+        tool to display them; this gives the interactive ``/plan`` command a
+        single, ready-to-render view. Missing sections fall back to in-memory
+        values or a "(none)" note rather than raising.
+        """
+        if not self.enabled:
+            return None
+        sections = [
+            (_GOAL_HEADER, (self.goal or (self._read(self.goal_path) or "").strip())
+             or "(no goal set)"),
+            (_PLAN_HEADER, (self.plan or (self._read(self.plan_path) or "").strip())
+             or "(no plan generated yet)"),
+            (_SUMMARY_HEADER, (self.review_summary or "").strip()
+             or "(no completion review yet)"),
+        ]
+        return "\n\n".join(f"{header}\n\n{body}" for header, body in sections)
+
+    # -- disk helpers -------------------------------------------------------
 
     def _write(self, path, content):
+        if not self.enabled:
+            return
         try:
             os.makedirs(self.session_dir, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
         except OSError:
             pass
-
-    def write_goal(self, goal):
-        """Persist the user's latest instruction to CURRENT_GOAL.md (overwriting
-        any previous goal) and remember it in ``self.goal`` so
-        :meth:`mark_finished` can name the goal later.
-
-        Best-effort: a tracking hiccup must never break the agent loop.
-        """
-        if not self.enabled:
-            return
-        self.goal = goal
-        self._write(self.goal_path, f"# Current Goal\n\n{(goal or '').strip()}\n")
-
-    def write_plan(self, plan):
-        """Store the generated step-by-step plan for the current goal.
-
-        The loop asks the model (with no tools) to author the plan from the
-        whole conversation, then calls this to keep ``self.plan`` and the
-        ``CURRENT_PLAN.md`` file in sync with it. Best-effort and never raises.
-        """
-        if not self.enabled:
-            return
-        plan = plan or ""
-        self.plan = plan
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            os.makedirs(self.session_dir, exist_ok=True)
-            with open(self.plan_path, "w", encoding="utf-8") as f:
-                f.write("# Current Plan\n\n")
-                if plan.strip():
-                    f.write(plan.strip() + "\n")
-                f.write(f"\n_Updated: {stamp}_\n")
-        except OSError:
-            pass
-
-    def write_plan_summary(self, summary):
-        """Record a plan-completion review into CURRENT_PLAN.md and memory.
-
-        After the model reviews the plan (marks tasks done / outstanding and
-        emits one summary line, e.g. "ALL TASKS DONE. Go back to user." or
-        "TASKS still in progress." + which ones remain), the loop calls this to
-        keep ``self.review_summary`` and the ``CURRENT_PLAN.md`` file in sync.
-
-        The summary is written under a fixed "# Plan completion summary"
-        section, overwriting any previous review so the file always reflects the
-        latest conclusion. Best-effort and never raises.
-        """
-        if not self.enabled:
-            return
-        summary = summary or ""
-        self.review_summary = summary
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        body = summary.strip() or "(no summary generated)"
-        try:
-            os.makedirs(self.session_dir, exist_ok=True)
-            # Read whatever is currently in the file so we can preserve the plan
-            # above it and only swap the review section in place.
-            try:
-                with open(self.plan_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            except OSError:
-                content = ""
-            head = content.split(_SUMMARY_HEADER, 1)[0] if _SUMMARY_HEADER in content else content
-            # Make sure the plan body exists above the summary section.
-            if "# Current Plan" not in head:
-                head = "# Current Plan\n\n"
-            review = (
-                "\n" + _SUMMARY_HEADER + "\n"
-                f"_Updated: {stamp}_"
-                f"\n{body}\n"
-            )
-            with open(self.plan_path, "w", encoding="utf-8") as f:
-                f.write(head.rstrip("\n") + "\n" + review)
-        except OSError:
-            pass
-
-    def read_plan(self):
-        """Return the current plan text from disk (or ``self.plan`` if absent)."""
-        if not self.enabled:
-            return None
-        text = self._read(self.plan_path)
-        return text if text is not None and text.strip() else self.plan
-
-    def read_goal(self):
-        return self._read(self.goal_path)
-
-    def read_current_status(self):
-        """Return the goal, current plan and last review as one flat text block.
-
-        The plan-mode tracking files live outside ``--allowed-dir``, so the model
-        has no tool to display them; this gives the interactive ``/plan`` command
-        a single, ready-to-render view (see Console.status_box). It concatenates
-        the goal, the current plan and the last completion-review summary under
-        fixed headers. Missing sections fall back to in-memory values or a
-        "(none)" note rather than raising -- a tracking hiccup must never break
-        the loop.
-        """
-        if not self.enabled:
-            return None
-        goal = self.goal or (self._read(self.goal_path) or "").strip()
-        plan = self.plan or (self._read(self.plan_path) or "").strip()
-        review = self.review_summary or ""
-
-        sections = [
-            ("# Current Goal", goal or "(no goal set)"),
-            ("# Current Plan", plan or "(no plan generated yet)"),
-            ("# Plan completion summary",
-             review if review.strip() else "(no completion review yet)"),
-        ]
-
-        parts = []
-        for header, body in sections:
-            parts.append(header)
-            parts.append("")
-            parts.append(body)
-            parts.append("")
-        return "\n".join(parts).rstrip("\n")
 
     def _read(self, path):
         if not self.enabled:
@@ -208,11 +154,3 @@ class PlanManager:
                 return f.read()
         except OSError:
             return None
-
-    def mark_finished(self, goal=None):
-        """Append a timestamped "finished" entry to CURRENT_PLAN.md."""
-        if not self.enabled:
-            return
-        goal = goal or self.goal or self._read(self.goal_path) or "current goal"
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._append(f"- [{stamp}] Task finished: {goal}")
