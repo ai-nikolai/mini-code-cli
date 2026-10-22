@@ -1,0 +1,108 @@
+name: Release
+
+# Cut a release by tagging a commit on `main` and pushing the tag:
+#   git tag -a v0.1.1.0 -m "release 0.1.1.0" && git push origin v0.1.1.0
+# See README_DEV.md for the full release process.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub release and upload the build artifacts
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags, needed for the ancestry check below
+
+      - name: Verify the tag points at a commit on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main. Release from main only."
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} -> ${GITHUB_SHA} is on main."
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build twine
+
+      - name: Verify the tag matches the package version
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pathlib, re, sys
+
+          pyproject = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject, re.MULTILINE)
+          if not match:
+              sys.exit("::error::could not find a static [project] version in pyproject.toml")
+          version = match.group(1)
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          tag_version = tag[1:] if tag.startswith("v") else tag
+
+          if tag_version != version:
+              sys.exit(
+                  f"::error::tag {tag} does not match pyproject version {version}. "
+                  f"Bump `version` in pyproject.toml (and re-tag) so the tag never lies about what was built."
+              )
+          print(f"Tag {tag} matches pyproject version {version}.")
+          PY
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check the distributions are PyPI/twine ready
+        run: python -m twine check dist/*
+
+      - name: Upload the build as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Create (or update) the GitHub release with the build attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists -- re-uploading the artifacts."
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "mini-code-cli ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Summarise the release
+        run: |
+          {
+            echo "### Released \`${GITHUB_REF_NAME}\`"
+            echo
+            echo "| artifact | size |"
+            echo "| --- | --- |"
+            for f in dist/*; do
+              echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
