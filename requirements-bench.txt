@@ -1,0 +1,36 @@
+# Optional dependencies for the benchmark harness (benchmarks/).
+#
+# Deliberately NOT part of the mini-code-cli install: the CLI must stay a small,
+# dependency-free package, and nobody running `mini-code` should have to download
+# a benchmark harness. Install with:
+#
+#     python -m pip install -r requirements-bench.txt
+#
+# Python 3.12+ is needed by terminal-bench itself (0.2.x); SWE-bench and the
+# agents' CLIs work on 3.10+.
+
+# --- benchmark harnesses -----------------------------------------------------
+# Harbor: the official harness for Terminal-Bench 2.x (2.0 / 2.1), wrapped by
+# benchmarks/suites/terminal_bench.py with options.harness="harbor" (the default).
+harbor>=0.24
+# Terminal-Bench 1.x ("terminal-bench-core" datasets), wrapped with
+# options.harness="tb". Optional: only needed for the older task sets.
+terminal-bench>=0.2.18
+# SWE-bench 5.0.2: `python -m swebench.harness.run_evaluation`, wrapped by
+# benchmarks/suites/swebench.py. Pulls `datasets` and the Docker SDK.
+swebench>=5.0.2
+
+# --- containers --------------------------------------------------------------
+docker>=7.0
+
+# --- local model serving (H200) ----------------------------------------------
+# vLLM serves the OpenAI-compatible endpoint; LiteLLM provides the
+# Anthropic-compatible /v1/messages that Claude Code requires.
+vllm>=0.6
+litellm>=1.50
+
+# --- agent CLIs are installed outside pip ------------------------------------
+#   claude code : npm install -g @anthropic-ai/claude-code
+#   pi          : curl -fsSL https://pi.dev/install.sh | sh
+#                 (or npm install -g --ignore-scripts @earendil-works/pi-coding-agent)
+# mini-code is this repository:        pip install -e .

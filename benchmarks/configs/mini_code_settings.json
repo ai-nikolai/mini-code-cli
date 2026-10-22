@@ -1,0 +1,59 @@
+{
+  "_comment": [
+    "The mini-code experiment matrix: one suite, one model, every setting.",
+    "This is the config to extend as mini-code grows features -- add a preset in",
+    "benchmarks/agents/mini_code.py, add its name here, and the report gains a row.",
+    "",
+    "limit is 1 so the file is a smoke test by default; drop it (or pass --limit)",
+    "for a real measurement.",
+    "Terminal-Bench 2.x runs through harbor; set options.harness to \"tb\" to use the 1.x 'terminal-bench-core' datasets instead."
+  ],
+  "output_dir": "benchmarks/runs",
+  "concurrency": 1,
+  "timeouts": {
+    "instance_seconds": 5400,
+    "agent_seconds": 3600,
+    "test_seconds": 1800
+  },
+  "docker": {
+    "cpus": 4,
+    "memory": "16g",
+    "pids_limit": 2048,
+    "network": "bridge"
+  },
+  "suites": [
+    {
+      "name": "terminal-bench",
+      "dataset": "terminal-bench",
+      "version": "2.1",
+      "limit": 1,
+      "options": {
+        "harness": "harbor",
+        "n_concurrent": 2
+      }
+    }
+  ],
+  "models": [
+    {
+      "name": "h200-ornith",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "openai"
+    }
+  ],
+  "agents": [
+    {
+      "name": "mini-code",
+      "settings": [
+        "default",
+        "auto-shell",
+        "plan",
+        "subagents",
+        "skills",
+        "long-context",
+        "short-tool-timeout",
+        "all"
+      ]
+    }
+  ]
+}

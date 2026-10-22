@@ -27,7 +27,7 @@ import tabnanny
 import tempfile
 
 #: Directories linted when no target is given (relative to the repo root).
-DEFAULT_TARGETS = ("mini_code_cli", "tests", "scripts")
+DEFAULT_TARGETS = ("mini_code_cli", "benchmarks", "tests", "scripts")
 
 #: Directories never worth walking into.
 SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
