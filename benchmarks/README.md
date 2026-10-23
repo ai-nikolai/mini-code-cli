@@ -260,22 +260,44 @@ and `--csv` write the same table for a README, a script or a spreadsheet.
 
 ## 8. Results on the H200 used to validate this
 
-Fixed model `ornith-ai/Ornith-1.5-35B-A3B` (vLLM on port 30000), `--limit 3`,
-`runtime: auto`. The host has **no Docker** (Apptainer 1.5.0 only), so this is the
-Docker-free path from §10 in action.
+Fixed model `ornith-ai/Ornith-1.5-35B-A3B` (vLLM on `:30000`), `--limit 3`,
+`runtime: auto`. The host has **no Docker** — Apptainer 1.5.0 only — so this is the
+Docker-free path from §10 producing the numbers:
 
-| suite | agent | what happened |
-| --- | --- | --- |
-| terminal-bench | mini-code | ran end to end: derived SIF → harbor `--env singularity` → agent inside the container → verifier → `n=1, resolved=0, errors=0` on the first task (the 35B model did not solve `adaptive-rejection-sampler`; that is a score, not a failure) |
-| terminal-bench | claude-code | installs and runs inside the container; needs the model id *without* harbor's `anthropic/` prefix — serving the alias (`--served-model-name` both ids) fixes the 404 |
-| terminal-bench | pi | see the 3-agent table below |
-| swebench | all | not run on this host: `swebench.harness.run_evaluation` drives the Docker SDK, and the Apptainer backend is not implemented yet (§10). Instance images *are* pullable (`apptainer pull docker://swebench/sweb.eval.x86_64.<id>` verified) |
+```bash
+python -m benchmarks run -c benchmarks/configs/ornith_30b.json \
+    --suite terminal-bench --limit 3 --run-id tb-app-3 \
+    --csv benchmarks/results/tb-app-3.csv
+python -m benchmarks analyze benchmarks/results/tb-app-3.csv
+```
 
-Before the Apptainer path existed, the same command produced
-`n=3, errors=3` for every Terminal-Bench agent (harbor's backend died installing
-`/usr/bin/python3`) and `n=0, cmd fail=1` for SWE-bench. Those numbers are the
-reason the preparation step in §10 exists — a cell with `n = 0` is a broken run,
-never a zero score.
+| suite | agent | setting | n | resolved | errors | note |
+| --- | --- | --- | --- | --- | --- | --- |
+| terminal-bench | mini-code | default | 3 | 0 | 0 | three tasks completed; none solved |
+| terminal-bench | claude-code | bypass-permissions | 3 | 0 | 1 | installs and runs in the container; one task hit `AgentAuthenticationError` against the local endpoint |
+| terminal-bench | pi | default | 3 | 0 | 0 | three tasks completed; none solved |
+| **ALL** | | | **9** | **0** | **1** | |
+
+Three tasks each (`adaptive-rejection-sampler`, `bn-fit-modify`,
+`break-filter-js-from-html`), 9 agent runs, every container built and torn down by
+harbor through Apptainer. That 0/9 is a *score*, not a failure: the tasks are
+hours-long for a human and the model is a 35B MoE. Before this path existed the
+same command reported `n = 3, errors = 3` per agent (harbor died installing
+`/usr/bin/python3`) — a broken run, which the report would have shown as a zero.
+
+What this run exercised: config expansion, the SIF preparation step (3 derived
+images, cached afterwards), harbor's singularity backend, agent installation
+inside the task image, verifier execution, per-task logs, outcome collection
+(including harbor's `reward_stats`, deduplicated across retries), `summary.{json,md}`,
+the CSV export and the analyser.
+
+**SWE-bench is still Docker-only.** `swebench.harness.run_evaluation` drives the
+Docker SDK; the instance images *are* pullable (`apptainer pull
+docker://swebench/sweb.eval.x86_64.<instance_id>` — the `__` in an instance id
+becomes `_1776_` in the tag, and verified `astropy__astropy-7606` pulls), and
+grading (`grading.get_eval_report`) is backend-agnostic, so an Apptainer backend
+is a contained piece of work — but until it exists `validate` reports the problem
+rather than scoring zero.
 
 ## 9. Safety and habits
 
