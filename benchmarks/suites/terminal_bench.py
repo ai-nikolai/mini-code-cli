@@ -456,7 +456,8 @@ class TerminalBenchSuite(Suite):
                                      else TrialOutcome.UNRESOLVED),
                             detail=f"{metric}={value}",
                             extra={"eval": eval_name, metric: value}))
-            for exception_type, task_names in (entry.get("exception_stats") or {}).items():
+            for exception_type, task_names in \
+                    (entry.get("exception_stats") or {}).items():
                 for task_name in task_names or []:
                     outcomes.append(TrialOutcome(
                         suite=self.name, instance_id=str(task_name),
@@ -471,7 +472,7 @@ class TerminalBenchSuite(Suite):
                 suite=self.name, instance_id="<unknown>",
                 outcome=TrialOutcome.ERROR,
                 detail=f"{stats['n_errored_trials']} trial(s) errored"))
-        return outcomes
+        return _dedupe(outcomes)
 
     def _collect_tb(self, path):
         with open(path, encoding="utf-8") as handle:
@@ -555,6 +556,24 @@ def _newest(pattern):
 
     candidates = [(os.path.getmtime(p), p) for p in glob.glob(pattern)]
     return max(candidates)[1] if candidates else None
+
+
+def _dedupe(outcomes):
+    """One outcome per task: harbor retries report the same task several times.
+
+    The *best* attempt wins (resolved > unresolved > error), because a task that
+    succeeded on a retry was solved; an un-deduplicated count would silently
+    inflate ``n`` and turn a solved task into a half-error.
+    """
+    rank = {TrialOutcome.RESOLVED: 3, TrialOutcome.UNRESOLVED: 2,
+            TrialOutcome.ERROR: 0, TrialOutcome.TIMEOUT: 1}
+    best = {}
+    for outcome in outcomes:
+        current = best.get(outcome.instance_id)
+        if current is None or rank.get(outcome.outcome, 0) > rank.get(
+                current.outcome, 0):
+            best[outcome.instance_id] = outcome
+    return [best[key] for key in sorted(best)]
 
 
 def _exception_detail(entry):
