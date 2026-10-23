@@ -273,17 +273,22 @@ python -m benchmarks analyze benchmarks/results/tb-app-3.csv
 
 | suite | agent | setting | n | resolved | errors | note |
 | --- | --- | --- | --- | --- | --- | --- |
-| terminal-bench | mini-code | default | 3 | 0 | 0 | three tasks completed; none solved |
-| terminal-bench | claude-code | bypass-permissions | 3 | 0 | 1 | installs and runs in the container; one task hit `AgentAuthenticationError` against the local endpoint |
-| terminal-bench | pi | default | 3 | 0 | 0 | three tasks completed; none solved |
-| **ALL** | | | **9** | **0** | **1** | |
+| terminal-bench | mini-code | default | 3 | 0 | 1 | `python3 -m mini_code_cli` is not in the image: 2 tasks died with `NonZeroAgentExitCodeError` (`No module named mini_code_cli`), 1 with `AgentAuthenticationError` |
+| terminal-bench | claude-code | bypass-permissions | 3 | 0 | 1 | installs and runs in the container; one task hit `AgentAuthenticationError` against the local endpoint (fixed later, see above) |
+| terminal-bench | pi | default | 3 | 0 | 1 | same failure class as mini-code: the CLI is not in the image |
+| **ALL** | | | **9** | **0** | **3** | |
 
 Three tasks each (`adaptive-rejection-sampler`, `bn-fit-modify`,
 `break-filter-js-from-html`), 9 agent runs, every container built and torn down by
-harbor through Apptainer. That 0/9 is a *score*, not a failure: the tasks are
-hours-long for a human and the model is a 35B MoE. Before this path existed the
-same command reported `n = 3, errors = 3` per agent (harbor died installing
-`/usr/bin/python3`) — a broken run, which the report would have shown as a zero.
+harbor through Apptainer. **Re-read of the same artifacts:** two of those rows are
+not scores at all — `mini-code` and `pi` were never *in* the images, so their runs
+died with `No module named mini_code_cli` / a missing `pi` binary, and the earlier
+"three tasks completed" note here was wrong. Only the claude-code row was a real
+attempt. The lesson is the one this section keeps repeating: an exception is not a
+zero, and the per-trial `exception.txt` — not the summary count — is what says so.
+For a TB task image the fix is to install the agent's code into the image (the
+Dockerfile path in §8 can bake it in); harbor's TB path has no bind mount for host
+code, unlike the SWE-bench suite's `/opt/agent` mount.
 
 What this run exercised: config expansion, the SIF preparation step (3 derived
 images, cached afterwards), harbor's singularity backend, agent installation
@@ -410,11 +415,12 @@ first run ≈ 5–10 min per task image (pull + `apt-get` + `pip install` in
 
 Verified on an H200 with Apptainer 1.5.0, no Docker, no root:
 
-| Check | Result |
-| --- | --- |
-| `harbor run -p <staged task> -a oracle --env singularity` | **reward 1.0**, `1 passed` |
-| `-a claude-code` in the same container | installs and runs; needs the model id without harbor's `anthropic/` prefix |
-| `apptainer pull docker://swebench/sweb.eval.x86_64.<id>` | works — SWE-bench instance images are public OCI |
+| Check | Result | Cost, measured |
+| --- | --- | --- |
+| `harbor run -p <Dockerfile-only task> -a oracle --env singularity` | **reward 1.0**, 9/9 verifier tests | 74 s end to end, 257 MB `.sif` |
+| `-a claude-code` in a pulled task image | installs, authenticates, streams turns | Node tarball ~50 MB, CLI ~15 s |
+| `apptainer pull docker://swebench/sweb.eval.x86_64.<id>` | works — the images are public OCI | **1.09 GB, ~20 s** from a warm cache |
+| repeated task image | reused from `BENCH_SIF_CACHE` | 0.1 s (hash of the *definition*) |
 
 Requirements and limits of this path:
 
@@ -423,6 +429,22 @@ Requirements and limits of this path:
   `/etc/subuid` ranges this account does not have.
 * budgets: `cpus`/`memory`/`pids_limit` are advisory under Apptainer (printed as
   notes by `plan`), and containers share the host network namespace.
+* the writable layer is **64 MiB**, and it is thrown away when `apptainer exec`
+  exits. Two consequences worth knowing before debugging an agent: `apt-get install`
+  of anything with a `dpkg` postinst fails with `Invalid cross-device link` (dpkg
+  renames a directory that lives in the read-only lower layer), and an agent's edits
+  do not survive into the next command unless they land on a bind mount. That is why
+  Node is installed from the static tarball, agent tools live in a bind-mounted
+  `/opt/agent`, and SWE-bench copies `/testbed` out to the host (§8).
+* **a pulled image that ships no `/usr/bin/python3` pays for one at start-up.**
+  harbor's in-container server needs an interpreter, so its bootstrap runs
+  `apt-get install -y python3` — inside the 64 MiB overlay, under fakeroot, which
+  took over ten minutes on `alexgshaw/gpt2-codegolf:20251031` and blew the 600 s
+  environment-start budget with `EnvironmentStartTimeoutError` on the first attempt
+  (a later attempt, with the apt lists warm, got through). Images that already
+  carry python3 (`bn-fit-modify`, `cancel-async-tasks`) start in seconds. Bake the
+  interpreter in at build time -- the Dockerfile path in §8 does exactly that --
+  rather than raising the timeout.
 * SWE-bench grading under Apptainer is §11, not this section: `tb_apptainer.py`
   derives images for Terminal-Bench only.
 
