@@ -258,32 +258,24 @@ and `--csv` write the same table for a README, a script or a spreadsheet.
 
 ---
 
-## 8. Results on the H200 used to validate this (2026-10-22)
+## 8. Results on the H200 used to validate this
 
-Fixed model `ornith-ai/Ornith-1.5-35B-A3B` (vLLM, port 30000), three agents, `--limit 3`,
-`runtime: auto`:
+Fixed model `ornith-ai/Ornith-1.5-35B-A3B` (vLLM on port 30000), `--limit 3`,
+`runtime: auto`. The host has **no Docker** (Apptainer 1.5.0 only), so this is the
+Docker-free path from §10 in action.
 
-| suite | agent | n | errors | cmd fail | why |
-| --- | --- | --- | --- | --- | --- |
-| terminal-bench | mini-code / claude-code / pi | 3 each | 3 each | 0 | harbor's `--env singularity` converted the task images to `.sif`, then failed: `[server] /usr/bin/python3 not found, installing... FATAL: cannot install /usr/bin/python3` |
-| swebench | mini-code / claude-code / pi | 0 | 0 | 1 each | no instance list (`datasets` not installed) and no Docker SDK for the grader |
+| suite | agent | what happened |
+| --- | --- | --- |
+| terminal-bench | mini-code | ran end to end: derived SIF → harbor `--env singularity` → agent inside the container → verifier → `n=1, resolved=0, errors=0` on the first task (the 35B model did not solve `adaptive-rejection-sampler`; that is a score, not a failure) |
+| terminal-bench | claude-code | installs and runs inside the container; needs the model id *without* harbor's `anthropic/` prefix — serving the alias (`--served-model-name` both ids) fixes the 404 |
+| terminal-bench | pi | see the 3-agent table below |
+| swebench | all | not run on this host: `swebench.harness.run_evaluation` drives the Docker SDK, and the Apptainer backend is not implemented yet (§10). Instance images *are* pullable (`apptainer pull docker://swebench/sweb.eval.x86_64.<id>` verified) |
 
-Both suites need Docker, which this host does not have (`docker: MISSING`, `apptainer:
-/usr/bin/apptainer`, no rootless socket, no podman) — that is what `validate` reports, and the
-CSV records it as `errors`/`cmd fail` instead of inventing a score. The remainder of the pipeline
-is exercised end to end: config expansion, `plan`, harbor job creation, image conversion,
-per-task logs, outcome collection, `summary.{json,md}`, the CSV export and the analyser.
-
-To get real numbers, rerun the same command on a Docker host (or point `runtime` at Apptainer for
-the suites whose tasks ship plain images):
-
-```bash
-python -m benchmarks run -c benchmarks/configs/ornith_30b.json \
-    --run-id ornith-30b-docker --limit 3 --csv benchmarks/results/ornith-30b.csv
-python -m benchmarks analyze benchmarks/results/ornith-30b.csv
-```
-
----
+Before the Apptainer path existed, the same command produced
+`n=3, errors=3` for every Terminal-Bench agent (harbor's backend died installing
+`/usr/bin/python3`) and `n=0, cmd fail=1` for SWE-bench. Those numbers are the
+reason the preparation step in §10 exists — a cell with `n = 0` is a broken run,
+never a zero score.
 
 ## 9. Safety and habits
 
@@ -295,3 +287,69 @@ python -m benchmarks analyze benchmarks/results/ornith-30b.csv
   environment variable *names* and replaces values; only `api_key_env` names ever enter a config.
 * **Start small.** `--limit 1` on `terminal-bench` is the cheapest end-to-end check; harbor is
   young and moves fast, so re-read `harbor run --help` when a flag stops being accepted.
+
+---
+
+## 10. Apptainer without Docker (Docker-free path)
+
+On a cluster with no Docker daemon, Terminal-Bench 2.x can still be run — not by
+reimplementing it, but by preparing the task images so harbor's existing Apptainer
+backend (`--env singularity`) can use them. Three things were missing, and all
+three are handled by `benchmarks/suites/tb_apptainer.py`:
+
+1. **The task images have no `/usr/bin/python3`.** harbor's backend runs a small
+   FastAPI server inside the container; on a bare image it fails with
+   `FATAL: cannot install /usr/bin/python3`. Each task image is therefore
+   converted **once** into a derived `.sif` that already contains `python3`,
+   `python3-venv`, `tmux`, `asciinema`, `git`, `curl` and — because the SIF is
+   read-only and harbor's `--writable-tmpfs` layer does not survive its agent
+   setup step — a ready `/opt/harbor-server` venv with `uvicorn`/`fastapi`.
+2. **`task.toml` must name an image.** The staged copy of each task points
+   `docker_image` at its derived `.sif`, so nothing is pulled or converted at run
+   time.
+3. **harbor's default mount policy kills DNS.** Its default is
+   `singularity_no_mount=home,tmp,bind-paths`, and `bind-paths` also suppresses the
+   `/etc/resolv.conf` bind — the container then cannot resolve anything, which
+   surfaces far away as `apt`/`curl`/verifier failures (`Could not resolve host:
+   astral.sh`). The suite passes `singularity_no_mount=home,tmp` instead.
+
+```bash
+# 1. derive one .sif per task and stage a local dataset (downloads the task files
+#    with `harbor download <dataset> --export` on first use; cached under
+#    benchmarks/.cache/ which is git-ignored)
+export BENCH_SIF_CACHE=/scratch/$USER/sif        # GBs: never point this at /tmp
+export APPTAINER_CACHEDIR=/scratch/$USER/apptainer TMPDIR=/scratch/$USER/tmp
+python -m benchmarks prepare -c benchmarks/configs/ornith_30b.json \
+    --suite terminal-bench --limit 3
+
+# 2. run it: harbor is invoked with -p <staged dataset> --env singularity
+python -m benchmarks run -c benchmarks/configs/ornith_30b.json \
+    --suite terminal-bench --limit 3 --run-id tb-apptainer \
+    --csv benchmarks/results/tb-apptainer.csv
+```
+
+`plan` prints both commands even before the images exist, so the cost is visible:
+first run ≈ 5–10 min per task image (pull + `apt-get` + `pip install` in
+`apptainer build --fakeroot`), later runs are cached and cost seconds.
+
+Verified on an H200 with Apptainer 1.5.0, no Docker, no root:
+
+| Check | Result |
+| --- | --- |
+| `harbor run -p <staged task> -a oracle --env singularity` | **reward 1.0**, `1 passed` |
+| `-a claude-code` in the same container | installs and runs; needs the model id without harbor's `anthropic/` prefix |
+| `apptainer pull docker://swebench/sweb.eval.x86_64.<id>` | works — SWE-bench instance images are public OCI |
+
+Requirements and limits of this path:
+
+* `apptainer build --fakeroot` must be permitted on the machine (it is here:
+  `unshare -Ur` works). Rootless podman is *not* an alternative — it needs
+  `/etc/subuid` ranges this account does not have.
+* budgets: `cpus`/`memory`/`pids_limit` are advisory under Apptainer (printed as
+  notes by `plan`), and containers share the host network namespace.
+* **SWE-bench grading still needs Docker**: `swebench.harness.run_evaluation`
+  drives the Docker SDK. The instance *images* are pullable, so an Apptainer
+  backend (exec + the unchanged `grading.get_eval_report`) is the missing piece;
+  until it lands, `validate` reports it instead of scoring zero.
+
+---

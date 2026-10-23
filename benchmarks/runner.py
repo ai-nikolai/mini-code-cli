@@ -85,7 +85,11 @@ class Runner:
         or the caller passed ``--allow-host``. A benchmark agent granted shell
         access must not run in a directory someone cares about.
         """
-        if self.allow_host or inside_container():
+        # Apptainer containers are containers: the agents run inside a task image
+        # just as they do under Docker, so the guard is satisfied by the runtime
+        # being apptainer even though there is no daemon to ask.
+        if self.allow_host or inside_container() \
+                or self.config.resolved_runtime() == "apptainer":
             return
         raise RuntimeError(
             f"refusing to launch agent {adapter.label!r} outside a container: "
@@ -118,7 +122,8 @@ class Runner:
             for note in suite.notes(trial.model) + adapter.notes(trial.model):
                 self.say(f"   note: {note}")
             try:
-                commands = suite.commands(trial, os.getcwd(), trial_dir, adapter)
+                commands = self._with_config_env(
+                    suite.commands(trial, os.getcwd(), trial_dir, adapter))
             except Exception as e:  # noqa: BLE001 - a plan must never crash
                 self.say(f"   ! cannot expand yet: {e}")
                 for line in suite.describe(trial, adapter, trial_dir):
@@ -199,7 +204,8 @@ class Runner:
             self.container_guard(adapter)
 
         try:
-            commands = suite.commands(trial, os.getcwd(), trial_dir, adapter)
+            commands = self._with_config_env(
+                suite.commands(trial, os.getcwd(), trial_dir, adapter))
         except Exception as e:  # noqa: BLE001 - one broken suite must not hide the rest
             # A trial that cannot even expand (missing instance list, no runtime,
             # unresolvable agent) is a *result*: it is recorded as a failed command
@@ -264,6 +270,22 @@ class Runner:
             with open(done_marker, "w", encoding="utf-8") as handle:
                 handle.write(_now() + "\n")
         return outcomes, failures
+
+    def _with_config_env(self, commands):
+        """Merge the config's ``env`` block into every command's environment.
+
+        The block is how a run points all agents at one endpoint
+        (``ANTHROPIC_BASE_URL`` and friends) without repeating it per agent; a
+        command's own value wins, because the adapter knows its agent's needs
+        better than the config does.
+        """
+        if not self.config.env:
+            return commands
+        for command in commands:
+            merged = dict(self.config.env)
+            merged.update(command.env or {})
+            command.env = merged
+        return commands
 
     # -- manifest --------------------------------------------------------
 
