@@ -332,6 +332,17 @@ harness failure and was not:
   symlinks do not survive between `apptainer exec` calls, so the agent command puts
   `/opt/agent/bin` on `PATH` itself.
 
+**A `.sif` cannot be written in place, so the checkout has to be copied out.** The
+first SWE-bench smoke reported `n = 0` for every agent, and the reason was not the
+agents: `--writable-tmpfs` is discarded when `apptainer exec` exits, so the agent's
+edits were gone before the patch was captured (mini-code edited files, the patch was
+0 bytes, the harness had nothing to grade). `apptainer overlay create` is the
+textbook answer and needs privileges this host does not grant (`mkfs.ext3: Operation
+not supported`), so the suite copies `/testbed` to the host once per instance and
+bind-mounts it back for both the agent and the capture. With that, the same run
+reports `n = 1`, `errors = 0`, and the evaluation actually executes the tests (53 s)
+instead of returning an empty verdict.
+
 Claude Code against vLLM needs no proxy: vLLM 0.30 answers `POST /v1/messages`
 (Anthropic Messages API) directly, so `ANTHROPIC_BASE_URL=http://127.0.0.1:30000`
 and any `ANTHROPIC_API_KEY` are enough — Apptainer shares the host network namespace,
