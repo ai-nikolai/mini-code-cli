@@ -1,0 +1,312 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mini-code benchmarks <benchmarks@localhost>
+Date: Fri, 23 Oct 2026 18:10:00 +0100
+Subject: [PATCH] singularity: translate a Dockerfile into a definition file
+
+`apptainer build out.sif <dir>` treats a directory as a root filesystem, so
+pointing it at a task's environment/ produced a 40 kB image containing the
+Dockerfile and reported success. The container then had no bash and no WORKDIR,
+and harbour failed at "failed to set working directory: chdir /app".
+
+- dockerfile.py translates the subset of Dockerfile the task set uses (single
+  FROM, RUN, WORKDIR, ENV, COPY/ADD) into a definition file, and refuses what it
+  cannot express faithfully (multi-stage, COPY --from, ARG without a default)
+  rather than dropping it
+- WORKDIR becomes mkdir -p in %post (apptainer refuses to start in a missing
+  directory) and ENV is exported before the RUNs, since %post does not see
+  %environment
+- the generated .def lives in the task directory only for the duration of the
+  build
+
+Tests cover the translation and the unfaithful cases (13 in this file's suite).
+---
+ .../environments/singularity/dockerfile.py    | 144 ++++++++++++++++++
+ .../environments/singularity/singularity.py   |  17 ++-
+ .../test_singularity_apptainer.py             |   7 +-
+ .../test_singularity_dockerfile.py            |  57 +++++++
+ 4 files changed, 222 insertions(+), 3 deletions(-)
+ create mode 100644 src/harbor/environments/singularity/dockerfile.py
+ create mode 100644 tests/unit/environments/test_singularity_dockerfile.py
+
+diff --git a/src/harbor/environments/singularity/dockerfile.py b/src/harbor/environments/singularity/dockerfile.py
+new file mode 100644
+index 00000000..8bb647d4
+--- /dev/null
++++ b/src/harbor/environments/singularity/dockerfile.py
+@@ -0,0 +1,144 @@
++"""Translate a task's Dockerfile into an Apptainer definition file.
++
++Apptainer 1.5 has no Dockerfile build: pointing `apptainer build` at a directory
++that holds a Dockerfile copies the *directory* into a 40 kB image and reports
++success, which is how a container ends up with no `bash` and no `/app`. The two
++supported routes are a prebuilt image or a definition file, so a task that only
++ships a Dockerfile needs one translated.
++
++Only what the task set actually uses is translated (single-stage `FROM`, `RUN`,
++`WORKDIR`, `ENV`, `COPY`/`ADD`, `CMD`). Anything else raises instead of being
++dropped: a silently ignored `ARG` or a skipped multi-stage build would produce a
++plausible image that fails inside the verifier, hours later.
++"""
++
++from __future__ import annotations
++
++import re
++import shlex
++from pathlib import Path
++
++#: Instructions that carry no meaning for a benchmark container.
++_IGNORED = {"CMD", "ENTRYPOINT", "EXPOSE", "LABEL", "HEALTHCHECK", "STOPSIGNAL",
++            "SHELL", "ONBUILD", "VOLUME", "MAINTAINER"}
++
++
++class UnsupportedDockerfile(ValueError):
++    """The Dockerfile uses something this translation cannot express safely."""
++
++
++def _logical_lines(text: str):
++    """Join continuations, drop comments and blank lines, keep order."""
++    buffer = ""
++    for raw in text.splitlines():
++        line = raw.strip()
++        if not buffer and (not line or line.startswith("#")):
++            continue
++        if line.endswith("\\"):
++            buffer += line[:-1].rstrip() + " "
++            continue
++        buffer += line
++        if buffer.strip():
++            yield buffer.strip()
++        buffer = ""
++    if buffer.strip():
++        yield buffer.strip()
++
++
++def to_definition(dockerfile: Path) -> str:
++    """Return an Apptainer definition equivalent to ``dockerfile``."""
++    instructions = list(_logical_lines(Path(dockerfile).read_text()))
++
++    base = None
++    post: list[str] = []
++    env: list[str] = []
++    files: list[str] = []
++    warnings: list[str] = []
++
++    for instruction in instructions:
++        keyword, _, rest = instruction.partition(" ")
++        keyword = keyword.upper()
++        rest = rest.strip()
++
++        if keyword == "FROM":
++            if base is not None:
++                raise UnsupportedDockerfile(
++                    "multi-stage builds are not supported; a single FROM is "
++                    "required (merge the stages, or supply a prebuilt image)")
++            if re.search(r"\bAS\b", rest, re.IGNORECASE):
++                raise UnsupportedDockerfile(
++                    f"FROM ... AS ({rest!r}) is a multi-stage build, which cannot "
++                    f"be translated; supply a prebuilt .sif or a .def")
++            if rest.startswith("--platform"):
++                raise UnsupportedDockerfile(
++                    "--platform in FROM is not supported by apptainer build")
++            base = rest
++        elif keyword in ("RUN", "WORKDIR", "COPY", "ADD", "ENV", "ARG", "USER"):
++            if base is None:
++                raise UnsupportedDockerfile(f"{keyword} before FROM")
++            if keyword == "RUN":
++                post.append(_strip_mounts(rest))
++            elif keyword == "WORKDIR":
++                # /app may not exist in the base image, and apptainer will refuse
++                # to start a container whose working directory is missing.
++                post.append(f"mkdir -p {shlex.quote(rest)}")
++            elif keyword == "ENV":
++                env.append(_env_line(rest))
++            elif keyword in ("COPY", "ADD"):
++                if "--from" in rest:
++                    raise UnsupportedDockerfile(
++                        f"{keyword} --from=... copies from another build stage")
++                if rest.startswith("--"):
++                    raise UnsupportedDockerfile(f"{keyword} flags ({rest!r})")
++                src, _, dst = rest.rpartition(" ")
++                files.append(f"{src.strip('[]\"')} {dst}")
++            elif keyword == "ARG":
++                # An ARG with a default is inlined by the caller; without one the
++                # image would differ from the Dockerfile's intent.
++                if "=" not in rest:
++                    raise UnsupportedDockerfile(
++                        f"ARG {rest!r} has no default; a Docker build would take it "
++                        f"from --build-arg, so the image cannot be reproduced")
++                env.append(_env_line(rest))
++            elif keyword == "USER":
++                warnings.append(f"USER {rest} ignored: the container runs as the "
++                                f"invoking user under --fakeroot")
++        elif keyword in _IGNORED:
++            continue
++        else:
++            raise UnsupportedDockerfile(f"unsupported instruction {keyword!r}")
++
++    if base is None:
++        raise UnsupportedDockerfile("no FROM line")
++
++    sections = [f"Bootstrap: docker\nFrom: {base}\n"]
++    if files:
++        sections.append("%files\n" + "\n".join(f"    {line}" for line in files))
++    if env:
++        sections.append("%environment\n" + "\n".join(f"    {line}" for line in env))
++    if post:
++        # The exports are repeated here because %post does not necessarily see
++        # %environment, and a RUN that references an ENV would otherwise expand
++        # to nothing (a silent, wrong image).
++        body = [*env, *post]
++        sections.append("%post\n" + "\n".join(f"    {line}" for line in body))
++    if warnings:
++        # Kept in the file so `apptainer build` echoes why the image differs.
++        sections.append("%help\n" + "\n".join(f"    # {line}" for line in warnings))
++    return "\n".join(sections) + "\n"
++
++
++def _strip_mounts(command: str) -> str:
++    """``RUN --mount=... cmd`` -> ``cmd`` (the mount is a cache, not content)."""
++    while command.startswith("--"):
++        _, _, command = command.partition(" ")
++        command = command.strip()
++    return command
++
++
++def _env_line(rest: str) -> str:
++    """``ENV A=1 B="x y"`` -> ``export A=1 B="x y"``; ``ENV A 1`` -> ``export A=1``."""
++    if "=" not in rest:
++        key, _, value = rest.partition(" ")
++        return f"export {key}={value.strip()}"
++    return f"export {rest}"
+diff --git a/src/harbor/environments/singularity/singularity.py b/src/harbor/environments/singularity/singularity.py
+index 73af5e09..2afea6b0 100644
+--- a/src/harbor/environments/singularity/singularity.py
++++ b/src/harbor/environments/singularity/singularity.py
+@@ -44,6 +44,10 @@ from harbor.environments.capabilities import (
+     EnvironmentCapabilities,
+     EnvironmentResourceCapabilities,
+ )
++from harbor.environments.singularity.dockerfile import (
++    UnsupportedDockerfile,
++    to_definition,
++)
+ from harbor.models.environment_type import EnvironmentType
+ from harbor.models.task.config import EnvironmentConfig
+ from harbor.models.trial.paths import TrialPaths
+@@ -352,13 +356,19 @@ class SingularityEnvironment(BaseEnvironment):
+             tmp_sif_path = (
+                 self._image_cache_dir / f"{safe_name}.sif.tmp.{self.session_id}"
+             )
++            # `apptainer build out.sif <dir>` treats the directory as a root
++            # filesystem and happily writes a 40 kB image containing the
++            # Dockerfile -- no bash, no WORKDIR. The Dockerfile has to become a
++            # definition file first.
++            definition = dockerfile.parent / f".harbor-{self.session_id}.def"
++            definition.write_text(to_definition(dockerfile))
+             cmd = [
+                 self._binary,
+                 "build",
+                 "--force",
+                 "--fakeroot",
+                 str(tmp_sif_path),
+-                str(dockerfile.parent),
++                str(definition),
+             ]
+             self.logger.debug(
+                 f"Building .sif from {dockerfile}: {' '.join(cmd)} "
+@@ -370,7 +380,10 @@ class SingularityEnvironment(BaseEnvironment):
+                 stdout=asyncio.subprocess.PIPE,
+                 stderr=asyncio.subprocess.STDOUT,
+             )
+-            stdout, _ = await process.communicate()
++            try:
++                stdout, _ = await process.communicate()
++            finally:
++                definition.unlink(missing_ok=True)
+             output = stdout.decode(errors="replace")
+ 
+             if process.returncode != 0:
+diff --git a/tests/unit/environments/test_singularity_apptainer.py b/tests/unit/environments/test_singularity_apptainer.py
+index 7a563e06..6cc3274a 100644
+--- a/tests/unit/environments/test_singularity_apptainer.py
++++ b/tests/unit/environments/test_singularity_apptainer.py
+@@ -169,7 +169,12 @@ async def test_build_from_dockerfile_uses_fakeroot_and_cache_dirs(tmp_path, monk
+     argv = commands[0]
+     assert argv[1:3] == ["build", "--force"]
+     assert "--fakeroot" in argv
+-    assert argv[-1] == str(env._dockerfile_path.parent)
++    # `apptainer build out.sif <dir>` writes a 40 kB image of the directory, so
++    # the Dockerfile has to be translated into a definition file first -- and
++    # that temporary file must not be left behind in the task.
++    definition = Path(argv[-1])
++    assert definition.suffix == ".def"
++    assert not definition.exists(), "the generated definition is temporary"
+ 
+ 
+ @pytest.mark.asyncio
+diff --git a/tests/unit/environments/test_singularity_dockerfile.py b/tests/unit/environments/test_singularity_dockerfile.py
+new file mode 100644
+index 00000000..62066278
+--- /dev/null
++++ b/tests/unit/environments/test_singularity_dockerfile.py
+@@ -0,0 +1,57 @@
++"""Translation of a task Dockerfile into an Apptainer definition file."""
++
++import pytest
++
++from harbor.environments.singularity.dockerfile import (
++    UnsupportedDockerfile,
++    to_definition,
++)
++
++
++def _definition(tmp_path, text):
++    path = tmp_path / "Dockerfile"
++    path.write_text(text)
++    return to_definition(path)
++
++
++def test_translation_keeps_the_base_image_and_commands(tmp_path):
++    definition = _definition(tmp_path, """# canary
++FROM ubuntu:24.04
++ENV BN_URL=https://example/x.csv
++WORKDIR /app
++RUN apt-get update && apt-get install -y r-base \\
++    && rm -rf /var/lib/apt/lists/*
++COPY data.csv /app/data.csv
++CMD ["bash"]
++""")
++    assert "Bootstrap: docker" in definition
++    assert "From: ubuntu:24.04" in definition
++    assert "export BN_URL=https://example/x.csv" in definition
++    # apptainer refuses to start with a missing working directory
++    assert "mkdir -p /app" in definition
++    # continuations are joined, comments dropped
++    assert "apt-get install -y r-base" in definition
++    assert "canary" not in definition
++    assert "data.csv /app/data.csv" in definition
++    # CMD is the harness's business, not the image's
++    assert "CMD" not in definition
++
++
++def test_translation_exports_env_inside_post(tmp_path):
++    definition = _definition(
++        tmp_path, "FROM alpine\nENV A=1\nRUN curl ${A} -o /x\n")
++    post = definition.split("%post", 1)[1]
++    assert "export A=1" in post, "a RUN must see the ENV it references"
++
++
++def test_translation_refuses_what_it_cannot_express(tmp_path):
++    cases = [
++        ("FROM a\nFROM b\n", "multi-stage"),
++        ("FROM a AS build\n", "multi-stage"),
++        ("FROM a\nARG UNPINNED\n", "no default"),
++        ("FROM a\nCOPY --from=build /x /y\n", "another build stage"),
++        ("FROM a\nFROBNICATE x\n", "unsupported instruction"),
++    ]
++    for text, expected in cases:
++        with pytest.raises(UnsupportedDockerfile, match=expected):
++            _definition(tmp_path, text)
+-- 
+2.47.1
+
