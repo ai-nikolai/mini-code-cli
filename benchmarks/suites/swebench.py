@@ -27,8 +27,14 @@ dataset commit, and the resolved revision is recorded in the run manifest.
 import json
 import os
 
+from .. import forks as forks_module
 from .. import runtime as runtime_module
 from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
+
+#: The repository root, so the shared `.sif` cache can live under `benchmarks/runs`
+#: (ignored by git) no matter which directory a run was started from.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
 
 
 class SweBenchSuite(Suite):
@@ -50,22 +56,25 @@ class SweBenchSuite(Suite):
         if not _module_available("swebench"):
             problems.append(f"suite 'swebench': the swebench package is not "
                             f"importable ({self.install_hint})")
+        problems += forks_module.preflight_problems()
         chosen = runtime_module.resolve(self._runtime_hint())
         if chosen is None or not runtime_module.available(chosen):
             problems.append(
                 "suite 'swebench': no container runtime is usable "
                 f"({' or '.join(runtime_module.RUNTIMES)} not on PATH); the agent "
                 "runs inside the instance image")
-        elif chosen == "apptainer":
-            problems.append(
-                "suite 'swebench': the official grader "
-                "(swebench.harness.run_evaluation) drives the Docker SDK, which "
-                "is not available here; with apptainer only the agent/patch side "
-                "can run (set options.skip_evaluation to make that explicit)")
         return problems
 
     def _runtime_hint(self):
-        return getattr(self, "runtime", None)
+        """The configured runtime (``auto``/``docker``/``apptainer``).
+
+        The suite used to read ``self.runtime``, which never exists -- runtime is
+        a run-level setting -- so every lookup silently fell through to ``auto``
+        and picked apptainer on a machine without a Docker daemon even when the
+        config pinned docker.
+        """
+        return (getattr(self, "runtime", None)
+                or getattr(self.spec, "runtime", None))
 
     def notes(self, model):
         chosen = runtime_module.resolve(self._runtime_hint())
@@ -73,9 +82,23 @@ class SweBenchSuite(Suite):
             "the agent runs inside the instance image, so the endpoint must be "
             "reachable from a container and the agent CLI must be installed there "
             "(options.install_script, or a prebuilt image)",
-            "grading is the upstream harness's: patches are applied and the "
-            "instance tests run in the official container",
         ]
+        if chosen == "apptainer":
+            if forks_module.swebench_fork_active():
+                notes.append(
+                    "grading runs through our SWE-bench checkout "
+                    "(mini-code/apptainer): "
+                    "`python -m swebench.harness.run_evaluation --backend "
+                    "apptainer`, i.e. the upstream harness with a container "
+                    "backend that needs no Docker daemon")
+            else:
+                notes.append(
+                    "grading is swebench's own `grading.get_eval_report`, driven by "
+                    "benchmarks.suites.swebench_apptainer: the instance image runs "
+                    "under `apptainer exec`, so no Docker daemon is involved")
+        else:
+            notes.append("grading is the upstream harness's: patches are applied "
+                         "and the instance tests run in the official container")
         if chosen:
             notes.append(f"container runtime: {chosen} "
                          f"({runtime_module.image_ref(chosen, 'swebench/...')})")
@@ -134,8 +157,37 @@ class SweBenchSuite(Suite):
                                            timeouts)
         commands.append(self.predictions_command(trial, run_dir))
         if not (trial.suite.options or {}).get("skip_evaluation"):
+            if self.apptainer_backend(trial):
+                commands.append(self.images_command(trial, run_dir))
             commands.append(self.evaluate_command(trial, run_dir))
         return commands
+
+    def apptainer_backend(self, trial):
+        """True when this trial's grading has to avoid the Docker daemon."""
+        return (trial.container_runtime or "docker") == "apptainer"
+
+    def sif_cache(self):
+        """Where instance images are cached as `.sif` (shared across runs)."""
+        configured = (getattr(self.spec, "options", None) or {}) \
+            .get("sif_cache")
+        if configured:
+            return str(configured)
+        return os.path.join(_REPO_ROOT, "benchmarks", "runs", "_cache", "swe-sif")
+
+    def images_command(self, trial, run_dir):
+        """Prefetch the instance images as `.sif` (Apptainer has no daemon)."""
+        argv = [
+            _python(), "-m", "benchmarks.suites.swebench_apptainer", "pull",
+            "--instances", self.instances_path(run_dir),
+            "--sif-cache", self.sif_cache(),
+            "--log-dir", self.ensure_dir(os.path.join(run_dir, "pulls")),
+        ]
+        if trial.limit:
+            argv += ["--limit", str(trial.limit)]
+        return PlannedCommand(label="swebench: cache instance images as .sif",
+                              argv=argv,
+                              timeout=(getattr(self.spec, "options", None)
+                                       or {}).get("pull_timeout_sec"))
 
     def _instance_commands(self, trial, instances, run_dir, adapter, timeouts=None):
         """The per-instance commands: install (optional), agent, capture patch."""
@@ -151,7 +203,7 @@ class SweBenchSuite(Suite):
 
         for instance in instances:
             instance_id = instance["instance_id"]
-            image = str(image_template).format(instance_id=instance_id)
+            image = self._image(instance, container, image_template)
             workdir = self.ensure_dir(os.path.join(runs_dir, instance_id))
             patch_path = os.path.join(workdir, "model.patch")
             log_path = os.path.join(workdir, "agent.log")
@@ -200,6 +252,21 @@ class SweBenchSuite(Suite):
                 notes=["runs git inside the container; no user input is involved"]))
         return commands
 
+    @staticmethod
+    def _image(instance, container, image_template):
+        """The instance's image name.
+
+        The dataset ships an authoritative ``image`` (its tags escape ``__`` to
+        ``_1776_``, which the ``image_template`` cannot reproduce), so it wins
+        whenever it is present -- and for Apptainer it is also what gets pulled
+        into the ``.sif`` cache, so both sides must agree on one name.
+        """
+        image = str(instance.get("image") or "").strip()
+        if image and (container == "apptainer" or "{instance_id}" not in
+                      str(image_template)):
+            return image
+        return str(image_template).format(instance_id=instance["instance_id"])
+
     def predictions_command(self, trial, run_dir):
         """Turn the per-instance patches into the harness's ``predictions.jsonl``."""
         argv = [
@@ -218,6 +285,8 @@ class SweBenchSuite(Suite):
         """The official evaluation harness, on the predictions written above."""
         spec = trial.suite
         options = spec.options or {}
+        if self.apptainer_backend(trial):
+            return self.apptainer_evaluate_command(trial, run_dir)
         argv = [
             _python(), "-m", "swebench.harness.run_evaluation",
             "-d", spec.dataset or "SWE-bench/SWE-bench_Verified",
@@ -242,6 +311,61 @@ class SweBenchSuite(Suite):
             timeout=options.get("evaluate_timeout_sec"),
             artifacts=(os.path.join(run_dir, f"{trial.run_id}.json"),))
 
+    def apptainer_evaluate_command(self, trial, run_dir):
+        """Grade without a Docker daemon.
+
+        Two ways to do that, and the patched upstream harness wins when it is
+        installed: it is the real ``run_evaluation`` (so a bug there is *our* bug
+        to fix, not a difference we paper over) plus a container backend. The
+        in-repo ``swebench_apptainer`` is the fallback for an unpatched install.
+        """
+        if forks_module.swebench_fork_active():
+            return self.fork_evaluate_command(trial, run_dir)
+        options = trial.suite.options or {}
+        report = os.path.join(run_dir, f"{trial.run_id}.json")
+        argv = [
+            _python(), "-m", "benchmarks.suites.swebench_apptainer", "evaluate",
+            "--instances", self.instances_path(run_dir),
+            "--patches-dir", os.path.join(run_dir, "instances"),
+            "--report", report,
+            "--work-dir", self.ensure_dir(os.path.join(run_dir, "eval")),
+            "--sif-cache", self.sif_cache(),
+            "--timeout", str(int(options.get("test_timeout_sec", 1_800))),
+        ]
+        if trial.limit:
+            argv += ["--limit", str(trial.limit)]
+        return PlannedCommand(
+            label=f"swebench: evaluate {trial.run_id} (apptainer)", argv=argv,
+            cwd=run_dir, timeout=options.get("evaluate_timeout_sec"),
+            artifacts=(report,))
+
+    def fork_evaluate_command(self, trial, run_dir):
+        """``python -m swebench.harness.run_evaluation --backend apptainer``."""
+        spec = trial.suite
+        options = spec.options or {}
+        argv = [
+            _python(), "-m", "swebench.harness.run_evaluation",
+            "-d", spec.dataset or "SWE-bench/SWE-bench_Verified",
+            "-s", spec.split or "test",
+            "-p", os.path.join(run_dir, self.results_filename),
+            "-id", trial.run_id,
+            "--backend", "apptainer",
+            "--sif-cache", self.sif_cache(),
+            "-t", str(int(options.get("test_timeout_sec", 1_800))),
+            "--max_workers", str(int(options.get("max_workers", 1))),
+        ]
+        if trial.limit:
+            try:
+                argv += ["-i", *[i["instance_id"]
+                                  for i in self.load_instances(run_dir)]]
+            except SuiteError:
+                pass
+        return PlannedCommand(
+            label=f"swebench: evaluate {trial.run_id} (fork, apptainer)",
+            argv=argv, cwd=run_dir,
+            timeout=options.get("evaluate_timeout_sec"),
+            artifacts=(os.path.join(run_dir, f"{trial.run_id}.json"),))
+
     def describe(self, trial, adapter, run_dir):
         """Show the shape of a SWE-bench trial before its dataset is downloaded.
 
@@ -251,12 +375,14 @@ class SweBenchSuite(Suite):
         """
         stub = [{"instance_id": "<instance_id>",
                  "problem_statement": "<problem statement from the dataset>"}]
-        lines = ["1. " + self.prepare_command(trial, run_dir).rendered()]
-        for number, command in enumerate(
-                self._instance_commands(trial, stub, run_dir, adapter), 2):
-            lines.append(f"{number}. {command.rendered()}")
-        lines.append(f"{len(lines) + 1}. " +
-                     self.evaluate_command(trial, run_dir).rendered())
+        shape = [self.prepare_command(trial, run_dir)]
+        shape += self._instance_commands(trial, stub, run_dir, adapter)
+        shape.append(self.predictions_command(trial, run_dir))
+        if self.apptainer_backend(trial):
+            shape.append(self.images_command(trial, run_dir))
+        shape.append(self.evaluate_command(trial, run_dir))
+        lines = [f"{number}. {command.rendered()}"
+                 for number, command in enumerate(shape, 1)]
         return lines
 
     # -- results ---------------------------------------------------------

@@ -19,7 +19,10 @@ Two consequences worth knowing before reading any result:
   upstream harness uses, which keeps the comparison fair and the blast radius
   inside the container.
 """
+import json
 import os
+import urllib.error
+import urllib.request
 
 from .base import AgentAdapter, which
 
@@ -60,15 +63,39 @@ class ClaudeCodeAgent(AgentAdapter):
         return argv
 
     def env(self, model):
-        """``ANTHROPIC_*`` only -- the key is referenced, never inlined."""
+        """``ANTHROPIC_*`` only -- the key is referenced, never inlined.
+
+        Four variables matter when the endpoint is not Anthropic's:
+
+        ``ANTHROPIC_BASE_URL``
+            where to send ``/v1/messages``.
+        ``ANTHROPIC_AUTH_TOKEN`` *and* ``ANTHROPIC_API_KEY``
+            the CLI treats a key-less client as unauthenticated and fails with
+            ``AgentAuthenticationError`` before it ever reaches a local server; a
+            local server ignores the value, but the variable has to exist. Both
+            spellings are set because different CLI versions read one or the other.
+        ``ANTHROPIC_SMALL_FAST_MODEL``
+            the CLI also calls a "small/fast" model (summaries, titles). Left
+            unset it would ask the local server for a Claude model it does not
+            serve, and the failure surfaces as an authentication error.
+        """
         env = {}
         if model.api_key_env:
             env[model.api_key_env] = "{env:%s}" % model.api_key_env
         env["ANTHROPIC_MODEL"] = _anthropic_model_id(model.model)
-        # A non-Anthropic base URL means a proxy; pass it through so the CLI
-        # actually talks to it instead of api.anthropic.com.
+        env["ANTHROPIC_SMALL_FAST_MODEL"] = _anthropic_model_id(model.model)
         if model.base_url and "api.anthropic.com" not in model.base_url:
             env["ANTHROPIC_BASE_URL"] = model.base_url
+            # A local endpoint has no key to check, but the CLI requires one to
+            # exist. This is a placeholder, not a secret.
+            env.setdefault("ANTHROPIC_AUTH_TOKEN",
+                           "{env:%s}" % (model.api_key_env or "ANTHROPIC_API_KEY"))
+            # Never phone home from a compute node: those calls fail (no egress)
+            # and are reported as authentication errors, which sends you looking
+            # in the wrong place.
+            env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+            env["DISABLE_TELEMETRY"] = "1"
+            env["DISABLE_ERROR_REPORTING"] = "1"
         return env
 
     def preflight(self, model, require_binary=True):
@@ -77,7 +104,23 @@ class ClaudeCodeAgent(AgentAdapter):
             problems.append(
                 f"agent {self.label!r}: the 'claude' CLI is not on PATH "
                 f"({self.install_hint})")
+        if require_binary:
+            problems += self.endpoint_problems(model)
         return problems
+
+    def endpoint_problems(self, model):
+        """Probe ``/v1/messages`` and translate a failure into an instruction.
+
+        ``AgentAuthenticationError`` from the CLI is the same opaque message
+        whether the endpoint is unreachable, is not Anthropic-shaped, or genuinely
+        rejects the key -- so the check is done here, where the reason is known.
+        """
+        if "api.anthropic.com" in (model.base_url or ""):
+            return []
+        problem = probe_messages_endpoint(model.base_url)
+        if problem is None:
+            return []
+        return [f"agent {self.label!r}: {problem}"]
 
     def notes(self, model):
         """Non-blocking remarks surfaced by ``plan``.
@@ -116,6 +159,47 @@ class ClaudeCodeAgent(AgentAdapter):
         payload = super().metadata()
         payload["api"] = "anthropic"
         return payload
+
+
+def probe_messages_endpoint(base_url, timeout=5.0):
+    """Return ``None`` when ``base_url`` serves ``/v1/messages``, else a message.
+
+    A minimal, non-streaming request: enough to see whether the route exists and
+    whether the body shape is accepted, without spending a model call on a real
+    completion (the server rejects it on ``max_tokens``/``messages`` validation
+    before generating anything when we send an empty message list).
+    """
+    if not base_url:
+        return None
+    url = str(base_url).rstrip("/") + "/v1/messages"
+    body = json.dumps({"model": "probe", "max_tokens": 1, "messages": []}).encode()
+    request = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"content-type": "application/json",
+                 "anthropic-version": "2023-06-01",
+                 "x-api-key": "probe"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):
+            return None
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 422):
+            # The route exists and parsed our body; it only disliked the empty
+            # message list. That is a working Anthropic endpoint.
+            return None
+        if e.code in (401, 403):
+            return (f"{url} rejects the credentials (HTTP {e.code}); the CLI will "
+                    f"report this as AgentAuthenticationError. Set "
+                    f"ANTHROPIC_API_KEY to any non-empty value -- a local server "
+                    f"does not check it, but the CLI refuses to start without it")
+        if e.code == 404:
+            return (f"{url} does not exist (HTTP 404): {base_url} is not an "
+                    f"Anthropic-compatible endpoint. Put a LiteLLM proxy in front "
+                    f"of vLLM (benchmarks/models.py knows how) or upgrade to a "
+                    f"vLLM that serves /v1/messages")
+        return f"{url} answered HTTP {e.code}; Claude Code needs /v1/messages"
+    except (urllib.error.URLError, OSError) as e:
+        return (f"cannot reach {url} ({e}); start the endpoint before the run, and "
+                f"remember the container must be able to route to it")
 
 
 def _anthropic_model_id(model_id):

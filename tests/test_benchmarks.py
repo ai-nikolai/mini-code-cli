@@ -13,8 +13,10 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 from benchmarks import config as config_module
+from benchmarks import forks as forks_module
 from benchmarks.agents import get_adapter
 from benchmarks.agents.base import AgentError
 from benchmarks.config import AgentSpec, ConfigError, ModelSpec, SuiteSpec
@@ -201,6 +203,68 @@ class OtherAdapterTests(unittest.TestCase):
         env = adapter.env(model)
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://proxy:4000")
         self.assertTrue(adapter.notes(model))     # the proxy caveat is surfaced
+
+    def test_claude_code_sets_everything_a_local_endpoint_needs(self):
+        """A key-less or small-model-less client fails as "authentication"."""
+        adapter = get_adapter(AgentSpec(name="claude-code"))
+        model = ModelSpec(name="local", model="ornith-1.5-35b",
+                          base_url="http://127.0.0.1:30000", api="anthropic",
+                          api_key_env="ANTHROPIC_API_KEY")
+        env = adapter.env(model)
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:30000")
+        # the CLI needs *a* key present even when the server ignores its value
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "{env:ANTHROPIC_API_KEY}")
+        # and it calls a second, smaller model; without this it asks for a Claude
+        self.assertEqual(env["ANTHROPIC_SMALL_FAST_MODEL"], "ornith-1.5-35b")
+        # no egress from a compute node: those failures look like auth errors
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
+        self.assertEqual(env["DISABLE_TELEMETRY"], "1")
+
+    def test_claude_code_leaves_the_public_api_alone(self):
+        adapter = get_adapter(AgentSpec(name="claude-code"))
+        model = ModelSpec(name="c", model="anthropic/claude-sonnet-4-5",
+                          base_url="https://api.anthropic.com", api="anthropic")
+        env = adapter.env(model)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+        self.assertNotIn("DISABLE_TELEMETRY", env)
+
+    def test_endpoint_probe_turns_http_codes_into_instructions(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        from benchmarks.agents.claude_code import probe_messages_endpoint
+
+        replies = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                code = replies["code"]
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            replies["code"] = 400
+            self.assertIsNone(probe_messages_endpoint(base, timeout=2.0),
+                              "a 400 means the route parsed our body: it exists")
+            replies["code"] = 404
+            self.assertIn("not an Anthropic-compatible endpoint",
+                          probe_messages_endpoint(base, timeout=2.0))
+            replies["code"] = 401
+            self.assertIn("rejects the credentials",
+                          probe_messages_endpoint(base, timeout=2.0))
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertIn("cannot reach", probe_messages_endpoint(
+            "http://127.0.0.1:1", timeout=1.0))
 
     def test_claude_code_refuses_an_openai_only_endpoint(self):
         adapter = get_adapter(AgentSpec(name="claude-code"))
@@ -420,20 +484,52 @@ class SweBenchSuiteTests(unittest.TestCase):
         self.assertIn("prepare", str(caught.exception))
 
     def test_expansion_produces_agent_capture_predictions_evaluate(self):
-        with tempfile.TemporaryDirectory() as run_dir:
-            write_instances([{"instance_id": "django__django-1",
-                              "problem_statement": "fix it"}],
-                            self.suite.instances_path(run_dir))
-            commands = self.suite.commands(self.trial, "/tmp", run_dir,
-                                           get_adapter(self.trial.agent))
+        # The evaluation command depends on which harness is installed; pin the
+        # fallback so this test says the same thing on every machine.
+        with unittest.mock.patch.object(forks_module, "swebench_fork_active",
+                                        return_value=False):
+            with tempfile.TemporaryDirectory() as run_dir:
+                write_instances([{"instance_id": "django__django-1",
+                                  "problem_statement": "fix it"}],
+                                self.suite.instances_path(run_dir))
+                commands = self.suite.commands(self.trial, "/tmp", run_dir,
+                                               get_adapter(self.trial.agent))
         labels = [c.label for c in commands]
         self.assertTrue(any("agent django__django-1" in label for label in labels))
         self.assertTrue(any("capture patch" in label for label in labels))
         self.assertTrue(any("write predictions" in label for label in labels))
         evaluate = commands[-1].argv
-        self.assertEqual(evaluate[:3], [evaluate[0], "-m",
-                                        "swebench.harness.run_evaluation"])
-        self.assertIn("-id", evaluate)
+        if self.trial.container_runtime == "apptainer":
+            self.assertEqual(evaluate[:3], [evaluate[0], "-m",
+                                            "benchmarks.suites.swebench_apptainer"])
+            self.assertIn("--report", evaluate)
+        else:
+            self.assertEqual(evaluate[:3], [evaluate[0], "-m",
+                                            "swebench.harness.run_evaluation"])
+            self.assertIn("-id", evaluate)
+
+    def test_fork_harness_is_used_when_it_is_installed(self):
+        """With the patched checkout imported, grading goes through upstream."""
+        with unittest.mock.patch.object(forks_module, "swebench_fork_active",
+                                        return_value=True), \
+             unittest.mock.patch.object(type(self.trial), "container_runtime",
+                                        new_callable=unittest.mock.PropertyMock,
+                                        return_value="apptainer"):
+            with tempfile.TemporaryDirectory() as run_dir:
+                write_instances([{"instance_id": "i-1",
+                                  "problem_statement": "p"}],
+                                self.suite.instances_path(run_dir))
+                command = self.suite.evaluate_command(self.trial, run_dir)
+        self.assertIn("swebench.harness.run_evaluation", command.argv)
+        self.assertEqual(command.argv[command.argv.index("--backend") + 1],
+                         "apptainer")
+        self.assertIn("--sif-cache", command.argv)
+
+    def test_apptainer_decision_follows_the_trial_runtime(self):
+        """Regression: `self.runtime` does not exist, so this always said apptainer."""
+        self.assertEqual(
+            self.suite.apptainer_backend(self.trial),
+            (self.trial.container_runtime or "docker") == "apptainer")
 
     def test_agent_command_mounts_nothing_from_the_host(self):
         with tempfile.TemporaryDirectory() as run_dir:

@@ -20,6 +20,20 @@ CURRENT_PLAN.md
 vllm.log
 .mini_tests/
 
+# --- upstream checkouts (our forks) -------------------------------------------
+# The three repositories we patch (harbor, SWE-bench, the Terminal-Bench 2 task
+# set) are cloned, never vendored into this history: their branches are the source
+# of truth and `scripts/export_bench_patches.sh` exports the diffs into
+# benchmarks/patches/ so the changes stay reviewable here.
+harbor/
+SWE-bench/
+terminal-bench-2-1/
+vendor/
+# A nested checkout has its own history; keep its packed objects out regardless.
+harbor/.git/
+SWE-bench/.git/
+terminal-bench-2-1/.git/
+
 # --- benchmarks ---------------------------------------------------------------
 # Run artifacts, cached datasets, container build contexts and generated
 # predictions are large or machine-specific; nothing here belongs in the repo.

@@ -291,13 +291,11 @@ inside the task image, verifier execution, per-task logs, outcome collection
 (including harbor's `reward_stats`, deduplicated across retries), `summary.{json,md}`,
 the CSV export and the analyser.
 
-**SWE-bench is still Docker-only.** `swebench.harness.run_evaluation` drives the
-Docker SDK; the instance images *are* pullable (`apptainer pull
-docker://swebench/sweb.eval.x86_64.<instance_id>` — the `__` in an instance id
-becomes `_1776_` in the tag, and verified `astropy__astropy-7606` pulls), and
-grading (`grading.get_eval_report`) is backend-agnostic, so an Apptainer backend
-is a contained piece of work — but until it exists `validate` reports the problem
-rather than scoring zero.
+**SWE-bench now grades without Docker too** (see §11). The instance images are public
+OCI (`swebench/sweb.eval.x86_64.<instance_id>`, `__` -> `_1776_` in the tag), and
+grading is backend-agnostic, so the harness only needed its transport replaced. The
+acceptance test: the *gold* patch for `astropy__astropy-12907` scores
+`resolved: true` through `--backend apptainer` with no Docker daemon on the machine.
 
 ## 9. Safety and habits
 
@@ -369,9 +367,112 @@ Requirements and limits of this path:
   `/etc/subuid` ranges this account does not have.
 * budgets: `cpus`/`memory`/`pids_limit` are advisory under Apptainer (printed as
   notes by `plan`), and containers share the host network namespace.
-* **SWE-bench grading still needs Docker**: `swebench.harness.run_evaluation`
-  drives the Docker SDK. The instance *images* are pullable, so an Apptainer
-  backend (exec + the unchanged `grading.get_eval_report`) is the missing piece;
-  until it lands, `validate` reports it instead of scoring zero.
+* SWE-bench grading under Apptainer is §11, not this section: `tb_apptainer.py`
+  derives images for Terminal-Bench only.
+
+---
+
+## 11. Our forks, and when they are used
+
+Two behaviours cannot be expressed from outside the tools, so we carry branches of
+them. They are cloned **next to** this repository and git-ignored; the diffs are
+exported into `benchmarks/patches/` so the changes are reviewable here.
+
+| checkout | fork | branch | base |
+| --- | --- | --- | --- |
+| `harbor/` | `ai-nikolai/harbor` | `mini-code/apptainer` | tag `v0.24.0` (`bf8996ef6d97`) |
+| `SWE-bench/` | `ai-nikolai/SWE-bench` | `mini-code/apptainer` | `02e7a74ffd0b` (`swebench.__version__ == "5.0.2"`; upstream has no `v5.0.2` tag) |
+| `terminal-bench-2-1/` | `ai-nikolai/terminal-bench-2-1` | `mini-code/bench` | `69671fbaac6d` (the commit harbor's `registry.json` pins for `terminal-bench@2.0`) |
+
+What each patch changes:
+
+* **harbor** — the singularity environment builds a task's `.sif` from
+  `environment/Dockerfile` when `task.toml` names no image (content-addressed
+  name, `apptainer build --fakeroot`, cached), reports a fakeroot refusal as such,
+  uses `apptainer` when installed (`HARBOR_CONTAINER_BIN` overrides), defaults
+  `--no-mount` to `home,tmp` (keeping `/etc/resolv.conf`, so DNS works), and its
+  `bootstrap.sh` prefers a pre-baked `/opt/harbor-server` venv and stops apt's
+  sandbox from rejecting the fakeroot user.
+* **SWE-bench** — `swebench/harness/container_backends/`: a backend interface
+  (`create`/`copy`/`exec-with-timeout`/`cleanup`), the Docker backend as a pure
+  adapter over the existing helpers, and an Apptainer one, plus
+  `--backend docker|apptainer`, `--sif-cache`, `--apptainer-bin`. Apptainer has no
+  long-lived container, so the backend replays state-changing commands in their
+  working directory before each exec, under `--fakeroot --writable-tmpfs`.
+* **terminal-bench-2** — no changes yet; it is pinned so a run cannot silently pick
+  up a different task set.
+
+Install them into the environments that run them (editable, `--no-deps` so the
+already-installed dependencies are not churned):
+
+```bash
+~/miniconda3/envs/hb/bin/python -m pip install -e ./harbor --no-deps
+python -m pip install -e ./SWE-bench --no-deps           # the env that runs benchmarks
+python -c "import harbor, swebench; print(harbor.__file__, swebench.__file__)"
+```
+
+The suites decide by **what is imported**, not by what exists on disk
+(`benchmarks/forks.py`), because a stale site-packages copy and a fresh checkout
+look identical otherwise:
+
+| detected | Terminal-Bench | SWE-bench |
+| --- | --- | --- |
+| patched harbor imported | `harbor run -d terminal-bench@2.0 --env singularity` builds each `.sif` on demand; no staging (`tb_apptainer.py` is skipped) | — |
+| unpatched harbor | `tb_apptainer.py` stages a SIF-pointing dataset (§10) | — |
+| patched swebench imported | — | `python -m swebench.harness.run_evaluation --backend apptainer` |
+| unpatched swebench | — | `benchmarks/suites/swebench_apptainer.py` (same report shape) |
+
+`plan` prints which one will run, and `manifest.json` records every checkout's
+branch, SHA and dirty flag, so a result cannot be reproduced against different code
+by accident.
+
+Export the patches (and check the checkouts) with:
+
+```bash
+scripts/export_bench_patches.sh --check     # what is missing, changes nothing
+scripts/export_bench_patches.sh             # benchmarks/patches/<repo>/*.patch
+git -C harbor am benchmarks/patches/harbor/*.patch    # re-apply to a fresh clone
+```
+
+Push the branches once, so the patches have a home:
+
+```bash
+git -C harbor            push -u origin mini-code/apptainer
+git -C SWE-bench         push -u origin mini-code/apptainer
+git -C terminal-bench-2-1 push -u origin mini-code/bench
+```
+
+### Evidence from this host (no Docker, Apptainer 1.5.0, no root)
+
+| Check | Result |
+| --- | --- |
+| `harbor run -d terminal-bench@2.0 -a oracle -i bn-fit-modify --env singularity` with the fork | `.sif` built from the task's Dockerfile, FastAPI server up inside it (`Application startup complete`) — the two things that previously needed staging; the *trial* then stalled on this busy shared host (no agent output, no verifier), so a reward was not collected |
+| `python -m swebench.harness.run_evaluation --backend apptainer` with the **gold** patch | `Instances resolved: 1` / `unresolved: 0` — `astropy__astropy-12907`, 53 s, no Docker |
+| `python -m pytest tests/test_container_backends.py` (fork) | 8 passed |
+| `python -m pytest tests/unit/environments/test_singularity_apptainer.py` (fork) | 10 passed |
+
+### Image cache: what this host taught us
+
+* `APPTAINER_CACHEDIR`/`APPTAINER_TMPDIR` must point at a **large** filesystem.
+  Here `/tmp` and `/var/tmp` are 1 GB and `/dev/shm` is RAM: extracting a 1.2 GB
+  SWE-bench image into `/dev/shm` is OOM-killed (`signal 9`), which looks like a
+  corrupt image because the `.sif` exists at its pre-allocated size long before it
+  is valid. Use the cluster scratch (`/hx2-weka/...` here), accept ~15-25 min for
+  the first SWE-bench instance image, and never probe the file mid-build.
+* Weka has no user xattrs (`ENOTSUP`, warn-only for `mksquashfs`), and the
+  SWE-bench `.sif` for `astropy__astropy-12907` ends up at **1.09 GB** — budget
+  ~1-4 GB per instance, cached and reused.
+
+### Claude Code against a local endpoint
+
+`AgentAuthenticationError` is the CLI's catch-all: a missing key, an unreachable
+host, a non-Anthropic route and a genuine 401 all look the same. The adapter now
+sets the whole set the CLI needs for a local endpoint (`ANTHROPIC_BASE_URL`,
+`ANTHROPIC_AUTH_TOKEN` *and* `ANTHROPIC_API_KEY`, `ANTHROPIC_SMALL_FAST_MODEL`, and
+the telemetry switches that stop it calling out from a compute node) and
+`preflight` probes `/v1/messages`, translating the answer into an instruction
+(404 -> "not an Anthropic-compatible endpoint, put LiteLLM in front of vLLM";
+401/403 -> "a key must exist, its value is not checked"; unreachable -> "start the
+endpoint, and check routing from inside the container").
 
 ---
