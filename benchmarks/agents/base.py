@@ -99,6 +99,15 @@ class AgentAdapter:
         """Env for the in-container invocation (``env`` plus container paths)."""
         return dict(self.env(model))
 
+    def harbor_python_path(self):
+        """Host directory with the agent's package, for harbor's TB path.
+
+        Harbor's agent interface has no bind mount, so an agent that is not
+        installed in the task image has to be uploaded; returning a path here
+        makes the suite pass it as ``--agent-kwarg python_path=...``.
+        """
+        return None
+
     def container_setup_files(self, model):
         """Files to write under the tools mount before the agent runs.
 

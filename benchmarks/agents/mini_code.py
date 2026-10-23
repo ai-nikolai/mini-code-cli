@@ -91,6 +91,9 @@ class MiniCodeAgent(AgentAdapter):
         # runner substitutes {env:NAME} at execution time (see runner.expand_env).
         return {model.api_key_env: _env_placeholder(model.api_key_env)}
 
+    def harbor_python_path(self):
+        return _REPO_ROOT
+
     def container_mounts(self):
         return [(_REPO_ROOT, "/opt/mini-code:ro")]
 
