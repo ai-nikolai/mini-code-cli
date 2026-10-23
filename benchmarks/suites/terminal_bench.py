@@ -276,7 +276,15 @@ class TerminalBenchSuite(Suite):
             # PYTHONPATH (see the env below). `-a` is the non-deprecated spelling
             # and accepts an import path just as well.
             argv += ["-a", str(selection["import_path"])]
-        for key, value in (selection.get("kwargs") or {}).items():
+        kwargs = dict(selection.get("kwargs") or {})
+        # An agent whose code lives in this repository is not in the task image
+        # (harbor's TB path mounts nothing from the host), so hand its package
+        # over for upload -- otherwise every task dies with
+        # "No module named mini_code_cli", which reads like a model failure.
+        python_path = adapter.harbor_python_path()
+        if python_path and not selection.get("agent"):
+            kwargs.setdefault("python_path", python_path)
+        for key, value in kwargs.items():
             rendered = _kwarg(value)
             if rendered == "":
                 continue

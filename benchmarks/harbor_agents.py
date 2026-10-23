@@ -42,7 +42,7 @@ class CommandAgent(BaseInstalledAgent):
 
     def __init__(self, argv_template=None, agent_name="command", model=None,
                  base_url=None, api_key_env=None, extra_env=None,
-                 install_commands=None, **kwargs):
+                 install_commands=None, python_path=None, **kwargs):
         super().__init__(**kwargs)
         template = _as_list(argv_template)
         if not template:
@@ -58,6 +58,12 @@ class CommandAgent(BaseInstalledAgent):
         self._api_key_env = api_key_env
         self._extra_env = _as_mapping(extra_env)
         self._install_commands = _as_list(install_commands)
+        # A host directory holding the agent's own package. Harbor has no bind
+        # mount on this path, so it is uploaded into the container and put on
+        # PYTHONPATH -- without it `python3 -m mini_code_cli` dies with
+        # "No module named mini_code_cli" and the trial looks like a model failure.
+        self._python_path = str(python_path) if python_path else None
+        self._uploaded_python_path = None
 
     # -- harbor interface ------------------------------------------------
 
@@ -71,7 +77,12 @@ class CommandAgent(BaseInstalledAgent):
         return None
 
     async def install(self, environment: BaseEnvironment) -> None:
-        """Install the agent: the adapter's own commands, then nothing else."""
+        """Install the agent: upload its code, then run the declared commands."""
+        if self._python_path:
+            target = "/opt/mini-code"
+            await environment.upload_dir(source_dir=self._python_path,
+                                         target_dir=target)
+            self._uploaded_python_path = target
         for command in self._install_commands:
             await self.exec_as_agent(environment, command=str(command))
 
@@ -108,6 +119,8 @@ class CommandAgent(BaseInstalledAgent):
             env.setdefault("ANTHROPIC_BASE_URL", root)
         if self._model:
             env.setdefault("ANTHROPIC_MODEL", str(self._model))
+        if self._uploaded_python_path:
+            env.setdefault("PYTHONPATH", self._uploaded_python_path)
         return {key: value for key, value in env.items() if value != ""}
 
 
