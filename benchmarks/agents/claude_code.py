@@ -24,6 +24,7 @@ import os
 import urllib.error
 import urllib.request
 
+from . import container_setup
 from .base import AgentAdapter, which
 
 # The tool allowlist Terminal-Bench's claude-code agent uses; kept identical so
@@ -136,13 +137,14 @@ class ClaudeCodeAgent(AgentAdapter):
         return []
 
     def install_commands(self):
-        """Install Node + the CLI inside a Debian/Ubuntu-based task image."""
-        return [
-            "apt-get update && apt-get install -y curl",
-            "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash",
-            'source "$HOME/.nvm/nvm.sh" && nvm install 22 && '
-            "npm install -g @anthropic-ai/claude-code",
-        ]
+        """Install Node + the CLI inside a Debian/Ubuntu-based task image.
+
+        No apt and no nvm: the images are read-only ``.sif`` files whose dpkg
+        cannot move existing directories into the overlay (see
+        :mod:`benchmarks.agents.container_setup`).
+        """
+        return container_setup.node_commands() + container_setup.npm_global_commands(
+            "@anthropic-ai/claude-code", "claude")
 
     def harness_selection(self, model):
         # Terminal-Bench ships a claude-code agent; use it rather than our own

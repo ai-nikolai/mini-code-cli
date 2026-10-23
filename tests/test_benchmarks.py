@@ -531,14 +531,28 @@ class SweBenchSuiteTests(unittest.TestCase):
             self.suite.apptainer_backend(self.trial),
             (self.trial.container_runtime or "docker") == "apptainer")
 
-    def test_agent_command_mounts_nothing_from_the_host(self):
+    def test_agent_command_mounts_only_the_agents_own_code(self):
+        """The agent may mount *itself*, and nothing of the user's.
+
+        mini-code runs from this repository, so the checkout is mounted read-only;
+        the agent-tools directory carries the npm tree that does not fit in the
+        image's 64 MiB overlay. Anything else -- a home directory, a dataset --
+        would leak host state into the instance and change the measurement.
+        """
         with tempfile.TemporaryDirectory() as run_dir:
             write_instances([{"instance_id": "i-1", "problem_statement": "p"}],
                             self.suite.instances_path(run_dir))
             commands = self.suite.commands(self.trial, "/tmp", run_dir,
                                            get_adapter(self.trial.agent))
         agent = next(c for c in commands if c.label.startswith("swebench: agent"))
-        self.assertEqual(agent.argv.count("-v"), 0)      # no host mount
+        mounts = [agent.argv[i + 1] for i, part in enumerate(agent.argv)
+                  if part in ("-v", "--bind")]
+        self.assertTrue(all("/testbed" not in mount for mount in mounts))
+        self.assertTrue(any(mount.endswith("/opt/agent") for mount in mounts))
+        for mount in mounts:
+            self.assertTrue(
+                mount.split(":")[1].startswith(("/opt/mini-code", "/opt/agent")),
+                f"unexpected mount: {mount}")
         self.assertIn("--rm", agent.argv)
         self.assertIn("/testbed", agent.argv)
 

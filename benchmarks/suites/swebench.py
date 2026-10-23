@@ -25,10 +25,13 @@ baseline; ``SWE-bench/SWE-bench_Lite`` works the same way. ``revision`` pins the
 dataset commit, and the resolved revision is recorded in the run manifest.
 """
 import json
+import shlex
 import os
 
 from .. import forks as forks_module
+from . import swebench_apptainer
 from .. import runtime as runtime_module
+from ..agents import container_setup
 from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
 
 #: The repository root, so the shared `.sif` cache can live under `benchmarks/runs`
@@ -112,7 +115,7 @@ class SweBenchSuite(Suite):
     # -- instances -------------------------------------------------------
 
     def instances_path(self, run_dir):
-        return os.path.join(run_dir, "instances.jsonl")
+        return os.path.abspath(os.path.join(run_dir, "instances.jsonl"))
 
     def load_instances(self, run_dir):
         path = self.instances_path(run_dir)
@@ -152,13 +155,21 @@ class SweBenchSuite(Suite):
         ``plan`` on a machine without the dataset shows the shape of the run
         (see :meth:`describe`) and ``run`` shows the exact commands.
         """
+        # Every command below runs with cwd=run_dir, but the upstream harness
+        # re-enters the repository, so it has to be given absolute paths.
+        run_dir = os.path.abspath(run_dir)
         instances = self.load_instances(run_dir)
-        commands = self._instance_commands(trial, instances, run_dir, adapter,
-                                           timeouts)
+        commands = []
+        # Apptainer has no daemon, so an instance image has to exist as a .sif
+        # *before* the agent runs inside it -- pulling after the agent was a
+        # 1.8s exit 255 ("failed to get checksum for docker://...").
+        if not (trial.suite.options or {}).get("skip_evaluation") \
+                and self.apptainer_backend(trial):
+            commands.append(self.images_command(trial, run_dir))
+        commands.extend(self._instance_commands(trial, instances, run_dir,
+                                                adapter, timeouts))
         commands.append(self.predictions_command(trial, run_dir))
         if not (trial.suite.options or {}).get("skip_evaluation"):
-            if self.apptainer_backend(trial):
-                commands.append(self.images_command(trial, run_dir))
             commands.append(self.evaluate_command(trial, run_dir))
         return commands
 
@@ -204,9 +215,40 @@ class SweBenchSuite(Suite):
         for instance in instances:
             instance_id = instance["instance_id"]
             image = self._image(instance, container, image_template)
+            if container == "apptainer":
+                # No daemon: the runnable artefact is the .sif the pull step
+                # cached, not the docker:// reference (which apptainer would try
+                # to resolve against the registry on every exec).
+                cached = swebench_apptainer.sif_path(self.sif_cache(), instance_id)
+                if os.path.isfile(cached):
+                    image = cached
             workdir = self.ensure_dir(os.path.join(runs_dir, instance_id))
             patch_path = os.path.join(workdir, "model.patch")
             log_path = os.path.join(workdir, "agent.log")
+
+            # The agent itself may not exist in the instance image (claude-code,
+            # pi): install it once per instance, inside the image, before the run.
+            tools_dir = self.ensure_dir(os.path.join(workdir, "agent-tools"))
+            for target, contents in adapter.container_setup_files(trial.model).items():
+                relative = target[len(container_setup.PREFIX):].lstrip("/")
+                destination = os.path.join(tools_dir, relative)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                with open(destination, "w", encoding="utf-8") as handle:
+                    handle.write(contents)
+            install_commands = adapter.install_commands()
+            if install_commands:
+                commands.append(PlannedCommand(
+                    label=f"swebench: install agent tools for {instance_id}",
+                    argv=runtime_module.container_argv(
+                        container, image,
+                        ["bash", "-lc", " && ".join(install_commands)],
+                        limits=dict(trial.docker, network="none"),
+                        # npm needs ~300 MiB; the image's writable overlay is
+                        # 64 MiB, so the tools live on the host instead.
+                        mounts=[(tools_dir, container_setup.PREFIX)],
+                        workdir="/testbed"),
+                    timeout=int(options.get("install_timeout_sec", 1_800)),
+                    notes=["installs the agent's own runtime (node) in the image"]))
 
             if options.get("install_script"):
                 # Preparation happens *inside* the instance image, once per
@@ -220,14 +262,26 @@ class SweBenchSuite(Suite):
                         mounts=[(options["install_script"], "/tmp/install.sh:ro")]),
                     timeout=int(options.get("install_timeout_sec", 1_800))))
 
+            agent_argv = adapter.argv(_problem_statement(instance), trial.model,
+                                      workspace="/testbed", container=True)
+            if install_commands:
+                # The tools live on the bind mount, and the image's writable
+                # overlay is thrown away between execs, so /usr/local/bin
+                # symlinks do not survive: put them on PATH for this command.
+                agent_argv = [
+                    "bash", "-lc",
+                    f"export PATH={container_setup.PREFIX}/bin:$PATH; "
+                    f"exec {shlex.join(agent_argv)}",
+                ]
             commands.append(PlannedCommand(
                 label=f"swebench: agent {instance_id}",
                 argv=runtime_module.container_argv(
                     container, image,
-                    adapter.argv(_problem_statement(instance), trial.model,
-                                 workspace="/testbed", container=True),
+                    agent_argv,
                     container_name=f"bench-{trial.run_id}-{_short(instance_id)}",
-                    env=adapter.env(trial.model),
+                    env=adapter.container_env(trial.model),
+                    mounts=list(adapter.container_mounts())
+                    + [(tools_dir, container_setup.PREFIX)],
                     limits=trial.docker,
                     network=trial.docker.get("network"),
                     workdir="/testbed"),
@@ -376,10 +430,12 @@ class SweBenchSuite(Suite):
         stub = [{"instance_id": "<instance_id>",
                  "problem_statement": "<problem statement from the dataset>"}]
         shape = [self.prepare_command(trial, run_dir)]
-        shape += self._instance_commands(trial, stub, run_dir, adapter)
-        shape.append(self.predictions_command(trial, run_dir))
+        # Same order as `commands()`: the .sif has to exist before anything runs
+        # inside it, or the plan would describe a sequence that cannot work.
         if self.apptainer_backend(trial):
             shape.append(self.images_command(trial, run_dir))
+        shape += self._instance_commands(trial, stub, run_dir, adapter)
+        shape.append(self.predictions_command(trial, run_dir))
         shape.append(self.evaluate_command(trial, run_dir))
         lines = [f"{number}. {command.rendered()}"
                  for number, command in enumerate(shape, 1)]
@@ -416,22 +472,25 @@ class SweBenchSuite(Suite):
         if not os.path.isdir(run_dir):
             return None
         candidates = []
-        for name in os.listdir(run_dir):
-            if not name.endswith(".json"):
-                continue
-            if run_id and run_id not in name:
-                continue
-            path = os.path.join(run_dir, name)
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    payload = json.load(handle)
-            except (OSError, ValueError):
-                continue
-            if isinstance(payload, dict) and ("resolved_ids" in payload
-                                              or "completed_instances" in payload):
-                candidates.append((os.path.getmtime(path), path))
+        # The harness puts its report where *it* likes -- the apptainer backend
+        # writes logs/evaluation/<run_id>/results.json -- so look at every depth
+        # and identify the report by its contents, not by its name or directory.
+        for root, _dirs, names in os.walk(run_dir):
+            for name in names:
+                if not name.endswith(".json"):
+                    continue
+                if run_id and run_id not in name and run_id not in root:
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    with open(path, encoding="utf-8") as handle:
+                        payload = json.load(handle)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(payload, dict) and ("resolved_ids" in payload
+                                                  or "completed_instances" in payload):
+                    candidates.append((os.path.getmtime(path), path))
         return max(candidates)[1] if candidates else None
-
 
 # ---------------------------------------------------------------------------
 # helpers

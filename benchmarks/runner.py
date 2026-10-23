@@ -61,7 +61,9 @@ class Runner:
 
     def say(self, message=""):
         """Print and remember a line (``plan`` output is also returned to callers)."""
-        print(message)
+        # flush: a redirected run (nohup, CI) must still be observable while it
+        # is running, not only after it exits.
+        print(message, flush=True)
         self.messages.append(message)
 
     # -- run identity ----------------------------------------------------
@@ -165,6 +167,7 @@ class Runner:
         for index, trial in enumerate(trials, 1):
             self.say(f"[{index}/{len(trials)}] {trial.run_id}")
             trial_dir = os.path.join(run_dir, "trials", trial.run_id)
+            self._reuse_prepared_inputs(trial, trial_dir)
             outcomes, failures = self._run_trial(trial, trial_dir)
             outcomes_by_trial[trial.run_id] = outcomes
             failures_by_trial[trial.run_id] = failures
@@ -187,6 +190,21 @@ class Runner:
             self.say(f"csv:     {csv_path}")
             self.say(f"analyse: python -m benchmarks.analyze {csv_path}")
         return manifest
+
+    def _reuse_prepared_inputs(self, trial, trial_dir):
+        """Give a trial the dataset an earlier ``prepare`` materialised.
+
+        ``prepare`` writes per-trial inputs under ``_prepare/<trial>/`` while a
+        run reads them from its own trial directory, so the documented
+        ``prepare`` then ``run`` sequence used to stop at "no instance list".
+        """
+        source = os.path.join(self.output, "_prepare", trial.run_id,
+                              "instances.jsonl")
+        target = os.path.join(trial_dir, "instances.jsonl")
+        if os.path.isfile(source) and not os.path.isfile(target):
+            os.makedirs(trial_dir, exist_ok=True)
+            shutil.copy2(source, target)
+            self.say(f"   reusing prepared instances from {source}")
 
     def _run_trial(self, trial, trial_dir):
         """Run one trial's commands in order; collect its outcomes."""

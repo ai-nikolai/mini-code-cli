@@ -26,7 +26,12 @@ and nothing else, so a difference in success rate can be attributed to it:
 Every preset is also recorded in the run manifest, so a report can say which
 setting produced which numbers without re-deriving it from flags.
 """
+import os
+
 from .base import AgentAdapter, which, python_interpreter
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
 
 
 class MiniCodeAgent(AgentAdapter):
@@ -85,6 +90,16 @@ class MiniCodeAgent(AgentAdapter):
         # A literal placeholder: mini_code_cli reads the flag value, so the
         # runner substitutes {env:NAME} at execution time (see runner.expand_env).
         return {model.api_key_env: _env_placeholder(model.api_key_env)}
+
+    def container_mounts(self):
+        return [(_REPO_ROOT, "/opt/mini-code:ro")]
+
+    def container_env(self, model):
+        env = dict(self.env(model))
+        # The package is not in the instance images; it is bind-mounted instead
+        # so the agent that runs is this checkout, not a stale wheel.
+        env["PYTHONPATH"] = "/opt/mini-code"
+        return env
 
     def preflight(self, model, require_binary=True):
         problems = super().preflight(model)
