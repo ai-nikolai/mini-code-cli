@@ -446,10 +446,22 @@ git -C terminal-bench-2-1 push -u origin mini-code/bench
 
 | Check | Result |
 | --- | --- |
-| `harbor run -d terminal-bench@2.0 -a oracle -i bn-fit-modify --env singularity` with the fork | `.sif` built from the task's Dockerfile, FastAPI server up inside it (`Application startup complete`) — the two things that previously needed staging; the *trial* then stalled on this busy shared host (no agent output, no verifier), so a reward was not collected |
-| `python -m swebench.harness.run_evaluation --backend apptainer` with the **gold** patch | `Instances resolved: 1` / `unresolved: 0` — `astropy__astropy-12907`, 53 s, no Docker |
-| `python -m pytest tests/test_container_backends.py` (fork) | 8 passed |
-| `python -m pytest tests/unit/environments/test_singularity_apptainer.py` (fork) | 10 passed |
+| `harbor run -p <task with only a Dockerfile> -a oracle --env singularity` | the `.sif` is built from the Dockerfile through a generated definition file (`harbor-local_bn-fit-modify_<hash>.sif`), and the FastAPI server starts inside it |
+| `harbor run -d terminal-bench@2.0 -a oracle -i bn-fit-modify --env singularity` | registry images pull and boot, but the *trial* then stalls on this shared host (no agent output, no verifier output), so no reward was collected; the CLI reports `n_errored_trials: 1` |
+| `python -m swebench.harness.run_evaluation --backend apptainer` with the **gold** patch | `Instances resolved: 1` / `unresolved: 0` — `astropy__astropy-12907`, 53 s, no Docker daemon |
+| `pytest tests/test_container_backends.py` (SWE-bench fork) | 8 passed |
+| `pytest tests/unit/environments/test_singularity_*.py` (harbor fork) | 13 passed |
+
+Two things this host corrected, worth knowing before debugging the same symptoms:
+
+* **`apptainer build out.sif <directory>` is not a Dockerfile build.** It writes a
+  40 kB image *of the directory* and exits 0; the container then has no `bash` and
+  no `WORKDIR`, and harbor dies at `failed to set working directory: chdir /app`.
+  The fork translates the Dockerfile into a definition file for exactly this
+  reason. Apptainer 1.5.0-1.el9 has no `--buildkit`.
+* **`--pwd` must exist.** Apptainer fails before the bootstrap script runs if the
+  working directory is missing, so a `WORKDIR` has to become `mkdir -p` at build
+  time (which the translation does).
 
 ### Image cache: what this host taught us
 
