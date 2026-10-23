@@ -103,7 +103,7 @@ def image_ref(name, image):
 
 def container_argv(name, image, command, container_name=None, env=None,
                    limits=None, mounts=(), workdir=None, network=None,
-                   gpus=False, remove=True):
+                   gpus=False, remove=True, overlays=()):
     """Build a one-shot ``argv`` that runs ``command`` inside ``image``.
 
     ``command`` is a list (never a shell string). ``mounts`` is a sequence of
@@ -159,6 +159,10 @@ def container_argv(name, image, command, container_name=None, env=None,
         argv += ["--bind", f"{host}:{target}"]
     for key, value in env.items():
         argv += ["--env", f"{key}={value}"]
+    for overlay in overlays:
+        # Persistent across execs, unlike --writable-tmpfs: an agent's edits have
+        # to still be there when the next command captures the patch.
+        argv += ["--overlay", os.path.abspath(str(overlay))]
     return argv + [image_ref("apptainer", image)] + command
 
 

@@ -262,6 +262,26 @@ class SweBenchSuite(Suite):
                         mounts=[(options["install_script"], "/tmp/install.sh:ro")]),
                     timeout=int(options.get("install_timeout_sec", 1_800))))
 
+            # A .sif is read-only and --writable-tmpfs is discarded when the exec
+            # exits, so the agent's edits would be gone before the patch is
+            # captured (every instance reported an empty patch). `apptainer
+            # overlay create` needs privileges this host does not grant, so the
+            # checkout is copied to the host and bind-mounted back: same effect,
+            # no root, and it survives both commands.
+            workspace = os.path.join(workdir, "testbed")
+            if container == "apptainer":
+                os.makedirs(workspace, exist_ok=True)
+                commands.append(PlannedCommand(
+                    label=f"swebench: copy checkout for {instance_id}",
+                    argv=runtime_module.container_argv(
+                        container, image,
+                        ["bash", "-lc", "cp -a /testbed/. /out/"],
+                        mounts=[(workspace, "/out")],
+                        workdir="/"),
+                    timeout=900,
+                    notes=["/testbed is read-only inside the .sif; the working copy "
+                           "is bind-mounted back for the agent and the patch"]))
+
             agent_argv = adapter.argv(_problem_statement(instance), trial.model,
                                       workspace="/testbed", container=True)
             if install_commands:
@@ -281,7 +301,8 @@ class SweBenchSuite(Suite):
                     container_name=f"bench-{trial.run_id}-{_short(instance_id)}",
                     env=adapter.container_env(trial.model),
                     mounts=list(adapter.container_mounts())
-                    + [(tools_dir, container_setup.PREFIX)],
+                    + [(tools_dir, container_setup.PREFIX)]
+                    + ([(workspace, "/testbed")] if container == "apptainer" else []),
                     limits=trial.docker,
                     network=trial.docker.get("network"),
                     workdir="/testbed"),
@@ -298,7 +319,8 @@ class SweBenchSuite(Suite):
                     container, image,
                     ["bash", "-lc", "git add -A && git diff --cached > /out/model.patch"],
                     limits=trial.docker,
-                    mounts=[(workdir, "/out")],
+                    mounts=[(workdir, "/out")]
+                    + ([(workspace, "/testbed")] if container == "apptainer" else []),
                     workdir="/testbed"),
                 cwd=run_dir,
                 timeout=int(options.get("patch_timeout_sec", 600)),
