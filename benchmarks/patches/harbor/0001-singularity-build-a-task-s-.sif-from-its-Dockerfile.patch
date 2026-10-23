@@ -1,0 +1,530 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mini-code benchmarks <benchmarks@localhost>
+Date: Fri, 23 Oct 2026 18:01:17 +0100
+Subject: [PATCH] singularity: build a task's .sif from its Dockerfile
+
+Terminal-Bench 2 tasks ship environment/Dockerfile, not the docker_image that
+the Singularity environment required, so every task failed validation before a
+container existed.
+
+- derive a content-addressed image name from the Dockerfile (harbor-local/<task>:<sha>)
+  and build it with `apptainer build --fakeroot`, cached under the image cache dir
+- report a fakeroot refusal as such instead of an opaque build failure
+- use apptainer when installed (HARBOR_CONTAINER_BIN overrides), and pass
+  --force to pull so a stale cache cannot produce an invalid .sif
+- default --no-mount to home,tmp: 'bind-paths' also suppressed the /etc/resolv.conf
+  bind, leaving the container without DNS (apt/curl in the verifier failed)
+- bootstrap.sh: use a pre-baked /opt/harbor-server venv when the image ships one,
+  find python3 on PATH, and stop apt's sandbox from rejecting the fakeroot user
+
+Tested with a real task (gpt2-codegolf): the SIF is built from the Dockerfile and
+the FastAPI server boots inside it.
+---
+ .../environments/singularity/bootstrap.sh     |  29 ++-
+ .../environments/singularity/singularity.py   | 165 +++++++++++++--
+ .../test_singularity_apptainer.py             | 192 ++++++++++++++++++
+ 3 files changed, 366 insertions(+), 20 deletions(-)
+ create mode 100644 tests/unit/environments/test_singularity_apptainer.py
+
+diff --git a/src/harbor/environments/singularity/bootstrap.sh b/src/harbor/environments/singularity/bootstrap.sh
+index d1b38687..2cd648c8 100755
+--- a/src/harbor/environments/singularity/bootstrap.sh
++++ b/src/harbor/environments/singularity/bootstrap.sh
+@@ -7,13 +7,31 @@ mkdir -p "$WORKDIR"
+ 
+ export DEBIAN_FRONTEND=noninteractive
+ 
++# --- Fast path: an image may ship /opt/harbor-server already (the recommended
++# --- setup for HPC, where installing python3 inside every task is both slow and
++# --- often impossible). If that venv has uvicorn+fastapi, nothing else is needed.
++_HARBOR_VENV=/opt/harbor-server
++_HARBOR_PY="$_HARBOR_VENV/bin/python3"
++if [ -x "$_HARBOR_PY" ] && "$_HARBOR_PY" -c "import uvicorn, fastapi" 2>/dev/null; then
++  export HARBOR_PYTHON="$_HARBOR_PY"
++  echo "[harbor] using the image's pre-built server venv at $_HARBOR_VENV" >&2
++else
++
+ # --- Refresh package index once (apt-based images) ---
++# Apptainer runs the container as the calling user (fakeroot maps us to root),
++# so apt must not try to drop privileges to _apt: without this, `apt-get update`
++# fails with "Couldn't find an apt sandbox user" and the image looks broken.
+ if command -v apt-get >/dev/null 2>&1; then
++  mkdir -p /etc/apt/apt.conf.d 2>/dev/null && \
++    printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99harbor-sandbox 2>/dev/null || true
+   apt-get update -qq 2>/dev/null || true
+ fi
+ 
+-# --- Ensure /usr/bin/python3 exists ---
++# --- Ensure a system python3 exists ---
+ _SYS_PY=/usr/bin/python3
++if [ ! -x "$_SYS_PY" ] && command -v python3 >/dev/null 2>&1; then
++  _SYS_PY="$(command -v python3)"
++fi
+ if [ ! -x "$_SYS_PY" ]; then
+   echo "[harbor] /usr/bin/python3 not found, installing..." >&2
+   if command -v apt-get >/dev/null 2>&1; then
+@@ -26,14 +44,15 @@ if [ ! -x "$_SYS_PY" ]; then
+     yum install -y python3 2>/dev/null || true
+   fi
+   if [ ! -x "$_SYS_PY" ]; then
+-    echo "[harbor] FATAL: cannot install /usr/bin/python3" >&2
++    echo "[harbor] FATAL: no python3 in the image and none could be installed." >&2
++    echo "[harbor] Bake a server venv into the image instead:" >&2
++    echo "[harbor]   RUN python3 -m venv /opt/harbor-server && \\" >&2
++    echo "[harbor]       /opt/harbor-server/bin/pip install uvicorn fastapi" >&2
+     exit 1
+   fi
+ fi
+ 
+ # --- Create an isolated venv for the Harbor server at /opt/harbor-server ---
+-_HARBOR_VENV=/opt/harbor-server
+-_HARBOR_PY="$_HARBOR_VENV/bin/python3"
+ if [ ! -x "$_HARBOR_PY" ]; then
+   echo "[harbor] Creating server venv at $_HARBOR_VENV..." >&2
+   "$_SYS_PY" -m venv --without-pip "$_HARBOR_VENV" \
+@@ -70,6 +89,8 @@ fi
+ 
+ export HARBOR_PYTHON="$_HARBOR_PY"
+ 
++fi  # end of the slow path (no pre-built /opt/harbor-server)
++
+ # --- Install tmux & asciinema (for terminal-based agents) ---
+ export TMUX_TMPDIR="${TMUX_TMPDIR:-/tmp/.harbor-tmux}"
+ mkdir -p "$TMUX_TMPDIR"
+diff --git a/src/harbor/environments/singularity/singularity.py b/src/harbor/environments/singularity/singularity.py
+index c728d73c..73af5e09 100644
+--- a/src/harbor/environments/singularity/singularity.py
++++ b/src/harbor/environments/singularity/singularity.py
+@@ -21,8 +21,10 @@ runs a FastAPI server inside the container to handle command execution.
+ 
+ import asyncio
+ import asyncio.subprocess
++import hashlib
+ import logging
+ import os
++import re
+ import shlex
+ import shutil
+ import socket
+@@ -66,7 +68,12 @@ class SingularityEnvironment(BaseEnvironment):
+         singularity_image_cache_dir: Path to cache .sif files.
+         singularity_force_pull: Force re-pull even if cached (default False).
+         singularity_no_mount: Comma-separated mount types to suppress
+-            (default "home,tmp,bind-paths"). Use "" to allow all Singularity mounts.
++            (default "home,tmp"). Use "" to allow all Singularity mounts.
++
++    A task needs either ``docker_image`` in ``task.toml [environment]`` or an
++    ``environment/Dockerfile``. With only a Dockerfile the .sif is built locally
++    (``apptainer build --fakeroot``) and cached under a content-addressed name, so
++    editing the Dockerfile rebuilds while leaving it alone reuses the image.
+     """
+ 
+     def __init__(
+@@ -135,6 +142,32 @@ class SingularityEnvironment(BaseEnvironment):
+     def _docker_image(self) -> str | None:
+         return self.task_env_config.docker_image
+ 
++    @property
++    def _binary(self) -> str:
++        """The container binary: Apptainer when present, else Singularity.
++
++        ``HARBOR_CONTAINER_BIN`` overrides both, which is what a cluster with a
++        wrapped binary (module load, site wrapper flags) needs.
++        """
++        override = os.environ.get("HARBOR_CONTAINER_BIN")
++        if override:
++            return override
++        return shutil.which("apptainer") or shutil.which("singularity") or "singularity"
++
++    def _derived_image_ref(self) -> str:
++        """A deterministic, content-addressed tag for a Dockerfile-only task.
++
++        The tag carries a hash of the Dockerfile so the build cache cannot go
++        stale: edit the Dockerfile and the name changes with it.
++        """
++        digest = hashlib.sha256(self._dockerfile_path.read_bytes()).hexdigest()[:12]
++        name = re.sub(r"[^a-z0-9_.-]+", "-", (self.environment_name or "task").lower())
++        return f"harbor-local/{name}:{digest}"
++
++    @property
++    def _has_dockerfile(self) -> bool:
++        return self._dockerfile_path.is_file()
++
+     @property
+     def _staging(self) -> Path:
+         """Return staging dir, raising if not yet initialized."""
+@@ -154,10 +187,12 @@ class SingularityEnvironment(BaseEnvironment):
+     @override
+     def _validate_definition(self):
+         """Validate that required files and configuration exist."""
+-        if not self._docker_image:
++        if not self._docker_image and not self._has_dockerfile:
+             raise ValueError(
+-                "Singularity environment requires 'docker_image' in task.toml [environment]. "
+-                "Set it to a Docker image name (e.g. 'ubuntu:22.04') or a .sif file path."
++                "Singularity environment requires either 'docker_image' in "
++                "task.toml [environment] or an environment/Dockerfile. Set the "
++                "former to a Docker image name (e.g. 'ubuntu:22.04') or a .sif "
++                "path, or ship the latter so the image can be built locally."
+             )
+ 
+         if self._is_sif_image:
+@@ -248,8 +283,9 @@ class SingularityEnvironment(BaseEnvironment):
+             )
+ 
+             cmd = [
+-                "singularity",
++                self._binary,
+                 "pull",
++                "--force",
+                 str(tmp_sif_path),
+                 f"docker://{docker_image}",
+             ]
+@@ -276,6 +312,110 @@ class SingularityEnvironment(BaseEnvironment):
+             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+             lock_file.close()
+ 
++    async def _build_sif_from_dockerfile(self, *, force_build: bool = False) -> Path:
++        """Build a .sif from ``environment/Dockerfile`` (no registry, no daemon).
++
++        Apptainer builds the definition directly, so a task that only ships a
++        Dockerfile becomes runnable without Docker and without a remote image.
++        ``--fakeroot`` is required because task Dockerfiles install packages; when
++        the cluster forbids user namespaces that is reported as such rather than
++        as an opaque build failure.
++        """
++        dockerfile = self._dockerfile_path
++        if not dockerfile.is_file():
++            raise FileNotFoundError(f"No Dockerfile at {dockerfile}")
++
++        safe_name = self._derived_image_ref().replace("/", "_").replace(":", "_")
++        sif_path = self._image_cache_dir / f"{safe_name}.sif"
++        lock_path = self._image_cache_dir / f"{safe_name}.sif.lock"
++        self._image_cache_dir.mkdir(parents=True, exist_ok=True)
++
++        if not force_build and sif_path.exists():
++            self.logger.debug(f"Using cached Singularity image: {sif_path}")
++            return sif_path
++
++        lock_file = open(lock_path, "w")
++        try:
++            loop = asyncio.get_event_loop()
++            await loop.run_in_executor(
++                None, lambda: fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
++            )
++            if not force_build and sif_path.exists():
++                self.logger.debug(
++                    f"Using cached Singularity image (built by another process): "
++                    f"{sif_path}"
++                )
++                return sif_path
++            if force_build and sif_path.exists():
++                sif_path.unlink()
++
++            tmp_sif_path = (
++                self._image_cache_dir / f"{safe_name}.sif.tmp.{self.session_id}"
++            )
++            cmd = [
++                self._binary,
++                "build",
++                "--force",
++                "--fakeroot",
++                str(tmp_sif_path),
++                str(dockerfile.parent),
++            ]
++            self.logger.debug(
++                f"Building .sif from {dockerfile}: {' '.join(cmd)} "
++                f"(APPTAINER_CACHEDIR={os.environ.get('APPTAINER_CACHEDIR', '<unset>')}, "
++                f"APPTAINER_TMPDIR={os.environ.get('APPTAINER_TMPDIR', '<unset>')})"
++            )
++            process = await asyncio.create_subprocess_exec(
++                *cmd,
++                stdout=asyncio.subprocess.PIPE,
++                stderr=asyncio.subprocess.STDOUT,
++            )
++            stdout, _ = await process.communicate()
++            output = stdout.decode(errors="replace")
++
++            if process.returncode != 0:
++                if tmp_sif_path.exists():
++                    tmp_sif_path.unlink()
++                tail = "\n".join(output.strip().splitlines()[-20:])
++                if "fakeroot" in output.lower() or "user namespace" in output.lower():
++                    raise RuntimeError(
++                        "Failed to build a Singularity image from "
++                        f"{dockerfile}: this host cannot use --fakeroot, which task "
++                        "Dockerfiles need in order to install packages. Ask the "
++                        "cluster administrators whether unprivileged user "
++                        "namespaces are permitted, or provide a prebuilt .sif via "
++                        "task.toml [environment] docker_image.\n"
++                        f"Build output:\n{tail}"
++                    )
++                raise RuntimeError(
++                    f"Failed to build a Singularity image from {dockerfile}:\n{tail}"
++                )
++
++            tmp_sif_path.rename(sif_path)
++            self.logger.debug(f"Created Singularity image: {sif_path}")
++            return sif_path
++        finally:
++            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
++            lock_file.close()
++
++    async def _ensure_sif(self, *, force_build: bool = False) -> Path:
++        """Resolve the task's image to a .sif, building or pulling as needed."""
++        if self._is_sif_image:
++            sif_path = Path(self._docker_image)
++            if not sif_path.exists():
++                raise FileNotFoundError(
++                    f".sif file not found: {sif_path}. Build it first "
++                    f"(apptainer build --fakeroot {sif_path} <definition>)."
++                )
++            return sif_path
++        if self._docker_image:
++            return await self._convert_docker_to_sif(
++                self._docker_image, force_pull=force_build or self._force_pull
++            )
++        return await self._build_sif_from_dockerfile(
++            force_build=force_build or self._force_pull
++        )
++
+     async def _cleanup_server_resources(self) -> None:
+         """Clean up any existing server resources from a previous run."""
+         if (
+@@ -357,7 +497,7 @@ class SingularityEnvironment(BaseEnvironment):
+             no_mount_args: list[str] = []
+             singularity_no_mount = self._singularity_no_mount
+             if singularity_no_mount is None:
+-                singularity_no_mount = "home,tmp,bind-paths"
++                singularity_no_mount = "home,tmp"
+             if singularity_no_mount:
+                 for part in singularity_no_mount.split(","):
+                     part = part.strip()
+@@ -377,7 +517,7 @@ class SingularityEnvironment(BaseEnvironment):
+                 self._workdir,
+             ]
+             cmd = [
+-                "singularity",
++                self._binary,
+                 "exec",
+                 *no_mount_args,
+                 "--pwd",
+@@ -649,15 +789,8 @@ class SingularityEnvironment(BaseEnvironment):
+                 "SingularityEnvironment is only supported on Linux/macOS. "
+                 "Singularity/Apptainer is not available on Windows."
+             )
+-        if not self._docker_image:
+-            raise ValueError("docker_image must be set in task.toml [environment]")
+-        if self._is_sif_image:
+-            self._sif_path = Path(self._docker_image)
+-        else:
+-            force_pull = force_build or self._force_pull
+-            self._sif_path = await self._convert_docker_to_sif(
+-                self._docker_image, force_pull=force_pull
+-            )
++        self._validate_definition()
++        self._sif_path = await self._ensure_sif(force_build=force_build)
+ 
+         await self._start_server()
+ 
+diff --git a/tests/unit/environments/test_singularity_apptainer.py b/tests/unit/environments/test_singularity_apptainer.py
+new file mode 100644
+index 00000000..7a563e06
+--- /dev/null
++++ b/tests/unit/environments/test_singularity_apptainer.py
+@@ -0,0 +1,192 @@
++"""Unit tests for the Apptainer/Singularity image resolution added on our fork.
++
++These cover the three things a Docker-free cluster needs and that upstream
++0.24.0 did not do:
++
++1. a task that ships only ``environment/Dockerfile`` becomes runnable (the image
++   is built locally and cached under a content-addressed name),
++2. ``docker_image`` still wins when it is set, and a prebuilt ``.sif`` is used
++   as-is,
++3. the container binary and mount defaults are what the cluster expects
++   (``apptainer`` when installed, ``--no-mount home,tmp``, no ``bind-paths``
++   suppression -- that one silently dropped ``/etc/resolv.conf`` and killed DNS).
++"""
++
++import logging
++from pathlib import Path
++
++import pytest
++
++from harbor.environments.singularity import singularity as singularity_module
++from harbor.environments.singularity.singularity import SingularityEnvironment
++from harbor.models.task.config import EnvironmentConfig, NetworkMode, NetworkPolicy
++from harbor.models.trial.paths import TrialPaths
++
++DOCKERFILE = "FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y tmux\n"
++
++
++def _make_env(tmp_path: Path, *, docker_image=None, dockerfile=DOCKERFILE, **kwargs):
++    env_dir = tmp_path / "environment"
++    env_dir.mkdir(parents=True, exist_ok=True)
++    if dockerfile is not None:
++        (env_dir / "Dockerfile").write_text(dockerfile)
++    trial_dir = tmp_path / "trial"
++    trial_dir.mkdir(parents=True, exist_ok=True)
++    trial_paths = TrialPaths(trial_dir=trial_dir)
++    trial_paths.mkdir()
++    return SingularityEnvironment(
++        environment_dir=env_dir,
++        environment_name="my-task",
++        session_id="Test.Session.123",
++        trial_paths=trial_paths,
++        task_env_config=EnvironmentConfig(
++            cpus=2, memory_mb=2048, docker_image=docker_image
++        ),
++        network_policy=NetworkPolicy(network_mode=NetworkMode.PUBLIC, allowed_hosts=[]),
++        logger=logging.getLogger("test"),
++        singularity_image_cache_dir=tmp_path / "cache",
++        **kwargs,
++    )
++
++
++def test_definition_with_only_a_dockerfile_is_valid(tmp_path):
++    # Construction validates, so getting here at all is the assertion.
++    env = _make_env(tmp_path)
++    assert env._has_dockerfile
++
++
++def test_definition_with_neither_dockerfile_nor_image_is_rejected(tmp_path):
++    with pytest.raises(ValueError, match="environment/Dockerfile"):
++        _make_env(tmp_path, dockerfile=None)
++
++
++def test_derived_image_ref_is_content_addressed(tmp_path):
++    first = _make_env(tmp_path / "a")._derived_image_ref()
++    same = _make_env(tmp_path / "b")._derived_image_ref()
++    changed = _make_env(
++        tmp_path / "c", dockerfile=DOCKERFILE + "RUN echo extra\n"
++    )._derived_image_ref()
++
++    assert first.startswith("harbor-local/my-task:")
++    assert first == same, "same task + same Dockerfile must give the same tag"
++    assert first != changed, "editing the Dockerfile must invalidate the cache"
++
++
++def test_binary_prefers_apptainer_and_honours_the_override(tmp_path, monkeypatch):
++    env = _make_env(tmp_path)
++    monkeypatch.delenv("HARBOR_CONTAINER_BIN", raising=False)
++    monkeypatch.setattr(
++        singularity_module.shutil,
++        "which",
++        lambda name: f"/usr/bin/{name}" if name == "apptainer" else None,
++    )
++    assert env._binary == "/usr/bin/apptainer"
++
++    monkeypatch.setenv("HARBOR_CONTAINER_BIN", "/opt/wrapped/singularity")
++    assert env._binary == "/opt/wrapped/singularity"
++
++
++@pytest.mark.asyncio
++async def test_ensure_sif_builds_from_dockerfile(tmp_path, monkeypatch):
++    env = _make_env(tmp_path)
++    calls = []
++
++    async def fake_build(*, force_build=False):
++        calls.append(force_build)
++        return tmp_path / "cache" / "built.sif"
++
++    monkeypatch.setattr(env, "_build_sif_from_dockerfile", fake_build)
++    assert await env._ensure_sif() == tmp_path / "cache" / "built.sif"
++    assert calls == [False]
++
++
++@pytest.mark.asyncio
++async def test_ensure_sif_prefers_a_prebuilt_sif(tmp_path, monkeypatch):
++    sif = tmp_path / "image.sif"
++    sif.write_text("not really a sif")
++    env = _make_env(tmp_path, docker_image=str(sif))
++    monkeypatch.setattr(
++        env,
++        "_build_sif_from_dockerfile",
++        lambda **_: pytest.fail("a prebuilt .sif must not be rebuilt"),
++    )
++    assert await env._ensure_sif() == sif
++
++
++@pytest.mark.asyncio
++async def test_ensure_sif_pulls_a_docker_image_when_given(tmp_path, monkeypatch):
++    env = _make_env(tmp_path, docker_image="ubuntu:22.04")
++    seen = []
++
++    async def fake_convert(image, *, force_pull=False):
++        seen.append((image, force_pull))
++        return tmp_path / "cache" / "ubuntu.sif"
++
++    monkeypatch.setattr(env, "_convert_docker_to_sif", fake_convert)
++    assert await env._ensure_sif(force_build=True) == tmp_path / "cache" / "ubuntu.sif"
++    assert seen == [("ubuntu:22.04", True)]
++
++
++def test_no_mount_default_keeps_dns(tmp_path):
++    """`bind-paths` suppression is what silently dropped /etc/resolv.conf."""
++    env = _make_env(tmp_path)
++    assert env._singularity_no_mount is None  # resolved to the default at start
++    source = (
++        Path(singularity_module.__file__).read_text().splitlines()
++    )
++    defaults = [line for line in source if 'singularity_no_mount = "' in line]
++    assert defaults, "the default must be spelled out in _start_server"
++    assert all("bind-paths" not in line for line in defaults)
++
++
++@pytest.mark.asyncio
++async def test_build_from_dockerfile_uses_fakeroot_and_cache_dirs(tmp_path, monkeypatch):
++    env = _make_env(tmp_path)
++    monkeypatch.setenv("APPTAINER_CACHEDIR", str(tmp_path / "cache"))
++    commands = []
++
++    class FakeProcess:
++        returncode = 0
++
++        async def communicate(self):
++            return b"INFO: Build complete\n", b""
++
++    async def fake_exec(*cmd, **kwargs):
++        commands.append(list(cmd))
++        # `apptainer build` writes the image itself; the fake has to as well, or
++        # the rename onto the cache path has nothing to move.
++        tmp_sif = [part for part in cmd if ".sif" in str(part)]
++        if tmp_sif:
++            Path(tmp_sif[0]).write_text("fake sif")
++        return FakeProcess()
++
++    monkeypatch.setattr(
++        singularity_module.asyncio, "create_subprocess_exec", fake_exec
++    )
++    sif = await env._build_sif_from_dockerfile()
++    assert sif.exists() and sif.suffix == ".sif"
++    assert commands, "the build must actually shell out"
++    argv = commands[0]
++    assert argv[1:3] == ["build", "--force"]
++    assert "--fakeroot" in argv
++    assert argv[-1] == str(env._dockerfile_path.parent)
++
++
++@pytest.mark.asyncio
++async def test_build_from_dockerfile_explains_a_fakeroot_refusal(tmp_path, monkeypatch):
++    env = _make_env(tmp_path)
++
++    class FakeProcess:
++        returncode = 1
++
++        async def communicate(self):
++            return b"FATAL: user namespaces are not enabled\n", b""
++
++    async def fake_exec(*cmd, **kwargs):
++        return FakeProcess()
++
++    monkeypatch.setattr(
++        singularity_module.asyncio, "create_subprocess_exec", fake_exec
++    )
++    with pytest.raises(RuntimeError, match="fakeroot"):
++        await env._build_sif_from_dockerfile()
+-- 
+2.47.1
+
