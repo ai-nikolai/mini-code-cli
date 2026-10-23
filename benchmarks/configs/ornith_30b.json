@@ -46,8 +46,7 @@
       "options": {
         "harness": "harbor",
         "n_concurrent": 1,
-        "_provider": "derived per model: anthropic/ for the Claude Code model, openai/ otherwise",
-        "singularity_image_cache_dir": "/tmp/bench-sif"
+        "_provider": "derived per model: anthropic/ for the Claude Code model, openai/ otherwise"
       }
     },
     {

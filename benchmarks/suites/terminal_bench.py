@@ -27,6 +27,7 @@ Result files differ too, so :meth:`collect` understands both:
 """
 import json
 import os
+import re
 
 from .. import runtime as runtime_module
 from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
@@ -127,12 +128,86 @@ class TerminalBenchSuite(Suite):
 
         return shutil.which("docker") is not None
 
+    # -- preparation -----------------------------------------------------
+
+    def apptainer_dataset_dir(self, run_dir):
+        """The staged, SIF-pointing dataset: ``<run>/apptainer/<dataset-slug>``."""
+        return os.path.join(run_dir, "apptainer",
+                            _dataset_slug(self._spec_or_none()))
+
+    def prepare_command(self, trial, run_dir):
+        """Build the derived Apptainer images a Terminal-Bench run needs.
+
+        Only for ``runtime=apptainer``: on Docker, harbor converts/builds images
+        itself and there is nothing to prepare. ``None`` means "nothing to do",
+        which is what ``benchmarks prepare`` reports.
+        """
+        if (trial.container_runtime or "docker") != "apptainer":
+            return None
+        spec = trial.suite
+        options = spec.options or {}
+        argv = [
+            _python(), "-m", "benchmarks.suites.tb_apptainer", "prepare",
+            "--out", self.apptainer_dataset_dir(run_dir),
+            "--sif-cache", str(options.get("singularity_image_cache_dir")
+                               or _default_sif_cache()),
+            "--jobs", str(int(options.get("sif_build_jobs", 2))),
+        ]
+        if options.get("exported_tasks_dir"):
+            argv += ["--tasks-dir", str(options["exported_tasks_dir"])]
+        else:
+            # `harbor download <dataset> --export` is the only way to obtain the
+            # task files; the export is cached under a git-ignored directory.
+            argv += ["--dataset", self.dataset_label(spec),
+                     "--download-dir", os.path.join(_cache_root(), "tb")]
+        if trial.limit:
+            argv += ["--limit", str(int(trial.limit))]
+        for task_id in spec.task_ids:
+            argv += ["--task-id", str(task_id)]
+        if options.get("bake_mini_code", True):
+            argv += ["--mini-code", _mini_code_dir()]
+        return PlannedCommand(label="terminal-bench: derive Apptainer images",
+                              argv=argv,
+                              timeout=options.get("sif_build_timeout_sec"))
+
+    def _spec_or_none(self):
+        return getattr(self, "spec", None)
+
     # -- commands --------------------------------------------------------
 
     def commands(self, trial, workspace, run_dir, adapter):
         if self.harness(trial.suite) == "harbor":
-            return [self._harbor_command(trial, workspace, run_dir, adapter)]
+            commands = []
+            if self._needs_apptainer_prepare(trial, run_dir):
+                # Deriving the images is part of the run, not a separate chore:
+                # `run` on a Docker-free machine has to work in one command.
+                commands.append(self.prepare_command(trial, run_dir))
+            commands.append(self._harbor_command(trial, workspace, run_dir,
+                                                 adapter))
+            return commands
         return [self._tb_command(trial, workspace, run_dir, adapter)]
+
+    def _needs_apptainer_prepare(self, trial, run_dir):
+        """True when this trial runs under Apptainer and has no staged dataset."""
+        if (trial.container_runtime or "docker") != "apptainer":
+            return False
+        staged = self.apptainer_dataset_dir(run_dir)
+        if not os.path.isdir(staged):
+            return True
+        return not any(os.path.isfile(os.path.join(staged, name, "task.toml"))
+                       for name in os.listdir(staged))
+
+    def _harbor_dataset_args(self, trial, run_dir):
+        """``-d dataset@version`` or, under Apptainer, ``-p <staged dataset>``.
+
+        Harbor's registry copy is what it would download on Docker. Under
+        Apptainer each task needs its derived SIF, and ``task.toml`` in the staged
+        copy points at it -- so the run targets the staged directory instead.
+        """
+        spec = trial.suite
+        if (trial.container_runtime or "docker") != "apptainer":
+            return ["-d", self.dataset_label(spec)]
+        return ["-p", self.apptainer_dataset_dir(run_dir)]
 
     def _harbor_command(self, trial, workspace, run_dir, adapter):
         """``harbor run ...`` -- one job per trial; harbor parallelises inside."""
@@ -143,7 +218,7 @@ class TerminalBenchSuite(Suite):
         job_name = trial.run_id
 
         argv = [self.binary(spec) or "harbor", "run",
-                "-d", self.dataset_label(spec),
+                *self._harbor_dataset_args(trial, run_dir),
                 "--jobs-dir", str(jobs_dir),
                 "--job-name", job_name]
 
@@ -188,9 +263,15 @@ class TerminalBenchSuite(Suite):
         for kwarg in options.get("environment_kwargs") or ():
             argv += ["--environment-kwarg", str(kwarg)]
         if env_backend == "singularity" and not options.get("environment_kwargs"):
-            cache = options.get("singularity_image_cache_dir")
+            cache = options.get("singularity_image_cache_dir") or _default_sif_cache()
             argv += ["--environment-kwarg",
-                     f"singularity_image_cache_dir={cache or os.path.join(run_dir, 'sif')}"]
+                     f"singularity_image_cache_dir={cache}"]
+            # Harbor defaults to no_mount=home,tmp,bind-paths, and 'bind-paths'
+            # also suppresses the /etc/resolv.conf bind -> the container has no
+            # DNS, so apt/curl (the verifier!) fail with "could not resolve".
+            argv += ["--environment-kwarg",
+                     f"singularity_no_mount="
+                     f"{options.get('singularity_no_mount', 'home,tmp')}"]
         # Never wait for a human: a benchmark job starts unattended.
         argv += ["--yes"]
 
@@ -277,6 +358,34 @@ class TerminalBenchSuite(Suite):
                    f"agent: {trial.agent.label}"],
         )
 
+    def describe(self, trial, adapter, run_dir):
+        """What a plan shows when the trial cannot be expanded yet.
+
+        Under Apptainer the missing piece is usually the staged SIF dataset, so the
+        plan prints the two commands that create it and then use it, rather than
+        the bare "would run" line.
+        """
+        if (trial.container_runtime or "docker") != "apptainer":
+            return [f"would run {self.name} with {adapter.label}"]
+        lines = []
+        try:
+            prepare = self.prepare_command(trial, run_dir)
+        except SuiteError as e:
+            return [f"! {e}"]
+        if prepare is not None:
+            lines.append("1. " + prepare.rendered())
+        stage = len(lines) + 1
+        lines += [
+            f"{stage}. harbor run -p {self.apptainer_dataset_dir(run_dir)} "
+            f"--env singularity "
+            f"--environment-kwarg singularity_image_cache_dir=<cache> "
+            f"--environment-kwarg singularity_no_mount=home,tmp "
+            f"-a <agent> -m <provider>/<model> --n-tasks "
+            f"{trial.limit or '<n>'} --yes",
+            "   (each staged task.toml points docker_image at its derived .sif)",
+        ]
+        return lines
+
     # -- results ---------------------------------------------------------
 
     def collect(self, run_dir, run_id=None):
@@ -323,9 +432,30 @@ class TerminalBenchSuite(Suite):
         return outcomes
 
     def _collect_harbor_stats(self, payload):
+        """Outcomes from harbor's per-eval summary (no per-trial records).
+
+        Harbor writes ``trial_results`` only when the trials ran far enough to
+        produce them; a job that finished has its rewards and exceptions in
+        ``stats.evals`` instead. Both are results: a 0.0 reward is a real
+        (unresolved) outcome, and an exception is an error.
+        """
         outcomes = []
         stats = payload.get("stats") or {}
         for eval_name, entry in (stats.get("evals") or {}).items():
+            # reward_stats is <metric> -> <reward value> -> [task names].
+            for metric, values in (entry.get("reward_stats") or {}).items():
+                for reward, task_names in (values or {}).items():
+                    try:
+                        value = float(reward)
+                    except (TypeError, ValueError):
+                        continue
+                    for task_name in task_names or []:
+                        outcomes.append(TrialOutcome(
+                            suite=self.name, instance_id=str(task_name),
+                            outcome=(TrialOutcome.RESOLVED if value >= 1.0
+                                     else TrialOutcome.UNRESOLVED),
+                            detail=f"{metric}={value}",
+                            extra={"eval": eval_name, metric: value}))
             for exception_type, task_names in (entry.get("exception_stats") or {}).items():
                 for task_name in task_names or []:
                     outcomes.append(TrialOutcome(
@@ -335,8 +465,7 @@ class TerminalBenchSuite(Suite):
                                f"(eval {eval_name})",
                         extra={"eval": eval_name,
                                "exception_type": exception_type}))
-            if not entry.get("exception_stats") and not entry.get("n_errors"):
-                continue
+
         if not outcomes and stats.get("n_errored_trials"):
             outcomes.append(TrialOutcome(
                 suite=self.name, instance_id="<unknown>",
@@ -376,6 +505,38 @@ class TerminalBenchSuite(Suite):
             path = os.path.join(base, run_id, "results.json")
             return path if os.path.isfile(path) else None
         return _newest(os.path.join(base, "*", "results.json"))
+
+
+def _python():
+    """The interpreter running the harness (same one harbor is installed into)."""
+    import sys
+
+    return sys.executable
+
+
+def _dataset_slug(spec):
+    """A filesystem-safe name for a dataset (``terminal-bench-2.0``)."""
+    if spec is None:
+        return "dataset"
+    name = str(getattr(spec, "dataset", "") or "dataset").replace("/", "_")
+    version = getattr(spec, "version", None)
+    clean = f"{name}-{version}" if version else name
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", clean)
+
+
+def _cache_root():
+    """Git-ignored cache shared by datasets and derived images."""
+    return os.environ.get("BENCH_CACHE") or os.path.join("benchmarks", ".cache")
+
+
+def _default_sif_cache():
+    """A cache directory that survives between runs (git-ignored)."""
+    return os.environ.get("BENCH_SIF_CACHE") or os.path.join(_cache_root(), "sif")
+
+
+def _mini_code_dir():
+    """The ``mini_code_cli`` package to bake into the derived SIF."""
+    return os.path.join(_repo_root(), "mini_code_cli")
 
 
 def _repo_root():
