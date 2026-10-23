@@ -297,6 +297,51 @@ grading is backend-agnostic, so the harness only needed its transport replaced. 
 acceptance test: the *gold* patch for `astropy__astropy-12907` scores
 `resolved: true` through `--backend apptainer` with no Docker daemon on the machine.
 
+### What the Docker-free path actually costs (measured)
+
+The first end-to-end run of a *Dockerfile-only* task on this host — the case that
+needs an image built without a Docker daemon at all — finished like this:
+
+```bash
+harbor run -p benchmarks/runs/localtask/bn-fit-modify -a oracle \
+    --env singularity --environment-kwarg singularity_image_cache_dir=$SIF_CACHE
+# reward 1.0, 9/9 verifier tests, 74 s wall clock
+```
+
+Getting there exposed three bugs worth recording, because each one *looked* like a
+harness failure and was not:
+
+- **`WORKDIR` is a working directory, not a `mkdir`.** The Dockerfile translation
+  emitted `mkdir -p /app` and nothing else, so the task's own
+  `RUN curl -o bn_sample_10k.csv` wrote the dataset to `/`, and a perfectly correct
+  oracle solution then failed 9 verifier tests on the missing file. `%post` is one
+  shell, so the translation now emits `cd /app` too. The image cache key is the
+  *translated definition*, so a translation fix cannot silently reuse a stale `.sif`.
+- **A quiet trial is not a stalled trial.** uvicorn's access log is off (it floods
+  the trial log), so "server up, nothing happens" was unattributable. The server now
+  appends one line per request to `/staging/harbor-requests.log` — on the host, read-
+  able from outside a trial that is still running — and `HARBOR_SERVER_ACCESS_LOG=1`
+  turns the uvicorn log back on.
+- **Apptainer's writable overlay is 64 MiB.** `apt-get install nodejs` inside a
+  `.sif` fails with `unable to move aside './etc/logrotate.d' ... Invalid
+  cross-device link` (dpkg renames a directory that lives in the read-only lower
+  layer), and `npm install -g` needs ~300 MiB. Claude Code is therefore installed
+  from the static Node tarball into `/opt/node`, and for SWE-bench instances the
+  agent's npm tree is installed into a **bind-mounted** host directory mounted at
+  `/opt/agent`, with only the `/usr/local/bin` symlinks written to the overlay. Those
+  symlinks do not survive between `apptainer exec` calls, so the agent command puts
+  `/opt/agent/bin` on `PATH` itself.
+
+Claude Code against vLLM needs no proxy: vLLM 0.30 answers `POST /v1/messages`
+(Anthropic Messages API) directly, so `ANTHROPIC_BASE_URL=http://127.0.0.1:30000`
+and any `ANTHROPIC_API_KEY` are enough — Apptainer shares the host network namespace,
+which is why the loopback address works here and would not under Docker. One
+correction was needed in the fork: `--model anthropic/<id>` sent the routing prefix
+to the endpoint (`... may not exist or you may not have access`), and the prefix is
+now stripped when a custom base URL is set. With that, a terminal-bench run streamed
+49 assistant turns and 8.8 MB of transcript before hitting its own 900 s budget — an
+authentication failure, at last, is not what stops it.
+
 ## 9. Safety and habits
 
 * **`plan` first.** It prints the exact argv (never a shell string), the environment variable

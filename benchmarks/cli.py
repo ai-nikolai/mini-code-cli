@@ -15,6 +15,7 @@ human drives against a GPU host, and a stack trace is not an error message.
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from . import __version__, docker as docker_module, models as models_module
@@ -129,6 +130,7 @@ def _dispatch(args, parser):
     if args.command == "prepare":
         return _cmd_prepare(config, trials)
     if args.command == "run":
+        _reuse_prepared_inputs(config, trials)
         if args.dry_run:
             Runner(config, dry_run=True).plan(trials)
             return EXIT_OK
@@ -183,6 +185,23 @@ def _cmd_validate(config, allow_host):
           f"setting(s), {len(config.models)} model(s), "
           f"{len(dict.fromkeys(problems))} problem(s)")
     return EXIT_OK if not problems else EXIT_PROBLEM
+
+
+def _reuse_prepared_inputs(config, trials):
+    """Copy inputs from an earlier ``prepare`` into the run's own directory.
+
+    ``prepare`` materialises per-trial datasets under ``_prepare/<trial>/`` while
+    a run reads them from ``<run-dir>/`` -- so the documented
+    ``prepare`` then ``run`` sequence used to fail with "no instance list".
+    """
+    for trial in trials:
+        prepared = os.path.join(config.output_dir, "_prepare", trial.run_id,
+                                "instances.jsonl")
+        target = os.path.join(config.output_dir, trial.run_id, "instances.jsonl")
+        if os.path.isfile(prepared) and not os.path.isfile(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(prepared, target)
+            print(f"reusing prepared instances: {prepared} -> {target}")
 
 
 def _cmd_prepare(config, trials):

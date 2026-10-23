@@ -10,6 +10,13 @@ Unlike Claude Code, Pi can talk to a local vLLM/SGLang server directly: its
 The adapter therefore never downgrades to a hosted provider silently -- if the
 configured model is not an OpenAI-compatible endpoint, preflight says so.
 """
+from . import container_setup
+import json
+import os
+
+_CONFIGS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "configs")
+
 from .base import AgentAdapter, which
 
 
@@ -75,10 +82,40 @@ class PiAgent(AgentAdapter):
         return problems
 
     def install_commands(self):
-        return [
-            "apt-get update && apt-get install -y curl",
-            "curl -fsSL https://pi.dev/install.sh | sh",
-        ]
+        """Node + ``pi`` from npm (no apt: the .sif overlay breaks dpkg)."""
+        return container_setup.node_commands() + container_setup.npm_global_commands(
+            "@earendil-works/pi-coding-agent", "pi")
+
+    def container_mounts(self):
+        """No file to mount: the provider list is written per run (see below).
+
+        Pi only interpolates ``$VAR`` inside ``apiKey``; a ``baseUrl`` written as
+        ``$PI_BENCH_BASE_URL/v1`` is rejected with "Invalid URL". So the models
+        file has to carry the endpoint literally, which means generating it.
+        """
+        return []
+
+    def container_env(self, model):
+        env = dict(self.env(model))
+        env["PI_CODING_AGENT_DIR"] = f"{container_setup.PREFIX}/pi-config"
+        return env
+
+    def container_setup_files(self, model):
+        """Concrete ``models.json`` for this run's endpoint (literal base URL)."""
+        with open(os.path.join(_CONFIGS, "pi_models.json"), encoding="utf-8") as handle:
+            document = json.load(handle)
+        root = str(model.base_url).rstrip("/").removesuffix("/v1")
+        provider = self.options().get("provider", "local")
+        entry = document["providers"].setdefault(provider, {})
+        entry["baseUrl"] = f"{root}/v1"
+        entry["api"] = "openai-completions"
+        entry["apiKey"] = "sk-no-key-required"
+        entry.setdefault("models", [{"id": model.model, "name": model.model,
+                                     "input": ["text"], "contextWindow": 131072}])
+        for spec in entry["models"]:
+            spec["id"] = model.model
+        return {f"{container_setup.PREFIX}/pi-config/models.json":
+                json.dumps(document, indent=2) + "\n"}
 
     def harbor_selection(self, model):
         # Harbor ships a Pi agent, and it already knows how to point Pi at a

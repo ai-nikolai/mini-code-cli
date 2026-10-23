@@ -85,6 +85,29 @@ class AgentAdapter:
         """Environment variables the agent needs (names come from the config)."""
         return {}
 
+    def container_mounts(self):
+        """Host paths the command needs *inside* a benchmark container.
+
+        ``(host, target)`` pairs, handed to the runtime as ``-v``/``--bind``.
+        Apptainer does not mount the working directory the way docker does, so an
+        adapter whose code lives in this repository has to say so explicitly,
+        otherwise the in-container run dies with "No module named ...".
+        """
+        return ()
+
+    def container_env(self, model):
+        """Env for the in-container invocation (``env`` plus container paths)."""
+        return dict(self.env(model))
+
+    def container_setup_files(self, model):
+        """Files to write under the tools mount before the agent runs.
+
+        ``{container_path: contents}``; the suite materialises them on the host
+        directory that is bind-mounted at ``/opt/agent``. An adapter needs this
+        when its CLI insists on a config file with the endpoint spelled out.
+        """
+        return {}
+
     def preflight(self, model, require_binary=True):
         """Return a list of problems that would stop this agent from running.
 

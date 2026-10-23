@@ -17,6 +17,7 @@ host network namespace, so ``--network`` has no equivalent either.
 Nothing here raises: a machine with no runtime at all must still be able to
 ``plan``, and a report must still be readable.
 """
+import os
 import shutil
 import subprocess
 
@@ -113,6 +114,10 @@ def container_argv(name, image, command, container_name=None, env=None,
     command = [str(part) for part in command]
     env = dict(env or {})
     limits = dict(limits or {})
+    # Commands run with cwd=the run directory, so a relative host path would be
+    # resolved twice (apptainer: "mount .../trials/x/benchmarks/runs/..."), and
+    # the mount would not exist.
+    mounts = [(os.path.abspath(str(host)), str(target)) for host, target in mounts]
     name = resolve(name)
 
     if name == "docker":
@@ -142,7 +147,10 @@ def container_argv(name, image, command, container_name=None, env=None,
 
     # apptainer (and, by name, singularity: the two CLIs are interchangeable)
     binary = "apptainer" if name in ("apptainer", None) else str(name)
-    argv = [binary, "exec", "--cleanenv"]
+    # A .sif is read-only: without a writable overlay every in-container write
+    # fails ("/testbed/.git/index.lock: Read-only file system"), which is *every*
+    # agent run -- it edits the checkout -- and every `git add -A` patch capture.
+    argv = [binary, "exec", "--cleanenv", "--writable-tmpfs"]
     if gpus:
         argv.append("--nv")
     if workdir:
