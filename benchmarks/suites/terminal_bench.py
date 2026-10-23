@@ -29,6 +29,7 @@ import json
 import os
 import re
 
+from .. import forks as forks_module
 from .. import runtime as runtime_module
 from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
 
@@ -55,8 +56,21 @@ class TerminalBenchSuite(Suite):
         return "harbor"
 
     def binary(self, spec=None):
+        """The harness executable.
+
+        ``options.harbor_bin`` pins it explicitly, which is what a cluster needs:
+        harbor usually lives in its own environment (it is heavy, and its
+        dependencies should not leak into the benchmark's), so it is often not on
+        ``PATH``. The fork check asks *this* script's interpreter what it imports,
+        so the answer has to be the script that will actually run.
+        """
         from ..agents.base import which
 
+        spec = spec if spec is not None else getattr(self, "spec", None)
+        configured = ((getattr(spec, "options", None) or {})
+                      .get("harbor_bin"))
+        if configured:
+            return os.path.expanduser(str(configured))
         if self.harness(spec) == "harbor":
             return which("harbor") or which("hr")
         return which("tb") or which("terminal-bench")
@@ -120,6 +134,22 @@ class TerminalBenchSuite(Suite):
         if self.harness(spec) == "harbor":
             notes.append("Terminal-Bench 2.x is executed by harbor; `harbor "
                          "datasets list` shows the dataset@version strings")
+            info = forks_module.state("harbor")
+            if forks_module.cli_uses_fork(binary):
+                # The CLI runs in the environment that owns the script, which is
+                # not necessarily this interpreter -- so ask that one.
+                notes.append(
+                    f"using our harbor checkout ({info['branch']} "
+                    f"{info['sha']}): a task that ships only a Dockerfile has "
+                    f"its .sif built on demand, so no staging is needed")
+            elif info["present"] and binary:
+                notes.append(
+                    f"{binary} imports harbor from "
+                    f"{forks_module.cli_origin(binary) or 'an unknown location'}, "
+                    f"not from {info['path']}: the unpatched release has no "
+                    f"Dockerfile-only support, so the staging step runs. "
+                    f"`pip install -e harbor --no-deps` in that environment to "
+                    f"switch")
         return notes
 
     @staticmethod
@@ -187,9 +217,22 @@ class TerminalBenchSuite(Suite):
             return commands
         return [self._tb_command(trial, workspace, run_dir, adapter)]
 
+    def _harbor_has_dockerfile_support(self, spec):
+        """Whether the harbor that will run supports Dockerfile-only tasks.
+
+        Asked of the script's own interpreter: harbor is usually in another
+        environment, so "can *this* process import harbor?" is the wrong question.
+        """
+        return forks_module.cli_uses_fork(self.binary(spec))
+
     def _needs_apptainer_prepare(self, trial, run_dir):
         """True when this trial runs under Apptainer and has no staged dataset."""
         if (trial.container_runtime or "docker") != "apptainer":
+            return False
+        if self._harbor_has_dockerfile_support(trial.suite):
+            # The patched harbor builds a task's .sif from its Dockerfile on
+            # demand, so there is nothing to stage and no container alias to
+            # maintain: `harbor run -d terminal-bench@2.0` is the whole story.
             return False
         staged = self.apptainer_dataset_dir(run_dir)
         if not os.path.isdir(staged):
@@ -206,6 +249,8 @@ class TerminalBenchSuite(Suite):
         """
         spec = trial.suite
         if (trial.container_runtime or "docker") != "apptainer":
+            return ["-d", self.dataset_label(spec)]
+        if self._harbor_has_dockerfile_support(spec):
             return ["-d", self.dataset_label(spec)]
         return ["-p", self.apptainer_dataset_dir(run_dir)]
 

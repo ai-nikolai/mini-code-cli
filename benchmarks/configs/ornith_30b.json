@@ -46,7 +46,9 @@
       "options": {
         "harness": "harbor",
         "n_concurrent": 1,
-        "_provider": "derived per model: anthropic/ for the Claude Code model, openai/ otherwise"
+        "_provider": "derived per model: anthropic/ for the Claude Code model, openai/ otherwise",
+        "harbor_bin": "~/miniconda3/envs/hb/bin/harbor",
+        "_harbor_bin": "the env that owns harbor; it must be the one with `pip install -e harbor`"
       }
     },
     {

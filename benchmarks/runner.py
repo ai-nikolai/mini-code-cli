@@ -37,6 +37,7 @@ import uuid
 
 from . import config as config_module
 from . import docker as docker_module
+from . import forks as forks_module
 from . import runtime as runtime_module
 from .agents import get_adapter
 from .results import read_results, summarise, write_results, write_summary
@@ -310,6 +311,9 @@ class Runner:
             "runtime_version": runtime_module.version(
                 self.config.resolved_runtime() or ""),
             "image_digests": digests,
+            # Which patched upstream checkouts the run actually imported: a result
+            # is only reproducible if the fork state travels with it.
+            "forks": forks_module.summary(),
             "config": self.config.to_dict(),
             "config_source": self.config.source,
             "suites": sorted({t.suite.name for t in trials}),

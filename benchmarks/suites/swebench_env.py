@@ -26,6 +26,13 @@ import sys
 INSTANCE_FIELDS = ("instance_id", "repo", "base_commit", "problem_statement",
                    "environment_setup_commit", "version", "hints_text", "created_at")
 
+#: Fields the *grader* needs, and nothing else: `make_test_spec` wants the image,
+#: the test lists, the parser/eval type and the precomputed eval script. They are
+#: written to a sidecar file so the agent-facing list stays small -- the eval
+#: script alone is ~50KB per instance.
+GRADING_FIELDS = ("instance_id", "repo", "version", "image", "log_parser",
+                  "eval_type", "eval_script", "FAIL_TO_PASS", "PASS_TO_PASS")
+
 DEFAULT_DATASET = "SWE-bench/SWE-bench_Verified"
 DEFAULT_SPLIT = "test"
 
@@ -34,7 +41,8 @@ def load_instances(dataset=DEFAULT_DATASET, split=DEFAULT_SPLIT, revision=None,
                    limit=None, from_file=None):
     """Return a list of instance dicts, from a file or the pinned dataset."""
     if from_file:
-        return read_instances_file(from_file, limit)
+        instances = read_instances_file(from_file, limit)
+        return instances, [instance for instance in instances]
     try:
         from datasets import load_dataset  # heavy, optional: the swebench extra
     except ImportError as e:  # pragma: no cover - depends on the environment
@@ -43,13 +51,15 @@ def load_instances(dataset=DEFAULT_DATASET, split=DEFAULT_SPLIT, revision=None,
             "(pip install 'swebench>=5'); alternatively pass --from-file with a "
             "JSONL of instances") from e
     loaded = load_dataset(dataset, split=split, revision=revision)
-    instances = []
+    instances, grading = [], []
     for row in loaded:
         instances.append({key: row.get(key) for key in INSTANCE_FIELDS
                           if row.get(key) is not None})
+        grading.append({key: row.get(key) for key in GRADING_FIELDS
+                        if row.get(key) is not None})
         if limit and len(instances) >= int(limit):
             break
-    return instances
+    return instances, grading
 
 
 def read_instances_file(path, limit=None):
@@ -66,6 +76,14 @@ def read_instances_file(path, limit=None):
         if "instance_id" not in instance:
             raise SystemExit(f"{path}: an instance has no instance_id")
     return instances
+
+
+def grading_path(instances_path, override=None):
+    """Where the grader's sidecar lives: explicit, else next to the list."""
+    if override:
+        return override
+    root, ext = os.path.splitext(instances_path)
+    return f"{root}.grading{ext or '.jsonl'}"
 
 
 def write_instances(instances, path):
@@ -123,6 +141,10 @@ def main(argv=None):
     instances.add_argument("--from-file", default=None,
                            help="offline JSONL/JSON of instances instead of HF")
     instances.add_argument("--out", required=True)
+    instances.add_argument(
+        "--grading-out", default=None,
+        help="sidecar JSONL with the fields the grader needs (image, eval_script, "
+             "FAIL_TO_PASS, PASS_TO_PASS); defaults to <out>.grading.jsonl")
 
     predictions = sub.add_parser("predictions",
                                  help="collect patches into predictions.jsonl")
@@ -133,10 +155,11 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     if args.command == "instances":
-        found = load_instances(dataset=args.dataset, split=args.split,
-                               revision=args.revision, limit=args.limit,
-                               from_file=args.from_file)
+        found, grading = load_instances(dataset=args.dataset, split=args.split,
+                                        revision=args.revision, limit=args.limit,
+                                        from_file=args.from_file)
         write_instances(found, args.out)
+        write_instances(grading, grading_path(args.out, args.grading_out))
         print(f"instances: wrote {len(found)} to {args.out}")
         return 0
     write_predictions(args.instances, args.patches_dir, args.model_name, args.out)
