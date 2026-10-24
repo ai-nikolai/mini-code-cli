@@ -1,0 +1,102 @@
+{
+  "_comment": [
+    "Terminal-Bench 2.1, run from the local task checkout.",
+    "",
+    "The harbor registry still publishes terminal-bench@2.0 only, so 2.1 is not",
+    "reachable with `-d`. Every 2.1 task does ship its own Dockerfile, and harbor",
+    "runs any directory of tasks with `-p`, so `options.dataset_dir` points the",
+    "suite at the checkout: harbor builds each task's .sif from its Dockerfile and",
+    "the registry copy is never involved.",
+    "",
+    "Two things make those builds usable on this machine. harbor's Dockerfile->def",
+    "translation appends the interpreter + /opt/harbor-server venv to %post, so a",
+    "task image that never mentions python3 (gpt2-codegolf, adaptive-rejection-",
+    "sampler) still gets one *at build time*; the exec-time bootstrap in",
+    "bootstrap.sh would instead apt-install into a 64 MiB tmpfs overlay and die",
+    "with EnvironmentStartTimeoutError. And the 2.1 tasks budget an hour of agent",
+    "time each ([agent] timeout_sec = 3600), which is what agent_seconds mirrors",
+    "here instead of the 900 s that cut earlier runs short."
+  ],
+  "output_dir": "benchmarks/runs",
+  "concurrency": 1,
+  "runtime": "apptainer",
+  "timeouts": {
+    "instance_seconds": 7200,
+    "agent_seconds": 3600,
+    "test_seconds": 3600
+  },
+  "env": {
+    "OPENAI_API_KEY": "local-vllm",
+    "ANTHROPIC_API_KEY": "local-vllm",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:30000",
+    "ANTHROPIC_MODEL": "ornith-ai/Ornith-1.5-35B-A3B"
+  },
+  "models": [
+    {
+      "name": "ornith-35b-a3b",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "openai"
+    },
+    {
+      "name": "ornith-35b-a3b-anthropic",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY"
+    }
+  ],
+  "agents": [
+    {
+      "name": "mini-code",
+      "settings": [
+        "swe"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
+    },
+    {
+      "name": "pi",
+      "settings": [
+        "default"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
+    },
+    {
+      "name": "claude-code",
+      "settings": [
+        "bypass-permissions"
+      ],
+      "models": [
+        "ornith-35b-a3b-anthropic"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "name": "terminal-bench",
+      "dataset": "terminal-bench",
+      "version": "2.1",
+      "limit": 3,
+      "options": {
+        "harness": "harbor",
+        "n_concurrent": 1,
+        "dataset_dir": "terminal-bench-2-1",
+        "task_ids": [
+          "adaptive-rejection-sampler",
+          "bn-fit-modify",
+          "cancel-async-tasks"
+        ],
+        "sif_build_timeout_sec": 3600,
+        "agent_timeout_sec": 3600,
+        "test_timeout_sec": 3600,
+        "harbor_bin": "~/miniconda3/envs/hb/bin/harbor",
+        "environment_build_timeout_multiplier": 6,
+        "agent_setup_timeout_multiplier": 6
+      }
+    }
+  ]
+}

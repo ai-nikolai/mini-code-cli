@@ -317,7 +317,12 @@ class SweBenchSuite(Suite):
                 label=f"swebench: capture patch {instance_id}",
                 argv=runtime_module.container_argv(
                     container, image,
-                    ["bash", "-lc", "git add -A && git diff --cached > /out/model.patch"],
+                    ["bash", "-lc",
+                     # The agent's own state directory (e.g. `.mini/`) is not
+                     # part of the fix, and a patch made of it is unreviewable and
+                     # always unresolved. Scope the capture to the checkout.
+                     "git add -A -- . ':!.mini' ':!.claude' ':!node_modules' "
+                     "&& git diff --cached > /out/model.patch"],
                     limits=trial.docker,
                     mounts=[(workdir, "/out")]
                     + ([(workspace, "/testbed")] if container == "apptainer" else []),
@@ -536,6 +541,13 @@ def _short(instance_id):
 
 
 def _problem_statement(instance):
+    """The dataset's own text: the preamble is the agents' shared ``agent.md``.
+
+    Every adapter attaches ``benchmarks/agents/agent.md`` through its native
+    mechanism (see :mod:`benchmarks.agents.preamble`), so nothing about where the
+    checkout lives or how the fix is graded is repeated here -- one file to edit,
+    and all three agents are told the same thing.
+    """
     return str(instance.get("problem_statement") or instance.get("text") or "")
 
 

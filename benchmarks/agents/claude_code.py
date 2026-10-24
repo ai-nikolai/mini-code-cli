@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 
 from . import container_setup
+from .preamble import load_agent_preamble
 from .base import AgentAdapter, which
 
 # The tool allowlist Terminal-Bench's claude-code agent uses; kept identical so
@@ -60,6 +61,12 @@ class ClaudeCodeAgent(AgentAdapter):
         ]
         if options.get("bypass_permissions"):
             argv += ["--permission-mode", "bypassPermissions"]
+        # `--append-system-prompt` reads *text*, not a path: the shared
+        # benchmarks/agents/agent.md is inlined here so Claude Code receives the
+        # same instructions mini-code reads from that file.
+        _, preamble = load_agent_preamble()
+        if preamble.strip():
+            argv += ["--append-system-prompt", preamble]
         argv += ["--", prompt] if _needs_separator(prompt) else [prompt]
         return argv
 

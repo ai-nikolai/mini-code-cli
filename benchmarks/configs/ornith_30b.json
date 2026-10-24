@@ -59,6 +59,7 @@
       "options": {
         "max_workers": 1,
         "test_timeout_sec": 1800,
+        "instance_seconds": 3600,
         "skip_evaluation": false
       }
     }
@@ -84,7 +85,7 @@
     {
       "name": "mini-code",
       "settings": [
-        "default"
+        "swe"
       ],
       "models": [
         "ornith-35b-a3b"

@@ -4,6 +4,9 @@ Adding an agent means adding one module and one line here (or a ``command`` entr
 in the config); nothing in the suites needs to know about it, which is what keeps
 the benchmark side agent-agnostic.
 """
+import os
+
+from .preamble import AGENT_MD, load_agent_preamble
 from .base import AgentAdapter, AgentError
 from .claude_code import ClaudeCodeAgent
 from .command import CommandAgent
@@ -21,10 +24,10 @@ ADAPTERS = {
 }
 
 __all__ = [
-    "ADAPTERS", "AgentAdapter", "AgentError", "ClaudeCodeAgent",
+    "AGENT_MD", "ADAPTERS", "AgentAdapter", "AgentError", "ClaudeCodeAgent",
     "CommandAgent", "MiniCodeAgent", "MockAgent", "PiAgent", "get_adapter",
+    "load_agent_preamble",
 ]
-
 
 def get_adapter(spec):
     """Build the adapter for an :class:`~benchmarks.config.AgentSpec`.
