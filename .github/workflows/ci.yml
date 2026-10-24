@@ -29,6 +29,32 @@ jobs:
       - name: Test
         run: python -m unittest discover -s tests -p "test_*.py"
 
+  shared-3.12:
+    # The claim the README makes: mini-code and harbor can share one environment
+    # on 3.12. harbor (the Terminal-Bench harness) requires >= 3.12, so this is
+    # the only job where both are installed side by side -- a dependency clash
+    # (requests, pydantic, httpx) or a namespace collision would surface here
+    # rather than on a user's machine. Kept to the published harbor release so
+    # the job does not depend on a git branch of ours.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install mini-code-cli and harbor together
+        run: |
+          python -m pip install --upgrade pip
+          pip install "harbor>=0.24"
+          pip install -e .
+
+      - name: Both import, and the console script runs
+        run: |
+          python -c "import mini_code_cli, harbor; print(mini_code_cli.__file__, harbor.__file__)"
+          mini-code --help > /dev/null
+
   packaging:
     # Build the distributions on every push so a packaging break (a module left
     # out of the wheel, broken metadata, a missing asset) shows up here rather

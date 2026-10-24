@@ -27,7 +27,8 @@ pip3 install mini-code-cli
 ```
 
 - **PyPI:** <https://pypi.org/project/mini-code-cli/>
-- **Python:** `>= 3.10` &nbsp;·&nbsp; **runtime dependency:** `requests` only
+- **Python:** `>= 3.10`, tested on 3.10 / 3.12 / 3.13 &nbsp;·&nbsp; **runtime dependency:** `requests` only
+- **Shared environments:** install on 3.12 or newer to live in the same environment as `harbor` (the Terminal-Bench harness, which needs `>= 3.12`) — `pip install mini-code-cli harbor`
 - **From source / contributing:** see [docs/README_DEV.md](docs/README_DEV.md)
 
 ## Quick start

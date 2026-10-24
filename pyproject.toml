@@ -17,6 +17,9 @@ authors = [
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 urls = {"Homepage" = "https://github.com/ai-nikolai/mini-code-cli"}
+# The four version classifiers below are the ones .github/workflows/ci.yml tests
+# (3.10 and 3.13 - the oldest and newest supported - plus 3.12); keep the two in
+# step when the floor moves. Pure Python, so no per-interpreter wheel is needed.
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
