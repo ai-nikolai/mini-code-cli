@@ -713,8 +713,9 @@ class CliTests(unittest.TestCase):
         return code, buffer.getvalue()
 
     def config_path(self, name="offline.json"):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(root, "benchmarks", "configs", name)
+        # benchmarks/tests/ -> benchmarks/ : this file now lives inside the package
+        here = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(here, os.pardir, "configs", name)
 
     def test_list_runs_anywhere(self):
         code, output = self.cli(["list"])

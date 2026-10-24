@@ -8,7 +8,7 @@ format, one agent/setting/model matrix, reproducible run directories with a
 manifest, artifact capture, and a report that can be compared across agents.
 
 Nothing in this package is imported by ``mini_code_cli`` itself, the heavyweight
-dependencies are optional (see ``requirements-bench.txt``), and no dataset, log
+dependencies are optional (see ``benchmarks/requirements.txt``), and no dataset, log
 or run artifact is ever installed with the CLI (``pyproject.toml`` only packages
 ``mini_code_cli*``).
 

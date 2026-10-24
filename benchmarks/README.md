@@ -27,7 +27,7 @@ reader for the results (`python -m benchmarks.analyze`).
 The benchmark dependencies are deliberately *not* part of the CLI install:
 
 ```bash
-python -m pip install -r requirements-bench.txt   # terminal-bench, swebench, vllm, litellm
+python -m pip install -r benchmarks/requirements.txt   # harbor, terminal-bench, swebench, vllm, litellm
 ```
 
 `harbor` needs Python 3.12 while mini-code runs on 3.11, so keeping it in its own environment is
@@ -50,14 +50,17 @@ CLIs, container runtime, API keys) and lists every problem it finds with exit co
 
 ---
 
-## 2. The one command: `./benchmark`
+## 2. The one command: `benchmarks/run_benchmarks.py`
 
 Two commands cover the two datasets, for one agent or all three:
 
 ```bash
-./benchmark --dataset swe-bench        --agent mini-code --mode short_eval
-./benchmark --dataset terminalbench-2.1 --agent all       --mode short
+python benchmarks/run_benchmarks.py --dataset swe-bench        --agent mini-code --mode short_eval
+python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all       --mode short
 ```
+
+It is executable, so `./benchmarks/run_benchmarks.py ...` works too; the file is a
+three-line wrapper around `python -m benchmarks` (same commands, lower-level form).
 
 `--agent all` runs mini-code, pi and claude-code one after another and writes a
 single CSV covering all three. Everything lands in one campaign directory:
@@ -91,7 +94,7 @@ nothing.
 
 ### The same thing one layer down
 
-`./benchmark` is a thin front end over `python -m benchmarks`; the flags below are
+`benchmarks/run_benchmarks.py` is a thin front end over `python -m benchmarks`; the flags below are
 what it composes, and they are still there when you need to change something it does
 not expose:
 
@@ -372,7 +375,7 @@ grading is backend-agnostic, so the harness only needed its transport replaced. 
 acceptance test: the *gold* patch for `astropy__astropy-12907` scores
 `resolved: true` through `--backend apptainer` with no Docker daemon on the machine.
 
-### Measured with the unified `./benchmark` CLI (last run)
+### Measured with the unified entry point (last run)
 
 Same model and host, `--mode short_eval` on three SWE-bench instances
 (`astropy__astropy-12907`, `13033`, `13236`), run id `swe-short-eval4`:
@@ -554,8 +557,10 @@ Requirements and limits of this path:
 ## 12. Our forks, and when they are used
 
 Two behaviours cannot be expressed from outside the tools, so we carry branches of
-them. They are cloned **next to** this repository and git-ignored; the diffs are
-exported into `benchmarks/patches/` so the changes are reviewable here.
+them. Harbor is installed from its branch by `benchmarks/requirements.txt`; the
+task set is cloned into `external_repos/` by
+`benchmarks/scripts/setup_external_repos.sh` (git-ignored — the branches are the
+source of truth, see "Where the two harness forks come from" above).
 
 | checkout | fork | branch | base |
 | --- | --- | --- | --- |
@@ -605,21 +610,63 @@ look identical otherwise:
 branch, SHA and dirty flag, so a result cannot be reproduced against different code
 by accident.
 
-Export the patches (and check the checkouts) with:
+## Where the two harness forks come from
+
+A run needs two repositories that are not this one:
+
+| repository | branch | what it is | how you get it |
+| --- | --- | --- | --- |
+| [`ai-nikolai/harbor`](https://github.com/ai-nikolai/harbor) | `mini-code/apptainer` | the Terminal-Bench 2.x harness, with the Docker-free (Apptainer) backend | `pip install -r benchmarks/requirements.txt` — the requirement pins the branch: `harbor @ git+https://github.com/ai-nikolai/harbor.git@mini-code/apptainer` |
+| [`ai-nikolai/terminal-bench-2-1`](https://github.com/ai-nikolai/terminal-bench-2-1) | `mini-code/bench` | the 2.1 task set (data: one directory per task) | `benchmarks/scripts/setup_external_repos.sh` clones it into `external_repos/`; point a config at it with `dataset_dir` |
+
+**There is no patch step.** Both branches are pushed, so pip and git install the
+exact code a run uses, and `manifest.json` records the branch, SHA and dirty flag
+of every checkout that took part — a result cannot silently be reproduced against
+different code. (The old workflow exported `benchmarks/patches/*.patch` and
+re-applied them to a fresh upstream clone; that only existed because the branches
+were not published yet.)
+
+### Local development: `benchmarks/scripts/setup_external_repos.sh`
+
+Working *on* the harness — rather than just running it — needs the sources on
+disk. One command puts them where the suites look for them:
 
 ```bash
-scripts/export_bench_patches.sh --check     # what is missing, changes nothing
-scripts/export_bench_patches.sh             # benchmarks/patches/<repo>/*.patch
-git -C harbor am benchmarks/patches/harbor/*.patch    # re-apply to a fresh clone
+benchmarks/scripts/setup_external_repos.sh              # harbor + terminal-bench-2-1
+benchmarks/scripts/setup_external_repos.sh --with-main  # ... and mini-code-cli itself
 ```
 
-Push the branches once, so the patches have a home:
+It clones `https://github.com/ai-nikolai/<repo>.git` into `external_repos/` at the
+repository root (git-ignored), checks out the branch from the table above, and
+re-runs safely: an existing clone is fetched instead of re-created, and a checkout
+with uncommitted changes is reported rather than switched out from under you. No
+prompting (`GIT_TERMINAL_PROMPT=0`), no `sudo`, and `--help` documents every knob
+(`EXTERNAL_REPOS_DIR`, `EXTERNAL_REPOS_OWNER`).
+
+### Publishing: `benchmarks/scripts/push_all_repos.sh`
+
+A benchmark change usually spans all three histories, so there is one command to
+publish them:
 
 ```bash
-git -C harbor            push -u origin mini-code/apptainer
-git -C SWE-bench         push -u origin mini-code/apptainer
-git -C terminal-bench-2-1 push -u origin mini-code/bench
+benchmarks/scripts/push_all_repos.sh --dry-run   # print the commands, push nothing
+benchmarks/scripts/push_all_repos.sh             # push
 ```
+
+It finds the forks in `external_repos/` first and then in the sibling checkouts
+(`harbor/`, `terminal-bench-2-1/`), refuses to push a checkout that is on the wrong
+branch or has uncommitted changes, and pushes:
+
+```bash
+git -C .                 push            -u origin feat/benchmarks
+git -C <harbor>          push --force-with-lease -u origin mini-code/apptainer
+git -C <terminal-bench>  push --force-with-lease -u origin mini-code/bench
+```
+
+`--force-with-lease` is deliberate on the two forks: their histories were rewritten
+once (a secret had to be removed from a test fixture in `terminal-bench-2-1`), so a
+plain push would be rejected — and the lease means it still refuses if someone else
+pushed in the meantime.
 
 ### Evidence from this host (no Docker, Apptainer 1.5.0, no root)
 

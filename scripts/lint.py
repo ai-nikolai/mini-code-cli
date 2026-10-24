@@ -35,6 +35,9 @@ DEFAULT_TARGETS = ("mini_code_cli", "benchmarks", "tests", "scripts")
 SKIP_DIRS = {
     "__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     "runs", "results", "datasets", "vendor",
+    # Cloned forks for local development (benchmarks/scripts/setup_external_repos.sh):
+    # someone else's code, not ours to lint.
+    "external_repos",
 }
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

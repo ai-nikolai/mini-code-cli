@@ -1,4 +1,4 @@
-"""The ``./benchmark`` entry point, the shared preamble, and the summary CSV.
+"""The ``benchmarks/run_benchmarks.py`` entry point, the shared preamble, the CSV.
 
 These are the three things a user meets first, so they are pinned by tests: the
 command a person types, the file that tells every agent the same thing, and the
@@ -18,7 +18,8 @@ from benchmarks.config import load_config
 from benchmarks.agents import get_adapter
 
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# benchmarks/tests/ -> repository root
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class PreambleTests(unittest.TestCase):

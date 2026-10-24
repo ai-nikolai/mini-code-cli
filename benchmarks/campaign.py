@@ -1,7 +1,7 @@
-"""The one command a person runs: ``./benchmark``.
+"""The one command a person runs: ``benchmarks/run_benchmarks.py``.
 
-    ./benchmark --dataset swe-bench --agent mini-code --mode short_eval
-    ./benchmark --dataset terminalbench-2.1 --agent all --mode short
+    python benchmarks/run_benchmarks.py --dataset swe-bench --agent mini-code --mode short_eval
+    python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all --mode short
 
 It exists because the harness underneath has three moving parts -- a config, a
 suite and an agent -- and "which config, which limit, which timeouts" is exactly
@@ -63,7 +63,7 @@ ALL_AGENTS = ("mini-code", "pi", "claude-code")
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="./benchmark",
+        prog="benchmarks/run_benchmarks.py",
         description="Run one benchmark: pick a dataset, an agent and a mode.")
     parser.add_argument("--dataset", "-d", required=True, choices=sorted(DATASETS),
                         help="swe-bench | terminalbench-2.1 | terminalbench-2.0")
