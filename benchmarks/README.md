@@ -228,7 +228,7 @@ hard-codes a preamble.
 | Suite | Dataset id | Executed by |
 | --- | --- | --- |
 | `terminal-bench` 2.0 | `terminal-bench@2.0` -- what the harbor registry publishes (`harbor datasets list --legacy`) | `harbor run -d <dataset>@<version>` |
-| `terminal-bench` 2.1 | the local `terminal-bench-2-1/` task checkout (the registry has no `@2.1` yet) | `harbor run -p terminal-bench-2-1`, via `options.dataset_dir` in `benchmarks/configs/terminal_bench_21.json` |
+| `terminal-bench` 2.1 | the local `external_repos/terminal-bench-2-1/` checkout (the registry has no `@2.1` yet) | `harbor run -p external_repos/terminal-bench-2-1`, via `options.dataset_dir` in `benchmarks/configs/terminal_bench_21.json` |
 | `terminal-bench` (`options.harness: "tb"`) | `terminal-bench-core==0.1.1` | `tb run --dataset ...` (Terminal-Bench 1.x) |
 | `swebench` | `SWE-bench/SWE-bench_Verified`, split `test` | `python -m swebench.harness.run_evaluation` |
 
@@ -564,9 +564,9 @@ source of truth, see §13).
 
 | checkout | fork | branch | base |
 | --- | --- | --- | --- |
-| `harbor/` | `ai-nikolai/harbor` | `mini-code/apptainer` | tag `v0.24.0` (`bf8996ef6d97`) |
+| `external_repos/harbor/` | `ai-nikolai/harbor` | `mini-code/apptainer` | tag `v0.24.0` (`bf8996ef6d97`) |
 | `SWE-bench/` | `ai-nikolai/SWE-bench` | `mini-code/apptainer` | `02e7a74ffd0b` (`swebench.__version__ == "5.0.2"`; upstream has no `v5.0.2` tag) |
-| `terminal-bench-2-1/` | `ai-nikolai/terminal-bench-2-1` | `mini-code/bench` | `69671fbaac6d` (the commit harbor's `registry.json` pins for `terminal-bench@2.0`) |
+| `external_repos/terminal-bench-2-1/` | `ai-nikolai/terminal-bench-2-1` | `mini-code/bench` | `69671fbaac6d` (the commit harbor's `registry.json` pins for `terminal-bench@2.0`) |
 
 What each patch changes:
 
@@ -621,7 +621,7 @@ A run needs two repositories that are not this one:
 | repository | branch | what it is | how you get it |
 | --- | --- | --- | --- |
 | [`ai-nikolai/harbor`](https://github.com/ai-nikolai/harbor) | `mini-code/apptainer` | the Terminal-Bench 2.x harness, with the Docker-free (Apptainer) backend | `pip install -r benchmarks/requirements.txt` — the requirement pins the branch: `harbor @ git+https://github.com/ai-nikolai/harbor.git@mini-code/apptainer` |
-| [`ai-nikolai/terminal-bench-2-1`](https://github.com/ai-nikolai/terminal-bench-2-1) | `mini-code/bench` | the 2.1 task set (data: one directory per task) | `benchmarks/scripts/setup_external_repos.sh` clones it into `external_repos/`; point a config at it with `dataset_dir` |
+| [`ai-nikolai/terminal-bench-2-1`](https://github.com/ai-nikolai/terminal-bench-2-1) | `mini-code/bench` | the 2.1 task set (data: one directory per task) | `benchmarks/scripts/setup_external_repos.sh` clones it to `external_repos/terminal-bench-2-1`, which is what the shipped 2.1 config's `dataset_dir` names |
 
 **There is no patch step.** Both branches are pushed, so pip and git install the
 exact code a run uses, and `manifest.json` records the branch, SHA and dirty flag
@@ -632,20 +632,36 @@ were not published yet.)
 
 ### 13.1 Local development: `benchmarks/scripts/setup_external_repos.sh`
 
-Working *on* the harness — rather than just running it — needs the sources on
-disk. One command puts them where the suites look for them:
+Working *on* the harness — or running Terminal-Bench 2.1, whose tasks are data
+rather than a package — needs the sources on disk. One command puts them there:
 
 ```bash
-benchmarks/scripts/setup_external_repos.sh              # harbor + terminal-bench-2-1
-benchmarks/scripts/setup_external_repos.sh --with-main  # ... and mini-code-cli itself
+benchmarks/scripts/setup_external_repos.sh
 ```
 
-It clones `https://github.com/ai-nikolai/<repo>.git` into `external_repos/` at the
-repository root (git-ignored), checks out the branch from the table above, and
-re-runs safely: an existing clone is fetched instead of re-created, and a checkout
-with uncommitted changes is reported rather than switched out from under you. No
-prompting (`GIT_TERMINAL_PROMPT=0`), no `sudo`, and `--help` documents every knob
-(`EXTERNAL_REPOS_DIR`, `EXTERNAL_REPOS_OWNER`).
+That creates
+
+```
+external_repos/harbor/                  @ mini-code/apptainer
+external_repos/terminal-bench-2-1/      @ mini-code/bench     <- dataset_dir of the 2.1 config
+```
+
+and `--with-main` adds `external_repos/mini-code-cli/` (`feat/benchmarks`). The
+directory is git-ignored; re-running is safe (an existing clone is fetched, not
+re-created, and a checkout with uncommitted changes is reported rather than
+switched), and `--help` documents the knobs (`EXTERNAL_REPOS_DIR`,
+`EXTERNAL_REPOS_OWNER`).
+
+`benchmarks/configs/terminal_bench_21.json` points at
+`external_repos/terminal-bench-2-1`, resolved **against the current working
+directory** — so run the entry point from the repository root, or pass an absolute
+path:
+
+```bash
+python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent mini-code --mode short
+python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent mini-code --mode short \
+    --set options.dataset_dir=/abs/path/to/terminal-bench-2-1
+```
 
 ### 13.2 Publishing: `benchmarks/scripts/push_all_repos.sh`
 
@@ -658,7 +674,8 @@ benchmarks/scripts/push_all_repos.sh             # push
 ```
 
 It finds the forks in `external_repos/` first and then in the sibling checkouts
-(`harbor/`, `terminal-bench-2-1/`), refuses to push a checkout that is on the wrong
+(`external_repos/*`, else `harbor/` and `terminal-bench-2-1/` next to this repo),
+refuses to push a checkout that is on the wrong
 branch or has uncommitted changes, and pushes:
 
 ```bash

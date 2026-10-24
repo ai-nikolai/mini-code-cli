@@ -20,11 +20,13 @@ import importlib.util
 import os
 import subprocess
 
-#: checkout directory name (relative to the repository root) -> which upstream
+#: upstream -> the checkouts to look for, in order (first existing wins).
+#: ``external_repos/`` is what benchmarks/scripts/setup_external_repos.sh creates;
+#: the bare names are the older sibling checkouts and are still honoured.
 CHECKOUTS = {
-    "harbor": "harbor",
-    "swebench": "SWE-bench",
-    "terminal_bench": "terminal-bench-2-1",
+    "harbor": ("external_repos/harbor", "harbor"),
+    "swebench": ("external_repos/SWE-bench", "SWE-bench"),
+    "terminal_bench": ("external_repos/terminal-bench-2-1", "terminal-bench-2-1"),
 }
 
 #: the branch we build on, per checkout (see benchmarks/scripts/setup_external_repos.sh)
@@ -37,14 +39,32 @@ BRANCHES = {
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _relative(path):
+    """``path`` relative to the repository root, for readable manifests."""
+    try:
+        return os.path.relpath(path, _REPO_ROOT)
+    except ValueError:              # different drive on Windows
+        return path
+
+
 def repo_root():
     return _REPO_ROOT
 
 
+def checkout_candidates(name):
+    """Every path ``name`` may live at, relative to the repository root."""
+    candidates = CHECKOUTS[name]
+    if isinstance(candidates, str):
+        candidates = (candidates,)
+    return [os.path.join(_REPO_ROOT, candidate) for candidate in candidates]
+
+
 def checkout_path(name):
     """The checkout directory for ``name``, or ``None`` when it is absent."""
-    path = os.path.join(_REPO_ROOT, CHECKOUTS[name])
-    return path if os.path.isdir(path) else None
+    for path in checkout_candidates(name):
+        if os.path.isdir(path):
+            return path
+    return None
 
 
 def _git(path, *args):
@@ -60,10 +80,10 @@ def state(name):
     """``{repo, path, branch, sha, dirty, present}`` for one checkout."""
     path = checkout_path(name)
     if path is None:
-        return {"repo": CHECKOUTS[name], "path": None, "present": False,
-                "branch": None, "sha": None, "dirty": None}
+        return {"repo": _relative(checkout_candidates(name)[0]), "path": None,
+                "present": False, "branch": None, "sha": None, "dirty": None}
     return {
-        "repo": CHECKOUTS[name],
+        "repo": _relative(path),
         "path": path,
         "present": True,
         "branch": _git(path, "rev-parse", "--abbrev-ref", "HEAD"),
