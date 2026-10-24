@@ -31,7 +31,7 @@ import os
 from .. import forks as forks_module
 from . import swebench_apptainer
 from .. import runtime as runtime_module
-from ..agents import container_setup
+from ..agents import container_setup, load_agent_preamble
 from .base import PlannedCommand, Suite, SuiteError, TrialOutcome
 
 #: The repository root, so the shared `.sif` cache can live under `benchmarks/runs`
@@ -229,7 +229,15 @@ class SweBenchSuite(Suite):
             # The agent itself may not exist in the instance image (claude-code,
             # pi): install it once per instance, inside the image, before the run.
             tools_dir = self.ensure_dir(os.path.join(workdir, "agent-tools"))
-            for target, contents in adapter.container_setup_files(trial.model).items():
+            # The shared preamble is mounted at /opt/agent for every agent, so an
+            # argv that names /opt/agent/agent.md (mini-code's --agent-md) finds it
+            # in here as well as on the host.
+            setup_files = dict(adapter.container_setup_files(trial.model))
+            _, preamble = load_agent_preamble()
+            if preamble:
+                setup_files.setdefault(
+                    f"{container_setup.PREFIX}/agent.md", preamble)
+            for target, contents in setup_files.items():
                 relative = target[len(container_setup.PREFIX):].lstrip("/")
                 destination = os.path.join(tools_dir, relative)
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
