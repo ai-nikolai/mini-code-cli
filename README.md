@@ -343,6 +343,7 @@ its tests, its dependencies and its scripts:
 
 ```bash
 python -m pip install -r benchmarks/requirements.txt   # harbor (from its branch), swebench, vllm
+#                one 3.12 env is enough: harbor needs >=3.12, mini-code supports 3.10+
 benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 task set (data: clone, not pip)
 
 python benchmarks/run_benchmarks.py --dataset swe-bench         --agent mini-code --mode short_eval

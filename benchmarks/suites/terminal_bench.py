@@ -59,10 +59,11 @@ class TerminalBenchSuite(Suite):
         """The harness executable.
 
         ``options.harbor_bin`` pins it explicitly, which is what a cluster needs:
-        harbor usually lives in its own environment (it is heavy, and its
-        dependencies should not leak into the benchmark's), so it is often not on
-        ``PATH``. The fork check asks *this* script's interpreter what it imports,
-        so the answer has to be the script that will actually run.
+        harbor may live in another environment (a module loaded on this host with
+        ``python 3.12 -m venv`` is not on ``PATH``, and a shared filesystem often
+        has several), so it is not always discoverable. The fork check asks *this*
+        script's interpreter what it imports, so the answer has to be the script
+        that will actually run -- hence the option, not a hard-coded path.
         """
         from ..agents.base import which
 

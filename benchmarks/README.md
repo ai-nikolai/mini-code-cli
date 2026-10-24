@@ -16,7 +16,7 @@ reader for the results (`python -m benchmarks.analyze`).
 
 | What | Why | Install |
 | --- | --- | --- |
-| Python ≥ 3.11 | the harness itself (`tomllib`, dataclasses) | — |
+| Python ≥ 3.12 | the harness, `harbor`, and mini-code itself all run on one interpreter | — |
 | `harbor` (Python ≥ 3.12) | executes Terminal-Bench 2.x | `pip install -r benchmarks/requirements.txt` (our fork's branch) |
 | `swebench` ≥ 5 | grades SWE-bench predictions | `pip install 'swebench>=5'` |
 | `datasets` | materialises the SWE-bench instance list | `pip install datasets` |
@@ -31,13 +31,21 @@ python -m pip install -r benchmarks/requirements.txt   # harbor, terminal-bench,
 benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 tasks: data, not a package (§13.1)
 ```
 
-`harbor` needs Python 3.12 while mini-code runs on 3.11, so keeping it in its own environment is
-the normal case, e.g.:
+**One environment is enough.** `harbor` requires Python ≥ 3.12 and mini-code supports
+3.10+, so a single 3.12 environment holds the CLI, the harness and the dependencies:
 
 ```bash
-conda create -y -n hb python=3.12 && conda activate hb && pip install harbor
-PATH="$HOME/miniconda3/envs/hb/bin:$PATH" python -m benchmarks run ...   # harbor visible, mini-code still local
+python3.12 -m venv .venv && . .venv/bin/activate
+python -m pip install -e .                              # mini-code itself
+python -m pip install -r benchmarks/requirements.txt    # harbor, swebench, vllm, litellm
+python benchmarks/run_benchmarks.py --dataset swe-bench --agent mini-code --mode short_eval
 ```
+
+Nothing in the harness needs mini-code to be installed anywhere else, and nothing in
+mini-code needs harbor: the split only ever saved a few hundred MB when the two were
+built for different interpreters. Separate environments still work (mini-code on 3.10
+or 3.11 with harbor elsewhere), you just have to run the entry point with the
+interpreter that has harbor.
 
 Check what this machine can actually do before anything else:
 
