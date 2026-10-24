@@ -21,6 +21,13 @@ import shlex
 import sys
 
 
+def agent_preamble_path():
+    """Absolute path of the shared preamble (``benchmarks/agents/agent.md``)."""
+    from .preamble import AGENT_MD
+
+    return AGENT_MD
+
+
 class AgentError(RuntimeError):
     """An agent cannot be used as configured (missing binary, key, or option)."""
 
@@ -84,6 +91,24 @@ class AgentAdapter:
     def env(self, model):
         """Environment variables the agent needs (names come from the config)."""
         return {}
+
+    def agent_md(self, container=False):
+        """Path to the shared preamble, or ``None`` when the agent gets it inline.
+
+        One file (``benchmarks/agents/agent.md``) and one accessor, so every agent
+        in a comparison receives the same instructions; how each CLI is told about
+        it is the adapter's business (a flag, an appended system prompt, or the
+        head of the instruction).
+        """
+        path = agent_preamble_path()
+        if not os.path.isfile(path):
+            return None
+        if container:
+            # Container runs see the tools mount, not the host checkout.
+            from . import container_setup
+
+            return f"{container_setup.PREFIX}/agent.md"
+        return path
 
     def container_mounts(self):
         """Host paths the command needs *inside* a benchmark container.
@@ -165,6 +190,9 @@ class AgentAdapter:
                 "api_key_env": model.api_key_env or "",
                 "extra_env": self.env(model),
                 "install_commands": self.install_commands(),
+                # The shared preamble: uploaded into the container, then read by
+                # the agent exactly as it would be on the host.
+                "agent_md_file": self.agent_md(container=False),
             },
         }
 
@@ -187,6 +215,10 @@ class AgentAdapter:
                 "api_key_env": model.api_key_env or "",
                 "extra_env": self.env(model),
                 "install_commands": self.install_commands(),
+                # The shared preamble: uploaded into the task container so an
+                # agent that reads it from a file finds it at the path its argv
+                # template names (see CommandAgent.install).
+                "agent_md_file": self.agent_md(container=False),
             },
         }
 

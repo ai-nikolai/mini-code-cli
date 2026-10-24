@@ -17,6 +17,7 @@ import os
 _CONFIGS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "configs")
 
+from .preamble import load_agent_preamble
 from .base import AgentAdapter, which
 
 
@@ -59,7 +60,16 @@ class PiAgent(AgentAdapter):
             # A benchmark instance must not inherit (or write) a user session:
             # resuming one would leak context between tasks.
             argv += ["--no-session"]
-        argv += ["--", prompt] if str(prompt).lstrip().startswith("-") else [prompt]
+        instruction = str(prompt)
+        # pi has no documented system-prompt flag, so the shared preamble is
+        # carried at the head of the instruction -- the same
+        # benchmarks/agents/agent.md that mini-code reads and Claude Code gets
+        # appended to its system prompt.
+        _, preamble = load_agent_preamble()
+        if preamble.strip():
+            instruction = f"{preamble.rstrip()}\n\n{instruction}"
+        argv += (["--", instruction] if instruction.lstrip().startswith("-")
+                 else [instruction])
         return argv
 
     def env(self, model):

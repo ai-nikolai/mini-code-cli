@@ -43,6 +43,7 @@ benchmarks/runs/
 # Summary CSVs / analyser output: machine-specific numbers belong next to the run
 # that produced them, not in the repository (the *method* is what is tracked).
 benchmarks/results/
+results/
 benchmarks/datasets/
 benchmarks/.cache/
 benchmarks/**/build_context/

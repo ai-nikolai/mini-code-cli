@@ -338,15 +338,32 @@ the old per-field `Token usage (this session)` block is printed above it as well
 
 ## Benchmarks (academic evaluation)
 
+One command per dataset, for one agent or all three:
+
+```bash
+./benchmark --dataset swe-bench         --agent mini-code --mode short_eval
+./benchmark --dataset terminalbench-2.1 --agent all       --mode short
+```
+
+Each writes `results/<dataset>-<agent>-<mode>-<timestamp>/summary_results.csv` — one row per
+agent, with `trials, resolved, pass_rate, mean_reward, mean_seconds`. `--mode short` is a smoke
+run (3 tasks, no grading), `short_eval` grades those 3, `full` runs everything. `--dry-run`
+prints every command and starts nothing.
+
 `benchmarks/` runs coding agents against **Terminal-Bench 2.x** and **SWE-bench Verified** and
 compares them — mini-code with several settings, Claude Code, Pi and a deterministic `mock`
 agent — by wrapping each benchmark's own official harness (`harbor`, `tb`,
 `swebench.harness.run_evaluation`). It supports Docker and Apptainer, exports a CSV, and ships an
 analyser for the results.
 
+Every agent is given the same instructions, from one file — `benchmarks/agents/agent.md`
+(mini-code reads it with `--agent-md`, Claude Code with `--append-system-prompt`, Pi at the head
+of its instruction) — so a comparison cannot be explained by three different prompts.
+
 Everything is documented in **[benchmarks/README.md](benchmarks/README.md)**: prerequisites, the
-exact commands (`plan`, `run --csv`, `analyze`), the Docker and Apptainer variants, the fixed-model
-smoke config (`benchmarks/configs/ornith_30b.json`), and what a run produces.
+`./benchmark` front end and the `plan` / `run --csv` / `analyze` commands underneath it, the Docker
+and Apptainer variants, the configs (`benchmarks/configs/ornith_30b.json` for TB 2.0 +
+SWE-bench, `terminal_bench_21.json` for the local TB 2.1 checkout), and what a run produces.
 
 ## Serving a model locally
 

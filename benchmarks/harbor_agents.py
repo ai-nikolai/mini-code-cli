@@ -36,13 +36,17 @@ from harbor.models.agent.context import AgentContext
 #: Placeholder inside an ``argv_template`` element that receives the instruction.
 INSTRUCTION = "{instruction}"
 
+#: Where the shared preamble lands inside a task container.
+AGENT_MD_IN_CONTAINER = "/opt/agent/agent.md"
+
 
 class CommandAgent(BaseInstalledAgent):
     """Run any CLI agent described by an argv template inside a task container."""
 
     def __init__(self, argv_template=None, agent_name="command", model=None,
                  base_url=None, api_key_env=None, extra_env=None,
-                 install_commands=None, python_path=None, **kwargs):
+                 install_commands=None, python_path=None, agent_md_file=None,
+                 **kwargs):
         super().__init__(**kwargs)
         template = _as_list(argv_template)
         if not template:
@@ -64,6 +68,10 @@ class CommandAgent(BaseInstalledAgent):
         # "No module named mini_code_cli" and the trial looks like a model failure.
         self._python_path = str(python_path) if python_path else None
         self._uploaded_python_path = None
+        # The host path of benchmarks/agents/agent.md. Harbor has no bind mount
+        # here either, so the preamble travels with the agent: uploaded to the
+        # same fixed path the template refers to (see AGENT_MD_IN_CONTAINER).
+        self._agent_md_file = str(agent_md_file) if agent_md_file else None
 
     # -- harbor interface ------------------------------------------------
 
@@ -79,10 +87,17 @@ class CommandAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         """Install the agent: upload its code, then run the declared commands."""
         if self._python_path:
-            target = "/opt/mini-code"
+            # Upload the package *into* a directory on PYTHONPATH: the tree handed
+            # over is the package itself, so `python3 -m mini_code_cli` resolves
+            # only if its parent is the one exported below.
+            root = "/opt/mini-code"
+            name = os.path.basename(str(self._python_path).rstrip("/"))
             await environment.upload_dir(source_dir=self._python_path,
-                                         target_dir=target)
-            self._uploaded_python_path = target
+                                         target_dir=f"{root}/{name}")
+            self._uploaded_python_path = root
+        if self._agent_md_file and os.path.isfile(self._agent_md_file):
+            await environment.upload_file(source_path=self._agent_md_file,
+                                          target_path=AGENT_MD_IN_CONTAINER)
         for command in self._install_commands:
             await self.exec_as_agent(environment, command=str(command))
 

@@ -28,6 +28,7 @@ setting produced which numbers without re-deriving it from flags.
 """
 import os
 
+from .base import agent_preamble_path
 from .base import AgentAdapter, which, python_interpreter
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
@@ -51,6 +52,15 @@ class MiniCodeAgent(AgentAdapter):
         "short-tool-timeout": {"flags": ["--auto-mode"], "tool_timeout": 30},
         "all": {"flags": ["--auto-mode", "--enable-shell", "--sudo",
                           "--plan", "--enable-subagents"]},
+        # The setting a benchmark run wants: unattended, with a shell (an agent
+        # that cannot run the failing test cannot check a fix), sudo for the
+        # occasional install, a context big enough to hold the file it is editing
+        # plus the test output, and tool/LLM timeouts long enough that a slow
+        # `pytest` is not recorded as a model failure.
+        "swe": {"flags": ["--auto-mode", "--enable-shell", "--sudo"],
+                "max_context_tokens": 131072,
+                "tool_timeout": 600,
+                "llm_timeout": 600},
     }
 
     def argv(self, prompt, model, workspace=None, container=False):
@@ -76,6 +86,11 @@ class MiniCodeAgent(AgentAdapter):
         if options.get("llm_timeout"):
             argv += ["--llm-timeout", str(options["llm_timeout"])]
         argv += list(options.get("flags", []))
+        # The shared preamble (benchmarks/agents/agent.md), read by the CLI itself
+        # and inserted right after the system prompt.
+        preamble = self.agent_md(container=container)
+        if preamble:
+            argv += ["--agent-md", preamble]
         if model.api_key_env:
             # Pass the key by *reference*: the runner expands {env:NAME} at exec
             # time, so the value never appears in the command line, in `ps`, or in
@@ -92,7 +107,15 @@ class MiniCodeAgent(AgentAdapter):
         return {model.api_key_env: _env_placeholder(model.api_key_env)}
 
     def harbor_python_path(self):
-        return _REPO_ROOT
+        """The *package* directory, not the repository.
+
+        Harbor uploads this tree into the task container before the agent runs.
+        Handing it the repository root shipped `.git`, the task checkouts and the
+        multi-hundred-MB SIF cache along with it: 860 MB per task, which is what
+        made the TB environment start hit its one-hour budget while the server sat
+        idle at "Uvicorn running". Only the package needs to travel.
+        """
+        return os.path.join(_REPO_ROOT, "mini_code_cli")
 
     def container_mounts(self):
         return [(_REPO_ROOT, "/opt/mini-code:ro")]

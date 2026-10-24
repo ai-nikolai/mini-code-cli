@@ -50,7 +50,52 @@ CLIs, container runtime, API keys) and lists every problem it finds with exit co
 
 ---
 
-## 2. The commands, in the order you use them
+## 2. The one command: `./benchmark`
+
+Two commands cover the two datasets, for one agent or all three:
+
+```bash
+./benchmark --dataset swe-bench        --agent mini-code --mode short_eval
+./benchmark --dataset terminalbench-2.1 --agent all       --mode short
+```
+
+`--agent all` runs mini-code, pi and claude-code one after another and writes a
+single CSV covering all three. Everything lands in one campaign directory:
+
+```
+results/<dataset>-<agent>-<mode>-<timestamp>/
+    summary_results.csv      # one row per agent -- the file you open first
+    mini-code/   pi/   claude-code/   # each agent's own run dir, manifest, logs
+```
+
+`summary_results.csv` has a fixed header:
+
+```
+dataset,agent,mode,trials,resolved,pass_rate,mean_reward,mean_seconds,mean_tokens,run_id,status
+```
+
+`status` is `ok`, `partial_failures`, `all_failed`, or `dry-run`; an empty cell means
+"this suite does not report that number", never zero.
+
+Modes:
+
+| `--mode` | limit | graders | use it for |
+|---|---|---|---|
+| `short` | 3 | off | does this agent work end to end at all |
+| `short_eval` | 3 | on | the smallest run whose number is a real score |
+| `full` | all | on | the real measurement (agents get an hour) |
+
+`--limit`, `--n-concurrent`, `--run-id` and `--results-dir` override the mode;
+`--dry-run` prints every command it would run and the summary path, and starts
+nothing.
+
+### The same thing one layer down
+
+`./benchmark` is a thin front end over `python -m benchmarks`; the flags below are
+what it composes, and they are still there when you need to change something it does
+not expose:
+
+#### The commands, in the order you use them
 
 ```bash
 # 0. what exists
@@ -151,11 +196,36 @@ default `/tmp` is frequently a few GB, and a task image needs ~2 GB while being 
 
 ---
 
-## 4. Datasets
+## 4. What every agent is told (one file)
+
+`benchmarks/agents/agent.md` is the preamble every agent receives -- where the
+checkout is, reproduce before fixing, leave the fix in the worktree, do not commit,
+handle the documented edge cases. It is *one* file, so a comparison cannot be
+explained by three different prompts:
+
+| agent | how the file reaches it |
+|---|---|
+| mini-code | `--agent-md <file>` (the CLI places it right after the system prompt) |
+| claude-code | `--append-system-prompt "$(cat file)"` (the flag takes text, so it is inlined) |
+| pi | at the head of the instruction (its one-shot mode has no system-prompt flag) |
+
+Host runs read the file directly. Terminal-Bench containers have no bind mount, so
+`CommandAgent` uploads it to `/opt/agent/agent.md` and the argv template names that
+path. Harbor's own pi and claude-code agents build their own prompt internally, so on
+Terminal-Bench those two get the text from harbor and not from this file -- SWE-bench
+is where all three are guaranteed identical.
+
+Edit that file, and all three agents change together. Nothing else in the harness
+hard-codes a preamble.
+
+---
+
+## 5. Datasets
 
 | Suite | Dataset id | Executed by |
 | --- | --- | --- |
-| `terminal-bench` | `terminal-bench@2.0` (`harbor datasets list --legacy` for what the registry publishes; pin `2.1` as soon as it appears) | `harbor run -d <dataset>@<version>` |
+| `terminal-bench` 2.0 | `terminal-bench@2.0` -- what the harbor registry publishes (`harbor datasets list --legacy`) | `harbor run -d <dataset>@<version>` |
+| `terminal-bench` 2.1 | the local `terminal-bench-2-1/` task checkout (the registry has no `@2.1` yet) | `harbor run -p terminal-bench-2-1`, via `options.dataset_dir` in `benchmarks/configs/terminal_bench_21.json` |
 | `terminal-bench` (`options.harness: "tb"`) | `terminal-bench-core==0.1.1` | `tb run --dataset ...` (Terminal-Bench 1.x) |
 | `swebench` | `SWE-bench/SWE-bench_Verified`, split `test` | `python -m swebench.harness.run_evaluation` |
 
@@ -165,7 +235,7 @@ installed-agent bridge in `benchmarks/harbor_agents.py` (harbor needs the reposi
 
 ---
 
-## 5. Serving the model
+## 6. Serving the model
 
 vLLM, tool calling enabled (one H200 is enough for the 35B-A3B):
 
@@ -201,7 +271,7 @@ network already).
 
 ---
 
-## 6. What gets produced
+## 7. What gets produced
 
 ```
 benchmarks/
@@ -233,7 +303,7 @@ plus one directory per task (with `trial.log`, `exception.txt`); SWE-bench write
 
 ---
 
-## 7. Reading the numbers back
+## 8. Reading the numbers back
 
 ```bash
 python -m benchmarks analyze benchmarks/results/ornith-30b-smoke.csv
@@ -258,7 +328,7 @@ and `--csv` write the same table for a README, a script or a spreadsheet.
 
 ---
 
-## 8. Results on the H200 used to validate this
+## 9. Results on the H200 used to validate this
 
 Fixed model `ornith-ai/Ornith-1.5-35B-A3B` (vLLM on `:30000`), `--limit 3`,
 `runtime: auto`. The host has **no Docker** — Apptainer 1.5.0 only — so this is the
@@ -358,7 +428,7 @@ now stripped when a custom base URL is set. With that, a terminal-bench run stre
 49 assistant turns and 8.8 MB of transcript before hitting its own 900 s budget — an
 authentication failure, at last, is not what stops it.
 
-## 9. Safety and habits
+## 10. Safety and habits
 
 * **`plan` first.** It prints the exact argv (never a shell string), the environment variable
   *names* it sets and the container calls, without downloading a dataset or starting a container.
@@ -371,7 +441,7 @@ authentication failure, at last, is not what stops it.
 
 ---
 
-## 10. Apptainer without Docker (Docker-free path)
+## 11. Apptainer without Docker (Docker-free path)
 
 On a cluster with no Docker daemon, Terminal-Bench 2.x can still be run — not by
 reimplementing it, but by preparing the task images so harbor's existing Apptainer
@@ -450,7 +520,7 @@ Requirements and limits of this path:
 
 ---
 
-## 11. Our forks, and when they are used
+## 12. Our forks, and when they are used
 
 Two behaviours cannot be expressed from outside the tools, so we carry branches of
 them. They are cloned **next to** this repository and git-ignored; the diffs are

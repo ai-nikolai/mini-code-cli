@@ -75,8 +75,25 @@ class TerminalBenchSuite(Suite):
             return which("harbor") or which("hr")
         return which("tb") or which("terminal-bench")
 
+    def local_dataset_dir(self, spec):
+        """A local task collection given as ``options.dataset_dir``, or ``None``.
+
+        Terminal-Bench 2.1 exists as a checkout of tasks (each with its own
+        ``Dockerfile``) before the registry publishes ``terminal-bench@2.1``.
+        Harbor runs *any* directory of tasks with ``-p``, so pointing at the
+        checkout is the whole story: no registry copy, no `-d`, no staged
+        dataset -- harbor builds each task's ``.sif`` from its Dockerfile.
+        """
+        raw = (getattr(spec, "options", None) or {}).get("dataset_dir")
+        if not raw:
+            return None
+        return os.path.abspath(os.path.expanduser(str(raw)))
+
     def dataset_label(self, spec):
         """``dataset@version`` for harbor, ``dataset==version`` for tb."""
+        local = self.local_dataset_dir(spec)
+        if local:
+            return f"{os.path.basename(local)} (local)"
         if not spec.version:
             return str(spec.dataset or "")
         joiner = "@" if self.harness(spec) == "harbor" else "=="
@@ -229,6 +246,9 @@ class TerminalBenchSuite(Suite):
         """True when this trial runs under Apptainer and has no staged dataset."""
         if (trial.container_runtime or "docker") != "apptainer":
             return False
+        if self.local_dataset_dir(trial.suite):
+            # The tasks are already a local directory; nothing to stage.
+            return False
         if self._harbor_has_dockerfile_support(trial.suite):
             # The patched harbor builds a task's .sif from its Dockerfile on
             # demand, so there is nothing to stage and no container alias to
@@ -248,6 +268,11 @@ class TerminalBenchSuite(Suite):
         copy points at it -- so the run targets the staged directory instead.
         """
         spec = trial.suite
+        local = self.local_dataset_dir(spec)
+        if local:
+            # A local collection of tasks: harbor reads <dir>/<task>/task.toml
+            # and builds each image from the task's own Dockerfile.
+            return ["-p", local]
         if (trial.container_runtime or "docker") != "apptainer":
             return ["-d", self.dataset_label(spec)]
         if self._harbor_has_dockerfile_support(spec):
@@ -315,6 +340,18 @@ class TerminalBenchSuite(Suite):
             argv += ["--env", str(env_backend)]
         for kwarg in options.get("environment_kwargs") or ():
             argv += ["--environment-kwarg", str(kwarg)]
+        # A 2.1 task budgets 600 s for its environment, which is the image build
+        # on Docker but the *start* on Apptainer (SIF extract + the agent runtime
+        # going in). That is not enough on a network filesystem: the trial dies
+        # with "Environment start timed out after 600.0 seconds" even though the
+        # server came up. The multiplier raises the budget harbor derives from the
+        # task, rather than overriding the task's own numbers.
+        if options.get("environment_build_timeout_multiplier"):
+            argv += ["--environment-build-timeout-multiplier",
+                     str(float(options["environment_build_timeout_multiplier"]))]
+        if options.get("agent_setup_timeout_multiplier"):
+            argv += ["--agent-setup-timeout-multiplier",
+                     str(float(options["agent_setup_timeout_multiplier"]))]
         if env_backend == "singularity" and not options.get("environment_kwargs"):
             cache = options.get("singularity_image_cache_dir") or _default_sif_cache()
             argv += ["--environment-kwarg",
