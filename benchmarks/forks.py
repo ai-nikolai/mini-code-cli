@@ -8,8 +8,8 @@ ships a Dockerfile, and ``swebench.harness.run_evaluation`` needed a container
 backend that is not the Docker SDK.
 
 The checkouts are *not* vendored into this history (they are large, and their
-branches are the source of truth); ``scripts/export_bench_patches.sh`` exports the
-diffs into ``benchmarks/patches/`` so the changes stay reviewable here. This module
+branches -- pushed to github.com/ai-nikolai -- are the source of truth; harbor is
+installed straight from its branch by ``benchmarks/requirements.txt``). This module
 answers the one question the suites have: *is the patched code what will actually
 run?* -- by checking which file the imported module came from, not by trusting a
 directory to exist.
@@ -27,7 +27,7 @@ CHECKOUTS = {
     "terminal_bench": "terminal-bench-2-1",
 }
 
-#: the branch we build on, per checkout (see scripts/export_bench_patches.sh)
+#: the branch we build on, per checkout (see benchmarks/scripts/setup_external_repos.sh)
 BRANCHES = {
     "harbor": "mini-code/apptainer",
     "swebench": "mini-code/apptainer",

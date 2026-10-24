@@ -4,7 +4,7 @@
 # dependency-free package, and nobody running `mini-code` should have to download
 # a benchmark harness. Install with:
 #
-#     python -m pip install -r requirements-bench.txt
+#     python -m pip install -r benchmarks/requirements.txt
 #
 # Python 3.12+ is needed by terminal-bench itself (0.2.x); SWE-bench and the
 # agents' CLIs work on 3.10+.
@@ -12,9 +12,14 @@
 # --- benchmark harnesses -----------------------------------------------------
 # Harbor: the official harness for Terminal-Bench 2.x (2.0 / 2.1), wrapped by
 # benchmarks/suites/terminal_bench.py with options.harness="harbor" (the default).
-harbor>=0.24
+# Installed straight from our fork's branch, which is where the Docker-free
+# (Apptainer) backend lives -- no patch step, no local checkout required:
+harbor @ git+https://github.com/ai-nikolai/harbor.git@mini-code/apptainer
 # Terminal-Bench 1.x ("terminal-bench-core" datasets), wrapped with
 # options.harness="tb". Optional: only needed for the older task sets.
+# The 2.1 tasks are a *data* repository, not a package: they are cloned by
+# benchmarks/scripts/setup_external_repos.sh into external_repos/ and pointed at
+# with `dataset_dir` (see benchmarks/README.md §2).
 terminal-bench>=0.2.18
 # SWE-bench 5.0.2: `python -m swebench.harness.run_evaluation`, wrapped by
 # benchmarks/suites/swebench.py. Pulls `datasets` and the Docker SDK.

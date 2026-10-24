@@ -21,12 +21,15 @@ vllm.log
 .mini_tests/
 
 # --- upstream checkouts (our forks) -------------------------------------------
-# The three repositories we patch (harbor, SWE-bench, the Terminal-Bench 2 task
-# set) are cloned, never vendored into this history: their branches are the source
-# of truth and `scripts/export_bench_patches.sh` exports the diffs into
-# benchmarks/patches/ so the changes stay reviewable here.
-# Rooted at the repository: an unanchored `harbor/` also swallows
-# benchmarks/patches/harbor/, i.e. the exported diffs this comment is about.
+# The two repositories the benchmark builds on (harbor, the Terminal-Bench 2 task
+# set) are cloned, never vendored into this history: their branches on
+# github.com/ai-nikolai are the source of truth, and `benchmarks/requirements.txt`
+# installs harbor straight from its branch. `benchmarks/scripts/setup_external_repos.sh`
+# puts local development checkouts in external_repos/.
+/external_repos/
+# Rooted at the repository on purpose: an unanchored `harbor/` would also swallow
+# any directory of that name anywhere below (e.g. a task named `harbor` inside
+# benchmarks/datasets/).
 /harbor/
 /SWE-bench/
 /terminal-bench-2-1/
