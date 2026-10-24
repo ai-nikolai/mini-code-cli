@@ -150,6 +150,13 @@ def container_argv(name, image, command, container_name=None, env=None,
     # A .sif is read-only: without a writable overlay every in-container write
     # fails ("/testbed/.git/index.lock: Read-only file system"), which is *every*
     # agent run -- it edits the checkout -- and every `git add -A` patch capture.
+    # --cleanenv wipes the environment but apptainer still bind-mounts $HOME, so
+    # the *host's* ~/.local/lib/python3.*/site-packages lands on the container's
+    # sys.path. On this host that injects a dev build of matplotlib into every
+    # image ("Error processing line 1 of .../matplotlib-3.8.0.dev...-nspkg.pth"),
+    # which is the last thing a matplotlib benchmark instance needs.
+    env = dict(env or {})
+    env.setdefault("PYTHONNOUSERSITE", "1")
     argv = [binary, "exec", "--cleanenv", "--writable-tmpfs"]
     if gpus:
         argv.append("--nv")

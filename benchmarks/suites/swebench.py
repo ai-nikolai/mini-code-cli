@@ -226,12 +226,17 @@ class SweBenchSuite(Suite):
             instance_id = instance["instance_id"]
             image = self._image(instance, container, image_template)
             if container == "apptainer":
-                # No daemon: the runnable artefact is the .sif the pull step
-                # cached, not the docker:// reference (which apptainer would try
-                # to resolve against the registry on every exec).
-                cached = swebench_apptainer.sif_path(self.sif_cache(), instance_id)
-                if os.path.isfile(cached):
-                    image = cached
+                # No daemon: the runnable artefact is the .sif, never a docker://
+                # reference. This must not depend on the file *already* existing at
+                # plan time: the plan's own first step pulls every instance into
+                # that path, so the file is there by the time this command runs.
+                # Testing `isfile` here broke exactly the case it was meant to
+                # serve -- a brand-new instance set (SWE-bench Lite, first run)
+                # planned before its images exist, whose agent then ran
+                # `apptainer exec docker://swebench/sweb.eval.x86_64.<id>` and died
+                # in 1.7 s with "requested access to the resource is denied",
+                # because the docker tag needs the dataset's `_1776_` escaping.
+                image = swebench_apptainer.sif_path(self.sif_cache(), instance_id)
             workdir = self.ensure_dir(os.path.join(runs_dir, instance_id))
             patch_path = os.path.join(workdir, "model.patch")
             log_path = os.path.join(workdir, "agent.log")
