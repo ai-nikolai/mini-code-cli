@@ -101,7 +101,8 @@
         "test_timeout_sec": 3600,
         "harbor_bin": "~/miniconda3/envs/hb/bin/harbor",
         "environment_build_timeout_multiplier": 6,
-        "agent_setup_timeout_multiplier": 6
+        "agent_setup_timeout_multiplier": 6,
+        "agent_timeout_multiplier": 6
       }
     }
   ]

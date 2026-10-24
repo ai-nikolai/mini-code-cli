@@ -139,12 +139,33 @@ def run_one(apptainer, instance, patch_text, work_dir, timeout, env=None,
     with open(eval_path, "w", encoding="utf-8") as handle:
         handle.write(instance["eval_script"])
 
+    # A .sif is read-only, so `git apply` dies with "Unable to create
+    # '/testbed/.git/index.lock': Read-only file system" and every instance is
+    # reported as "the model patch did not apply" -- a grading artefact, not a
+    # model failure. Stage the checkout on the host first and bind it back over
+    # /testbed: the eval script (which does `cd /testbed` and a git checkout for
+    # the test files) then runs against a writable copy, exactly as upstream's
+    # container allows. The agent path already does this for the same reason.
+    testbed = os.path.join(work_dir, "testbed")
+    if not os.path.isdir(os.path.join(testbed, ".git")):
+        os.makedirs(testbed, exist_ok=True)
+        stage = [apptainer, "exec", "--cleanenv", "--pwd", "/",
+                 "--bind", f"{os.path.abspath(work_dir)}:{LOGS_DIR}",
+                 *extra_args, str(instance["_sif"]),
+                 "bash", "-lc", "cp -a /testbed/. /out/testbed/"]
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(f"$ {' '.join(stage)}\n")
+            handle.flush()
+            subprocess.run(stage, stdout=handle, stderr=subprocess.STDOUT,
+                           env=env, timeout=timeout)
+
     # `git apply` then the instance's own script: the script checks out the base
     # commit for the test files, so the patch must land first, exactly as upstream.
     commands = [f"{cmd} {LOGS_DIR}/patch.diff" for cmd in GIT_APPLY_CHAIN]
     script = " || ".join(commands) + f"; bash {LOGS_DIR}/eval.sh"
     argv = [apptainer, "exec", "--cleanenv", "--pwd", "/testbed",
             "--bind", f"{os.path.abspath(work_dir)}:{LOGS_DIR}",
+            "--bind", f"{os.path.abspath(testbed)}:/testbed",
             *extra_args, str(instance["_sif"]), "bash", "-lc", script]
 
     started = time.monotonic()

@@ -357,6 +357,13 @@ class TerminalBenchSuite(Suite):
         if options.get("agent_setup_timeout_multiplier"):
             argv += ["--agent-setup-timeout-multiplier",
                      str(float(options["agent_setup_timeout_multiplier"]))]
+        # A 2.1 task's own agent budget (900 s for adaptive-rejection-sampler) is
+        # calibrated for a fast model on Docker. The first trial that got this far
+        # died with "Agent execution timed out after 900.0 seconds" while the
+        # agent was still working, so scale it the same way as the other budgets.
+        if options.get("agent_timeout_multiplier"):
+            argv += ["--agent-timeout-multiplier",
+                     str(float(options["agent_timeout_multiplier"]))]
         if env_backend == "singularity" and not options.get("environment_kwargs"):
             cache = options.get("singularity_image_cache_dir") or _default_sif_cache()
             argv += ["--environment-kwarg",
@@ -367,6 +374,12 @@ class TerminalBenchSuite(Suite):
             argv += ["--environment-kwarg",
                      f"singularity_no_mount="
                      f"{options.get('singularity_no_mount', 'home,tmp')}"]
+        # Harbor ignores HARBOR_LOG_LEVEL; its own switch is --debug.  Diagnostics
+        # for a trial that stalls right after the in-container server reports
+        # "Uvicorn running" are impossible without it, so expose it via an option
+        # (or BENCHMARK_HARBOR_DEBUG=1) rather than patching harbor.
+        if options.get("harbor_debug") or os.environ.get("BENCHMARK_HARBOR_DEBUG"):
+            argv += ["--debug"]
         # Never wait for a human: a benchmark job starts unattended.
         argv += ["--yes"]
 

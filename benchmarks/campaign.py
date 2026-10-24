@@ -42,13 +42,31 @@ EXIT_PROBLEM = 2
 #: harness, the same ``swebench`` package and the same published instance images
 #: (``swebench/sweb.eval.x86_64.*``), only a different HuggingFace dataset --
 #: 300 instances instead of 500. Nothing else has to exist for it.
+#: Five SWE-bench Lite instances that are *not* the five Verified runs use
+#: (astropy__astropy-12907/13033/13236/13398/13453), so the Lite campaign scores a
+#: different slice of the dataset instead of repeating the same first five rows.
+LITE_INSTANCES = (
+    "django__django-11099",
+    "sympy__sympy-20590",
+    "matplotlib__matplotlib-26020",
+    "pytest-dev__pytest-11148",
+    "scikit-learn__scikit-learn-13496",
+)
+
 DATASETS = {
     "swe-bench": ("benchmarks/configs/ornith_30b.json", "swebench", "swe-bench"),
     "swebench": ("benchmarks/configs/ornith_30b.json", "swebench", "swe-bench"),
+    # Lite draws a *different* five instances than Verified's first five: the two
+    # datasets share their ordering, so a plain --limit 5 would score the same
+    # instances twice and say nothing new.
     "swe-bench-lite": ("benchmarks/configs/ornith_30b.json", "swebench",
-                       "swe-bench-lite", {"dataset": "SWE-bench/SWE-bench_Lite"}),
+                       "swe-bench-lite",
+                       {"dataset": "SWE-bench/SWE-bench_Lite",
+                        "task_ids": LITE_INSTANCES}),
     "swebench-lite": ("benchmarks/configs/ornith_30b.json", "swebench",
-                      "swe-bench-lite", {"dataset": "SWE-bench/SWE-bench_Lite"}),
+                      "swe-bench-lite",
+                      {"dataset": "SWE-bench/SWE-bench_Lite",
+                       "task_ids": LITE_INSTANCES}),
     "terminalbench-2.1": ("benchmarks/configs/terminal_bench_21.json",
                           "terminal-bench", "terminalbench-2.1"),
     "terminal-bench-2.1": ("benchmarks/configs/terminal_bench_21.json",

@@ -38,10 +38,11 @@ DEFAULT_SPLIT = "test"
 
 
 def load_instances(dataset=DEFAULT_DATASET, split=DEFAULT_SPLIT, revision=None,
-                   limit=None, from_file=None):
+                   limit=None, from_file=None, keep_ids=None, skip_ids=None):
     """Return a list of instance dicts, from a file or the pinned dataset."""
     if from_file:
         instances = read_instances_file(from_file, limit)
+        instances = _select(instances, keep_ids, skip_ids, limit)
         return instances, [instance for instance in instances]
     try:
         from datasets import load_dataset  # heavy, optional: the swebench extra
@@ -57,9 +58,31 @@ def load_instances(dataset=DEFAULT_DATASET, split=DEFAULT_SPLIT, revision=None,
                           if row.get(key) is not None})
         grading.append({key: row.get(key) for key in GRADING_FIELDS
                         if row.get(key) is not None})
-        if limit and len(instances) >= int(limit):
-            break
+    instances = _select(instances, keep_ids, skip_ids, limit)
+    wanted = {instance["instance_id"] for instance in instances}
+    grading = [row for row in grading if row.get("instance_id") in wanted]
     return instances, grading
+
+
+def _split_ids(value):
+    """``"a,b , c"`` -> ``["a", "b", "c"]`` (None/empty -> [])."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _select(instances, keep_ids=None, skip_ids=None, limit=None):
+    """Apply the keep/skip id lists, then the limit."""
+    keep = _split_ids(keep_ids)
+    skip = set(_split_ids(skip_ids))
+    if keep:
+        by_id = {instance["instance_id"]: instance for instance in instances}
+        instances = [by_id[i] for i in keep if i in by_id]
+    if skip:
+        instances = [i for i in instances if i["instance_id"] not in skip]
+    return instances[: int(limit)] if limit else instances
 
 
 def read_instances_file(path, limit=None):
@@ -138,6 +161,14 @@ def main(argv=None):
     instances.add_argument("--revision", default=None,
                            help="dataset revision/commit to pin")
     instances.add_argument("--limit", type=int, default=None)
+    instances.add_argument(
+        "--instance-ids", default=None,
+        help="comma-separated instance ids to keep (order preserved)")
+    instances.add_argument(
+        "--skip-ids", default=None,
+        help="comma-separated instance ids to drop before --limit applies; lets a "
+             "second campaign (e.g. SWE-bench Lite after Verified) sample different "
+             "instances instead of repeating the same first N")
     instances.add_argument("--from-file", default=None,
                            help="offline JSONL/JSON of instances instead of HF")
     instances.add_argument("--out", required=True)
@@ -157,7 +188,9 @@ def main(argv=None):
     if args.command == "instances":
         found, grading = load_instances(dataset=args.dataset, split=args.split,
                                         revision=args.revision, limit=args.limit,
-                                        from_file=args.from_file)
+                                        from_file=args.from_file,
+                                        keep_ids=args.instance_ids,
+                                        skip_ids=args.skip_ids)
         write_instances(found, args.out)
         write_instances(grading, grading_path(args.out, args.grading_out))
         print(f"instances: wrote {len(found)} to {args.out}")

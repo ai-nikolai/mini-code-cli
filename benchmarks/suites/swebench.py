@@ -143,6 +143,16 @@ class SweBenchSuite(Suite):
             argv += ["--limit", str(trial.limit)]
         if trial.suite.options.get("instances_file"):
             argv += ["--from-file", str(trial.suite.options["instances_file"])]
+        # An explicit id list (or task_ids) pins the sample; skip_ids then lets a
+        # second campaign -- SWE-bench Lite after Verified -- draw *different*
+        # instances instead of repeating the same first N, which would make the
+        # two "campaigns" one campaign run twice.
+        ids = trial.suite.options.get("instance_ids") or trial.suite.task_ids
+        if ids:
+            argv += ["--instance-ids", ",".join(str(i) for i in ids)]
+        skip = trial.suite.options.get("skip_ids")
+        if skip:
+            argv += ["--skip-ids", ",".join(str(i) for i in skip)]
         return PlannedCommand(label="swebench: materialise instances", argv=argv,
                               timeout=1_800)
 
@@ -413,7 +423,8 @@ class SweBenchSuite(Suite):
         options = trial.suite.options or {}
         report = os.path.join(run_dir, f"{trial.run_id}.json")
         argv = [
-            _python(), "-m", "benchmarks.suites.swebench_apptainer", "evaluate",
+            _grader_python(options), "-m", "benchmarks.suites.swebench_apptainer",
+            "evaluate",
             "--instances", self.instances_path(run_dir),
             "--patches-dir", os.path.join(run_dir, "instances"),
             "--report", report,
@@ -426,6 +437,13 @@ class SweBenchSuite(Suite):
         return PlannedCommand(
             label=f"swebench: evaluate {trial.run_id} (apptainer)", argv=argv,
             cwd=run_dir, timeout=options.get("evaluate_timeout_sec"),
+            # The grader is spawned as `-m benchmarks.suites.swebench_apptainer`
+            # from the *run directory*, so without the repository on PYTHONPATH it
+            # died in 0.1 s with "No module named 'benchmarks.suites'" and the
+            # whole campaign reported "no report file".
+            env={"PYTHONPATH": os.pathsep.join(
+                [path for path in (os.environ.get("PYTHONPATH"), _REPO_ROOT)
+                 if path])},
             artifacts=(report,))
 
     def fork_evaluate_command(self, trial, run_dir):
@@ -540,6 +558,42 @@ def _module_available(name):
 def _python():
     import sys
 
+    return sys.executable
+
+
+def _grader_python(options=None):
+    """The interpreter that runs the *grader*, which imports ``swebench``.
+
+    The launcher's own interpreter is the default, but this host keeps the
+    benchmark CLI's dependencies (``datasets``) and the SWE-bench harness in
+    different conda environments: grading then failed with
+    "grading failed: No module named 'swebench'" after the agents had already
+    done their work. Probe for an interpreter that can import it -- an explicit
+    ``options.grader_python`` wins, then $BENCHMARK_GRADER_PYTHON, then a couple
+    of conventional locations -- and fall back to the launcher.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    explicit = (options or {}).get("grader_python") or os.environ.get(
+        "BENCHMARK_GRADER_PYTHON")
+    candidates = [explicit] if explicit else []
+    home = os.path.expanduser("~")
+    candidates += [sys.executable,
+                   os.path.join(home, "miniconda3", "envs", "hb", "bin", "python"),
+                   os.path.join(home, "miniconda3", "envs", "bench", "bin", "python")]
+    for candidate in candidates:
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "import swebench"],
+                capture_output=True, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            return candidate
     return sys.executable
 
 

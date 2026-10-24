@@ -198,13 +198,23 @@ class Runner:
         run reads them from its own trial directory, so the documented
         ``prepare`` then ``run`` sequence used to stop at "no instance list".
         """
-        source = os.path.join(self.output, "_prepare", trial.run_id,
-                              "instances.jsonl")
-        target = os.path.join(trial_dir, "instances.jsonl")
-        if os.path.isfile(source) and not os.path.isfile(target):
-            os.makedirs(trial_dir, exist_ok=True)
-            shutil.copy2(source, target)
-            self.say(f"   reusing prepared instances from {source}")
+        source_dir = os.path.join(self.output, "_prepare", trial.run_id)
+        target_dir = trial_dir
+        if not os.path.isfile(os.path.join(source_dir, "instances.jsonl")):
+            return
+        if os.path.isfile(os.path.join(target_dir, "instances.jsonl")):
+            return
+        os.makedirs(target_dir, exist_ok=True)
+        # Both the agent-facing list *and* the `<name>.grading.jsonl` sidecar it
+        # is paired with: the list deliberately omits the heavy grading fields
+        # (image, eval_script, the test lists) that the sidecar carries, so
+        # copying only the list left the grader with no eval_script and every
+        # campaign ended at "no report file" *after* the agents had done the work.
+        for name in ("instances.jsonl", "instances.grading.jsonl"):
+            source = os.path.join(source_dir, name)
+            if os.path.isfile(source):
+                shutil.copy2(source, os.path.join(target_dir, name))
+        self.say(f"   reusing prepared instances from {source_dir}")
 
     def _run_trial(self, trial, trial_dir):
         """Run one trial's commands in order; collect its outcomes."""
