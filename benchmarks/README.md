@@ -560,7 +560,7 @@ Two behaviours cannot be expressed from outside the tools, so we carry branches 
 them. Harbor is installed from its branch by `benchmarks/requirements.txt`; the
 task set is cloned into `external_repos/` by
 `benchmarks/scripts/setup_external_repos.sh` (git-ignored — the branches are the
-source of truth, see "Where the two harness forks come from" above).
+source of truth, see §13).
 
 | checkout | fork | branch | base |
 | --- | --- | --- | --- |
@@ -587,12 +587,16 @@ What each patch changes:
   up a different task set.
 
 Install them into the environments that run them (editable, `--no-deps` so the
-already-installed dependencies are not churned):
+already-installed dependencies are not churned). Harbor is the one that matters
+for Terminal-Bench; the SWE-bench fork is only needed for the `--backend
+apptainer` route in §11 — the default SWE-bench path (`§11.1`) is the in-repo
+`benchmarks/suites/swebench_apptainer.py` and needs no fork:
 
 ```bash
-~/miniconda3/envs/hb/bin/python -m pip install -e ./harbor --no-deps
-python -m pip install -e ./SWE-bench --no-deps           # the env that runs benchmarks
-python -c "import harbor, swebench; print(harbor.__file__, swebench.__file__)"
+~/miniconda3/envs/hb/bin/python -m pip install -e ./harbor --no-deps   # or: pip install -r benchmarks/requirements.txt
+python -c "import harbor; print(harbor.__file__)"
+# only for the fork-based SWE-bench backend:
+python -m pip install -e ./SWE-bench --no-deps && python -c "import swebench; print(swebench.__file__)"
 ```
 
 The suites decide by **what is imported**, not by what exists on disk
@@ -610,7 +614,7 @@ look identical otherwise:
 branch, SHA and dirty flag, so a result cannot be reproduced against different code
 by accident.
 
-## Where the two harness forks come from
+## 13. Where the harness forks come from, and how to develop or publish them
 
 A run needs two repositories that are not this one:
 
@@ -626,7 +630,7 @@ different code. (The old workflow exported `benchmarks/patches/*.patch` and
 re-applied them to a fresh upstream clone; that only existed because the branches
 were not published yet.)
 
-### Local development: `benchmarks/scripts/setup_external_repos.sh`
+### 13.1 Local development: `benchmarks/scripts/setup_external_repos.sh`
 
 Working *on* the harness — rather than just running it — needs the sources on
 disk. One command puts them where the suites look for them:
@@ -643,7 +647,7 @@ with uncommitted changes is reported rather than switched out from under you. No
 prompting (`GIT_TERMINAL_PROMPT=0`), no `sudo`, and `--help` documents every knob
 (`EXTERNAL_REPOS_DIR`, `EXTERNAL_REPOS_OWNER`).
 
-### Publishing: `benchmarks/scripts/push_all_repos.sh`
+### 13.2 Publishing: `benchmarks/scripts/push_all_repos.sh`
 
 A benchmark change usually spans all three histories, so there is one command to
 publish them:
