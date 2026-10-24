@@ -347,15 +347,23 @@ python -m pip install -r benchmarks/requirements.txt   # harbor (from its branch
 benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 task set (data: clone, not pip)
 
 python benchmarks/run_benchmarks.py --dataset swe-bench         --agent mini-code --mode short_eval
+python benchmarks/run_benchmarks.py --dataset swe-bench-lite    --agent all       --mode short_eval
 python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all       --mode short
 ```
+
+Both SWE-bench splits work on this cluster and need no extra repository — `swe-bench-lite`
+is the same harness, the same published instance images and the same grading, only the
+HuggingFace dataset changes. Measured on the Docker-less H200 with `--limit 5`,
+`--agent all`: Verified 10/15 (mini-code 2, pi 4, claude-code 4) and Lite 12/15
+(mini-code 3, pi 4, claude-code 5); Terminal-Bench 2.1 scores per task but not yet as a
+campaign (one task: reward 0.0, nine verifier tests, no exception).
 
 Each run writes `results/<run-id>/summary_results.csv` — one row per agent, with
 `trials, resolved, pass_rate, mean_reward, mean_seconds`. `--mode short` is a smoke run
 (3 tasks, no grading), `short_eval` grades those 3, `full` runs everything, and `--dry-run`
 prints every command and starts nothing.
 
-The harness runs coding agents against **Terminal-Bench 2.x** and **SWE-bench Verified** and
+The harness runs coding agents against **Terminal-Bench 2.x** and **SWE-bench Verified/Lite** and
 compares them — mini-code with several settings, Claude Code, Pi and a deterministic `mock`
 agent — by wrapping each benchmark's own official harness (`harbor`, `tb`,
 `swebench.harness.run_evaluation`). It supports Docker and Apptainer, exports a CSV and ships an

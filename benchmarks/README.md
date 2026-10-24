@@ -273,7 +273,9 @@ takes `options.instance_ids` / `options.skip_ids` for an ad-hoc sample.
 
 No forks, no extra repositories, no additional containers: `--dataset swe-bench-lite`
 downloads the instance list through `datasets` (an existing requirement) and pulls the
-same images the Verified runs use. The 300 Lite instances overlap Verified (Lite is a
+same images the Verified runs use. **Measured, not assumed:** `swe-lite-5f` ran both
+splits' full path on this Docker-less host and graded 12/15 (§9) -- Lite is *proven*,
+not merely "should work". The 300 Lite instances overlap Verified (Lite is a
 subset of the public train/test pool, Verified is human-adjudicated), so the two
 campaigns share SIFs and are cheap to run back to back.
 
@@ -516,23 +518,65 @@ trial), while `pi` and `claude-code` solve the same instances in fewer, larger
 turns. None of the three needed a reprompt, a retry or a restart, which is what the
 four Apptainer fixes in §11 bought.
 
-### The same campaign on SWE-bench Lite (`swe-lite-5c`)
+### The same campaign on SWE-bench Lite (`swe-lite-5f`)
 
 ```bash
 BENCHMARK_SCRATCH=/hx2-weka/home/nr1713/scratch/bench \
   python benchmarks/run_benchmarks.py --dataset swe-bench-lite --agent all \
-      --mode short_eval --limit 5 --run-id swe-lite-5c
+      --mode short_eval --limit 5 --run-id swe-lite-5f
 ```
 
-Same model, same three agents, same grading path -- the point of running it is that
-Lite needs *nothing* new (§5): the entry point pulls five more published instance
-images (`swe-django__django-11099.sif`, `swe-sympy__sympy-20590.sif`,
-`swe-matplotlib__matplotlib-26020.sif`, `swe-pytest-dev__pytest-11148.sif`,
-`swe-scikit-learn__scikit-learn-13496.sif`) and grades them with the same
-`swebench.harness.grading`. First-time cost is the pulls, not the harness: ~4 min per
-image (~1.0-1.1 GB each) on this filesystem, so budget ~20 min before the first agent
-turn; the Verified campaign's five images were already cached. Results land in
-`results/swe-lite-5c/summary_results.csv` exactly like Verified's.
+Same model, same three agents, same grading path -- Lite needs *nothing* new (§5):
+five more published instance images are pulled (`swe-django__django-11099.sif`,
+`swe-sympy__sympy-20590.sif`, `swe-matplotlib__matplotlib-26020.sif`,
+`swe-pytest-dev__pytest-11148.sif`, `swe-scikit-learn__scikit-learn-13496.sif`) and
+graded with the same `swebench.harness.grading`.
+
+| agent | resolved | instances resolved | instances not resolved | grading errors |
+| --- | --- | --- | --- | --- |
+| mini-code | **3/5** | 11099, 13496, 20590 | matplotlib-26020, pytest-11148 | 0 |
+| pi | **4/5** | 11099, 26020, 13496, 20590 | pytest-11148 | 0 |
+| claude-code | **5/5** | all five | -- | 0 |
+| **all** | **12/15 (80%)** | | | |
+
+`results/swe-lite-5f/summary_results.csv`:
+
+```
+swe-bench-lite,mini-code,short_eval,5,3,0.6,0.6,,,swe-lite-5f/mini-code,ok
+swe-bench-lite,pi,short_eval,5,4,0.8,0.8,,,swe-lite-5f/pi,ok
+swe-bench-lite,claude-code,short_eval,5,5,1.0,1.0,,,swe-lite-5f/claude-code,ok
+```
+
+Wall clock 15:47 -> 17:20 for all fifteen trials plus three grading passes, with
+all ten instance images already cached by then. First-time cost is the pulls, not the
+harness, and it is uneven: django 11 min, sympy 9 min, pytest 9 min, matplotlib
+**32 min** (~1.4 GB and a conda env unpack), scikit-learn 12 min -- budget an hour
+before the first agent turn on a cold cache, and note that `--limit` does not shrink
+it because every selected instance is pulled before any agent runs.
+
+Three of these numbers are worth more than the total: `matplotlib__matplotlib-26020`
+is the instance `pi` and `claude-code` solve and `mini-code` does not, `pytest-11148`
+is the one both cheaper agents miss, and `claude-code` cleared Lite where it had
+missed `astropy__astropy-13033` on Verified.
+
+### What Lite actually needed to work (two first-run-only bugs)
+
+Both were invisible on Verified because its images were already cached, and both
+cost a whole Lite campaign before they were found:
+
+* **the agent command referenced the registry, not the `.sif`.** The per-instance
+  commands used `docker://swebench/sweb.eval.x86_64.<id>` whenever the `.sif` did not
+  exist *at plan time* -- but the plan's own first step pulls exactly that file. So a
+  brand-new instance set ran `apptainer exec docker://...` and died in 1.7 s with
+  `requested access to the resource is denied` (the docker tag needs the dataset's
+  `__` -> `_1776_` escaping, which the template cannot reproduce). Apptainer now
+  always execs the cache path; run `swe-lite-5d` is the failure, `swe-lite-5f` the fix.
+* **the host's site-packages leaked into every image.** `--cleanenv` does not stop
+  apptainer from bind-mounting `$HOME`, so `~/.local/lib/python3.11/site-packages`
+  landed on the container's `sys.path` and injected this host's *dev* matplotlib into
+  every image (`Error processing line 1 of ...matplotlib-3.8.0.dev...-nspkg.pth` at
+  the top of every agent log). `PYTHONNOUSERSITE=1` is now set for every apptainer
+  exec.
 
 ### Terminal-Bench, one scored trial (`tb21-bn3`)
 
@@ -704,6 +748,14 @@ while the error text named the real cause.
 | every SWE-bench instance reported `the model patch did not apply` | the graded `/testbed` comes from the read-only `.sif`, so `git apply` died with `Unable to create '/testbed/.git/index.lock': Read-only file system` | `benchmarks/suites/swebench_apptainer.py` stages the checkout on the host and binds it back over `/testbed`, the same trick the agent path uses |
 | a campaign ends with `no report file` although every agent ran | the per-trial instance list is copied from `_prepare/` **without** its `instances.grading.jsonl` sidecar, so the grader had no `eval_script` (`KeyError: 'eval_script'`) | `benchmarks/runner.py` copies the sidecar alongside the list |
 | `grading failed: No module named 'swebench'` | the grader is spawned with the *launcher's* interpreter; on this host `swebench` lives in the harbor env, not in the CLI's env | `_grader_python()` in `benchmarks/suites/swebench.py` probes for an interpreter that can `import swebench` (`options.grader_python`, `$BENCHMARK_GRADER_PYTHON`, then `~/miniconda3/envs/hb`) |
+
+Two more turned up only on a **cold instance set** (the first Lite run), because
+every Verified campaign had its `.sif` files already cached:
+
+| Symptom | Real cause | Fix |
+| --- | --- | --- |
+| every Lite agent dies in ~2 s with `reading manifest latest in docker.io/swebench/sweb.eval.x86_64.<id>: requested access to the resource is denied` | the instance commands fell back to the `docker://` reference whenever the `.sif` was not on disk *at plan time* -- but the plan's first step is the pull that creates it, and the docker tag needs the dataset's `__` -> `_1776_` escaping | `swebench.py`: under apptainer the image is always the cache path; the pull step guarantees it exists |
+| every agent log opens with `Error processing line 1 of .../matplotlib-3.8.0.dev...-nspkg.pth` | `--cleanenv` does not stop apptainer from bind-mounting `$HOME`, so the host's `~/.local/lib/python3.11/site-packages` is on the container's `sys.path` (a dev matplotlib, injected into a matplotlib benchmark image) | `benchmarks/runtime.py`: `PYTHONNOUSERSITE=1` for every apptainer exec |
 
 A fifth one is not Apptainer-specific but bites the same way: with a thinking model,
 an output cap that is too small is *not* a neutral safety net. At `--max-tokens 4096`
