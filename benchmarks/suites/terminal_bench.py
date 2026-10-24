@@ -191,6 +191,10 @@ class TerminalBenchSuite(Suite):
         """
         if (trial.container_runtime or "docker") != "apptainer":
             return None
+        if self.local_dataset_dir(trial.suite):
+            # The tasks are a local checkout and harbor builds each .sif from the
+            # task's own Dockerfile, so there is nothing to stage or download.
+            return None
         spec = trial.suite
         options = spec.options or {}
         argv = [
