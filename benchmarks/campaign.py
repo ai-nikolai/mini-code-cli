@@ -35,10 +35,20 @@ from .runner import Runner
 EXIT_OK = 0
 EXIT_PROBLEM = 2
 
-#: ``--dataset`` -> (config file, suite name, label used in the CSV).
+#: ``--dataset`` -> (config file, suite name, label used in the CSV[, overrides]).
+#:
+#: The optional fourth item is applied to the suite's own keys, which is how
+#: ``swe-bench-lite`` reuses the same config, models and agents: Lite is the same
+#: harness, the same ``swebench`` package and the same published instance images
+#: (``swebench/sweb.eval.x86_64.*``), only a different HuggingFace dataset --
+#: 300 instances instead of 500. Nothing else has to exist for it.
 DATASETS = {
     "swe-bench": ("benchmarks/configs/ornith_30b.json", "swebench", "swe-bench"),
     "swebench": ("benchmarks/configs/ornith_30b.json", "swebench", "swe-bench"),
+    "swe-bench-lite": ("benchmarks/configs/ornith_30b.json", "swebench",
+                       "swe-bench-lite", {"dataset": "SWE-bench/SWE-bench_Lite"}),
+    "swebench-lite": ("benchmarks/configs/ornith_30b.json", "swebench",
+                      "swe-bench-lite", {"dataset": "SWE-bench/SWE-bench_Lite"}),
     "terminalbench-2.1": ("benchmarks/configs/terminal_bench_21.json",
                           "terminal-bench", "terminalbench-2.1"),
     "terminal-bench-2.1": ("benchmarks/configs/terminal_bench_21.json",
@@ -66,7 +76,7 @@ def build_parser():
         prog="benchmarks/run_benchmarks.py",
         description="Run one benchmark: pick a dataset, an agent and a mode.")
     parser.add_argument("--dataset", "-d", required=True, choices=sorted(DATASETS),
-                        help="swe-bench | terminalbench-2.1 | terminalbench-2.0")
+                        help="swe-bench | swe-bench-lite | terminalbench-2.1 | terminalbench-2.0")
     parser.add_argument("--agent", "-a", default="all", choices=AGENT_CHOICES,
                         help="mini-code | pi | claude-code | all (default: all)")
     # Both spellings are accepted on purpose: `--mode` in documentation, `-mode`
@@ -122,7 +132,8 @@ def build_config(dataset, agent, mode, limit=None, n_concurrent=None,
     narrows the matrix to one suite and one agent, and sets the size and the
     evaluation switches that the mode names.
     """
-    path, suite_name, label = DATASETS[dataset]
+    path, suite_name, label = DATASETS[dataset][:3]
+    suite_overrides = DATASETS[dataset][3] if len(DATASETS[dataset]) > 3 else {}
     mode_limit, evaluate, overrides = MODES[mode]
     limit = mode_limit if limit is None else limit
 
@@ -143,6 +154,7 @@ def build_config(dataset, agent, mode, limit=None, n_concurrent=None,
         if suite.get("name") != suite_name:
             continue
         suite = dict(suite)
+        suite.update(suite_overrides)
         if limit is not None:
             suite["limit"] = limit
         options = dict(suite.get("options") or {})

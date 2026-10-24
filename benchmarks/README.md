@@ -239,11 +239,42 @@ hard-codes a preamble.
 | `terminal-bench` 2.0 | `terminal-bench@2.0` -- what the harbor registry publishes (`harbor datasets list --legacy`) | `harbor run -d <dataset>@<version>` |
 | `terminal-bench` 2.1 | the local `external_repos/terminal-bench-2-1/` checkout (the registry has no `@2.1` yet) | `harbor run -p external_repos/terminal-bench-2-1`, via `options.dataset_dir` in `benchmarks/configs/terminal_bench_21.json` |
 | `terminal-bench` (`options.harness: "tb"`) | `terminal-bench-core==0.1.1` | `tb run --dataset ...` (Terminal-Bench 1.x) |
-| `swebench` | `SWE-bench/SWE-bench_Verified`, split `test` | `python -m swebench.harness.run_evaluation` |
+| `swebench` | `SWE-bench/SWE-bench_Verified` (500 instances), split `test` | `python -m swebench.harness.run_evaluation` |
+| `swebench` | `SWE-bench/SWE-bench_Lite` (300 instances), split `test` -- `--dataset swe-bench-lite` | same harness, same images |
 
 Claude Code and Pi are harbor's own agents for Terminal-Bench; mini-code goes through the
 installed-agent bridge in `benchmarks/harbor_agents.py` (harbor needs the repository on
 `PYTHONPATH` for that, which the suite sets for you).
+
+**Which SWE-bench splits are available?** *Verified* and *Lite* -- both today, with
+nothing extra to install or clone:
+
+```bash
+python benchmarks/run_benchmarks.py --dataset swe-bench       --agent all --mode short_eval --limit 5
+python benchmarks/run_benchmarks.py --dataset swe-bench-lite  --agent all --mode short_eval --limit 5
+```
+
+Lite is the *same* `swebench` packaging, the same grading path and the same published
+instance images (`swebench/sweb.eval.x86_64.<id>`, which the dataset rows name
+themselves); it is only a different HuggingFace dataset -- 300 instances instead of
+500 -- so the whole difference is the `dataset` field, which
+`campaign.DATASETS["swe-bench-lite"]` overrides:
+
+```json
+{"dataset": "SWE-bench/SWE-bench_Lite", "split": "test"}
+```
+
+No forks, no extra repositories, no additional containers: `--dataset swe-bench-lite`
+downloads the instance list through `datasets` (an existing requirement) and pulls the
+same images the Verified runs use. The 300 Lite instances overlap Verified (Lite is a
+subset of the public train/test pool, Verified is human-adjudicated), so the two
+campaigns share SIFs and are cheap to run back to back.
+
+Running the *full* (Unverified) `SWE-bench/SWE-bench` split works the same way: point
+the suite's `dataset` at it. The entry point takes no per-option override (there is no
+`--set`), so that means a one-line config -- copy
+`benchmarks/configs/ornith_30b.json`, change the `swebench` suite's `dataset`, and pass
+it with `python -m benchmarks run -c <config> --suite swebench`.
 
 ---
 
@@ -664,13 +695,17 @@ reported instead of being switched. Knobs: `EXTERNAL_REPOS_DIR`,
 
 `benchmarks/configs/terminal_bench_21.json` points at
 `external_repos/terminal-bench-2-1`, resolved **against the current working
-directory** — so run the entry point from the repository root, or pass an absolute
-path:
+directory** — so run the entry point from the repository root:
 
 ```bash
 python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent mini-code --mode short
-python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent mini-code --mode short \
-    --set options.dataset_dir=/abs/path/to/terminal-bench-2-1
+```
+
+To run from elsewhere, use an absolute path instead of a relative one: the entry point
+has no per-option override, so make the edit in the config (or a copy of it):
+
+```json
+"dataset_dir": "/abs/path/to/external_repos/terminal-bench-2-1"
 ```
 
 ### 13.2 Publishing: `benchmarks/scripts/push_all_repos.sh`
