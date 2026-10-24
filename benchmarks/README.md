@@ -372,6 +372,37 @@ grading is backend-agnostic, so the harness only needed its transport replaced. 
 acceptance test: the *gold* patch for `astropy__astropy-12907` scores
 `resolved: true` through `--backend apptainer` with no Docker daemon on the machine.
 
+### Measured with the unified `./benchmark` CLI (last run)
+
+Same model and host, `--mode short_eval` on three SWE-bench instances
+(`astropy__astropy-12907`, `13033`, `13236`), run id `swe-short-eval4`:
+
+| agent | resolved | instances | note |
+| --- | --- | --- | --- |
+| mini-code | 2/3 | 12907, 13033 | 13236 applies cleanly but fails its tests |
+| pi | 2/3 | 12907, 13236 | 13033 applies cleanly but fails its tests |
+| claude-code | 2/3 awarded | 12907, 13033 | third patch applies cleanly; grading for it aborted when the suite exited 1 before the report was written |
+
+All nine trials produced a non-empty `model.patch` and every patch applied, so
+these are real attempts, not missing-agent failures -- the earlier 0/9 rows were
+the agent never existing inside the image. Two bugs were behind the previous
+1/3: the SWE path never wrote `/opt/agent/agent.md` (so every mini-code trial
+died on `The AGENT.md ... does not exist`) and the endpoint had been started
+without `--tool-call-parser qwen3_xml`, which turned every tool call into plain
+prose and ended the run after one turn.
+
+**Terminal-Bench 2.1 is still not scored.** The trials start the container, the
+in-container server comes up and then the environment times out. The last line
+of `trial.log` was `[harbor] Installing tmux...`: `bootstrap.sh` ran an
+unbounded `apt-get install` on an image whose apt lists were cleared and whose
+writable overlay is 64 MiB, before `exec`ing the server. That call is now
+bounded (`timeout`), the failure is reported instead of swallowed, and
+`HARBOR_SKIP_TOOL_INSTALL=1` skips it entirely -- a session without tmux already
+degrades to a plain shell. With the fix the start phase gets through
+(`tmux unavailable; continuing without it`, then `Uvicorn running`), so the
+remaining blocker is the first call harbor makes *after* the server is up, which
+is where the reruns still park.
+
 ### What the Docker-free path actually costs (measured)
 
 The first end-to-end run of a *Dockerfile-only* task on this host — the case that
