@@ -342,7 +342,8 @@ Everything benchmark-related lives in **[`benchmarks/`](benchmarks/README.md)** 
 its tests, its dependencies and its scripts:
 
 ```bash
-python -m pip install -r benchmarks/requirements.txt
+python -m pip install -r benchmarks/requirements.txt   # harbor (from its branch), swebench, vllm
+benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 task set (data: clone, not pip)
 
 python benchmarks/run_benchmarks.py --dataset swe-bench         --agent mini-code --mode short_eval
 python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all       --mode short
