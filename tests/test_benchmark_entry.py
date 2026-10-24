@@ -7,6 +7,7 @@ CSV that is the output of a run.
 import csv
 import io
 import os
+import sys
 import tempfile
 import unittest
 
@@ -98,8 +99,12 @@ class CampaignTests(unittest.TestCase):
                     "--results-dir", tmp, "--run-id", "dry"])
             self.assertEqual(code, 0)
             printed = buffer.getvalue()
-            self.assertIn("miniconda", printed + "miniconda"
-                          if False else printed)
+            # The plan renders the interpreter that will run the prepare step,
+            # which is whatever python started the campaign -- on CI that is a
+            # hostedtoolcache path, locally a conda one. Asserting on
+            # sys.executable pins the behaviour without pinning the host.
+            self.assertIn(sys.executable, printed)
+            self.assertIn("-m benchmarks.suites.swebench_env", printed)
             self.assertIn("summary:", printed)
             path = os.path.join(tmp, "_dry_run", "dry",
                                 summary_module.SUMMARY_FILENAME)
