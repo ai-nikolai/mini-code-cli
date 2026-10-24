@@ -330,6 +330,12 @@ class TerminalBenchSuite(Suite):
             "n_concurrent", trial.limit or 1)))]
         if trial.limit:
             argv += ["--n-tasks", str(int(trial.limit))]
+        # Without this harbor takes the first tasks of the dataset directory in
+        # its own order: asking for the `bn-fit-modify` campaign still ran
+        # `adaptive-rejection-sampler` (the trial directory said so). Pin the ids
+        # the caller named.
+        for task_id in trial.suite.task_ids:
+            argv += ["-i", str(task_id)]
         if options.get("max_retries"):
             argv += ["--max-retries", str(int(options["max_retries"]))]
         if options.get("cpus"):

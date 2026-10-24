@@ -441,8 +441,28 @@ died on `The AGENT.md ... does not exist`) and the endpoint had been started
 without `--tool-call-parser qwen3_xml`, which turned every tool call into plain
 prose and ended the run after one turn.
 
-**Terminal-Bench 2.1 now runs end to end; it is not yet *scored*.** Two separate
-blockers were fixed in this session. First the start phase: `bootstrap.sh` ran an
+**Terminal-Bench 2.1 is now scored end to end.** One cached task, one agent
+(`--dataset terminalbench-2.1-bn`, `bn-fit-modify`, `mini-code`), run `tb21-bn3`:
+
+| what | result |
+| --- | --- |
+| environment start | ok, ~2 min (SIF cached; a *rebuilt* SIF carries `/opt/harbor-server`) |
+| agent execution | 3.5 min, `python3 -m mini_code_cli` inside the task image, exit 0 |
+| verifier | pytest ran for 3 min: **9 tests, 0 passed, 9 failed** (`verifier/ctrf.json`) |
+| reward | **0.0**, `exception_info: null` — a real score, not a crash |
+| campaign CSV | `terminalbench-2.1-bn,mini-code,short,1,0,0.0,0.0,,,tb21-bn3/mini-code,ok` |
+
+The zero is honest: the agent left the task's five output CSVs unwritten
+(`test_bn_sample_exists: FileNotFoundError`, ...), i.e. on this task it did not
+manage the work in the time it used -- the opposite failure mode from the earlier
+"everything is an exception" runs. Two further fixes were needed to get here: the
+suite now forwards harbor's `--agent-timeout-multiplier` (a 2.1 task's own 900 s
+budget expired mid-work) and pins the requested tasks with `-i` (harbor otherwise
+takes the dataset directory's own first tasks: asking for `bn-fit-modify` ran
+`adaptive-rejection-sampler`).
+
+The two blockers behind the old "parks at `Uvicorn running`" note were
+fixed in this session. First the start phase: `bootstrap.sh` ran an
 unbounded `apt-get install` on an image whose apt lists were cleared and whose
 writable overlay is 64 MiB, before `exec`ing the server -- that call is bounded now
 and a session without tmux degrades to a plain shell (`tmux unavailable; continuing
@@ -456,13 +476,13 @@ container and reports `server failed to start`. With a wall-clock deadline
 `trial.log` shows the agent's own argv, `agent_execution` has real timestamps and
 `verifier_result.rewards.reward` is written (0.0 on the trial below).
 
-What is left is a *budget* question, not a plumbing one: on
+What is left is scale: a *budget* question, not a plumbing one. On
 `adaptive-rejection-sampler` the agent was still working when harbor's
 `AgentTimeoutError` fired at the task's 900 s budget (raised 6x to 5400 s via
-`agent_timeout_multiplier`), so the run is honest but empty -- the task wants more
-time than a 30B model on one H200 can give it in a quarter of an hour. A
-Terminal-Bench campaign therefore needs a longer budget per task (and costs hours
-per task at that budget), which is why the numbers in §9 are SWE-bench only.
+`agent_timeout_multiplier`); `bn-fit-modify` scored inside 7 minutes but scored
+zero. A five-task, three-agent Terminal-Bench campaign therefore costs hours and
+will not flatter a 30B model, which is why the campaign numbers in §9 are
+SWE-bench; the path itself is proven, task by task.
 
 ### Five data points x three agents, SWE-bench Verified (`swe-verified-5c`)
 
@@ -513,6 +533,21 @@ images (`swe-django__django-11099.sif`, `swe-sympy__sympy-20590.sif`,
 image (~1.0-1.1 GB each) on this filesystem, so budget ~20 min before the first agent
 turn; the Verified campaign's five images were already cached. Results land in
 `results/swe-lite-5c/summary_results.csv` exactly like Verified's.
+
+### Terminal-Bench, one scored trial (`tb21-bn3`)
+
+```bash
+python benchmarks/run_benchmarks.py --dataset terminalbench-2.1-bn \
+    --agent mini-code --mode short --limit 1 --run-id tb21-bn3
+```
+
+`bn-fit-modify`, one agent, one cached `.sif`: environment 2 min, agent 3.5 min,
+verifier 3 min (pytest, 9 tests), **reward 0.0**, `exception_info: null`, and
+`results/tb21-bn3/summary_results.csv` written by the same collector the SWE-bench
+campaigns use. The zero is a measurement, not a failure of the harness: the agent
+never wrote the task's output CSVs, so nine `FileNotFoundError`s is exactly what
+the verifier should say. `results/tb21-fix4` is the counter-example worth keeping --
+same task family, `AgentTimeoutError` at 5400 s, no reward at all.
 
 ### What the Docker-free path actually costs (measured)
 
