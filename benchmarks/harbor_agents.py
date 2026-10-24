@@ -96,6 +96,12 @@ class CommandAgent(BaseInstalledAgent):
                                          target_dir=f"{root}/{name}")
             self._uploaded_python_path = root
         if self._agent_md_file and os.path.isfile(self._agent_md_file):
+            # A Terminal-Bench image is free-form: /opt/agent does not exist
+            # there (it does in the SWE-bench image, which is where this path was
+            # first used), and `cp` fails with "No such file or directory".
+            # Create the parent so the preamble lands whatever the image ships.
+            await environment.exec(
+                f"mkdir -p {shlex.quote(os.path.dirname(AGENT_MD_IN_CONTAINER))}")
             await environment.upload_file(source_path=self._agent_md_file,
                                           target_path=AGENT_MD_IN_CONTAINER)
         for command in self._install_commands:

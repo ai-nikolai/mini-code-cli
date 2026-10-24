@@ -60,7 +60,13 @@ class MiniCodeAgent(AgentAdapter):
         "swe": {"flags": ["--auto-mode", "--enable-shell", "--sudo"],
                 "max_context_tokens": 131072,
                 "tool_timeout": 600,
-                "llm_timeout": 600},
+                "llm_timeout": 600,
+                # Bounded, reproducible responses: see MiniCodeAgent.argv.
+                # 4096 was too tight -- a thinking model spent the whole budget on
+                # reasoning and returned no tool call (empty patch, 0 resolved),
+                # even with the loop's truncation nudge.
+                "max_tokens": 8192,
+                "temperature": 0.6},
     }
 
     def argv(self, prompt, model, workspace=None, container=False):
@@ -85,6 +91,15 @@ class MiniCodeAgent(AgentAdapter):
             argv += ["--tool-timeout", str(options["tool_timeout"])]
         if options.get("llm_timeout"):
             argv += ["--llm-timeout", str(options["llm_timeout"])]
+        # A thinking model will happily spend 40+ minutes in *one* reasoning
+        # stream (measured: a single request still generating after 30 min while
+        # the rest of the server answered four requests in twenty seconds), which
+        # makes a campaign unrunnable. Cap the response and pin the sampling so
+        # two runs of the same benchmark are comparable.
+        if options.get("max_tokens"):
+            argv += ["--max-tokens", str(options["max_tokens"])]
+        if options.get("temperature") is not None:
+            argv += ["--temperature", str(options["temperature"])]
         argv += list(options.get("flags", []))
         # The shared preamble (benchmarks/agents/agent.md), read by the CLI itself
         # and inserted right after the system prompt.

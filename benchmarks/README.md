@@ -264,6 +264,13 @@ themselves); it is only a different HuggingFace dataset -- 300 instances instead
 {"dataset": "SWE-bench/SWE-bench_Lite", "split": "test"}
 ```
 
+Lite's rows are ordered the same way as Verified's, so `--limit 5` alone would score
+the same five instances in both campaigns. `--dataset swe-bench-lite` therefore pins a
+different five (`campaign.LITE_INSTANCES`: `django__django-11099`,
+`sympy__sympy-20590`, `matplotlib__matplotlib-26020`, `pytest-dev__pytest-11148`,
+`scikit-learn__scikit-learn-13496`) through the suite's `task_ids`; the same mechanism
+takes `options.instance_ids` / `options.skip_ids` for an ad-hoc sample.
+
 No forks, no extra repositories, no additional containers: `--dataset swe-bench-lite`
 downloads the instance list through `datasets` (an existing requirement) and pulls the
 same images the Verified runs use. The 300 Lite instances overlap Verified (Lite is a
@@ -434,17 +441,60 @@ died on `The AGENT.md ... does not exist`) and the endpoint had been started
 without `--tool-call-parser qwen3_xml`, which turned every tool call into plain
 prose and ended the run after one turn.
 
-**Terminal-Bench 2.1 is still not scored.** The trials start the container, the
-in-container server comes up and then the environment times out. The last line
-of `trial.log` was `[harbor] Installing tmux...`: `bootstrap.sh` ran an
+**Terminal-Bench 2.1 now runs end to end; it is not yet *scored*.** Two separate
+blockers were fixed in this session. First the start phase: `bootstrap.sh` ran an
 unbounded `apt-get install` on an image whose apt lists were cleared and whose
-writable overlay is 64 MiB, before `exec`ing the server. That call is now
-bounded (`timeout`), the failure is reported instead of swallowed, and
-`HARBOR_SKIP_TOOL_INSTALL=1` skips it entirely -- a session without tmux already
-degrades to a plain shell. With the fix the start phase gets through
-(`tmux unavailable; continuing without it`, then `Uvicorn running`), so the
-remaining blocker is the first call harbor makes *after* the server is up, which
-is where the reruns still park.
+writable overlay is 64 MiB, before `exec`ing the server -- that call is bounded now
+and a session without tmux degrades to a plain shell (`tmux unavailable; continuing
+without it`). Then the "parks at `Uvicorn running`" symptom this section used to
+blame on the post-start call: it was harbor's health loop, a counted
+`for i in range(60)` + `sleep(1)` -- a fixed one-minute window that expires while the
+container is still bootstrapping (2-4 min here), after which harbor kills the
+container and reports `server failed to start`. With a wall-clock deadline
+(§11, "Four Apptainer-only failures") the trial proceeds through agent setup, runs
+`python3 -m mini_code_cli` inside the task image, and the verifier executes:
+`trial.log` shows the agent's own argv, `agent_execution` has real timestamps and
+`verifier_result.rewards.reward` is written (0.0 on the trial below).
+
+What is left is a *budget* question, not a plumbing one: on
+`adaptive-rejection-sampler` the agent was still working when harbor's
+`AgentTimeoutError` fired at the task's 900 s budget (raised 6x to 5400 s via
+`agent_timeout_multiplier`), so the run is honest but empty -- the task wants more
+time than a 30B model on one H200 can give it in a quarter of an hour. A
+Terminal-Bench campaign therefore needs a longer budget per task (and costs hours
+per task at that budget), which is why the numbers in §9 are SWE-bench only.
+
+### Five data points x three agents, SWE-bench Verified (`swe-verified-5c`)
+
+The run this section exists for: the same fixed model, `--mode short_eval`,
+`--limit 5`, all three agents, every patch graded through Apptainer:
+
+```bash
+BENCHMARK_SCRATCH=/hx2-weka/home/nr1713/scratch/bench \
+  python benchmarks/run_benchmarks.py --dataset swe-bench --agent all \
+      --mode short_eval --limit 5 --run-id swe-verified-5c
+```
+
+| agent | resolved | instances resolved | instances not resolved | grading errors |
+| --- | --- | --- | --- | --- |
+| mini-code | **2/5** | 12907, 13453 | 13033, 13236, 13398 | 0 |
+| pi | **4/5** | 12907, 13236, 13398, 13453 | 13033 | 0 |
+| claude-code | **4/5** | 12907, 13236, 13398, 13453 | 13033 | 0 |
+| **all** | **10/15 (66.7%)** | | | |
+
+All fifteen trials produced a non-empty `model.patch`, all fifteen were *graded*
+(`resolved_ids` / `unresolved_ids` in `swebench-*.json`, no `error_ids`), and the
+CSV above is `results/swe-verified-5c/summary_results.csv`. `astropy__astropy-13033`
+is the one instance no agent solves -- its FAIL_TO_PASS tests stay red even when the
+patch applies. Wall clock: 14:11 -> 15:24 for the whole campaign (agent minutes are
+dominated by `claude-code` on 13398: 647 s, and by `mini-code` on 13398: 350 s);
+grading is ~285 s per agent group of five.
+
+Reading the same run for *cost*: `mini-code` is the slowest agent per instance
+(122/72/228/350/41 s) because it makes many small tool calls (14-41 LLM calls per
+trial), while `pi` and `claude-code` solve the same instances in fewer, larger
+turns. None of the three needed a reprompt, a retry or a restart, which is what the
+four Apptainer fixes in §11 bought.
 
 ### What the Docker-free path actually costs (measured)
 
@@ -589,6 +639,26 @@ Requirements and limits of this path:
   carry python3 (`bn-fit-modify`, `cancel-async-tasks`) start in seconds. Bake the
   interpreter in at build time -- the Dockerfile path in §8 does exactly that --
   rather than raising the timeout.
+### Four Apptainer-only failures, and what they actually were
+
+Each of these looked like a model failure in the summary CSV and was not one. They
+are listed together because the pattern is the same: the harness reported a zero
+while the error text named the real cause.
+
+| Symptom | Real cause | Fix |
+| --- | --- | --- |
+| Terminal-Bench trial sits at `Uvicorn running` for ten minutes, then `server failed to start` | harbor's health loop was `for i in range(60)` + `sleep(1)` -- a *fixed one-minute window*. On a network filesystem the in-container bootstrap (venv probe, bounded tmux install, uvicorn) takes 2-4 min, and every fast connection refusal burned an iteration, so the window expired before the server was up | `external_repos/harbor` (commit "singularity: wait for the server with a wall-clock deadline"): wait on a deadline, `HARBOR_SINGULARITY_START_TIMEOUT` (default 900 s) |
+| every SWE-bench instance reported `the model patch did not apply` | the graded `/testbed` comes from the read-only `.sif`, so `git apply` died with `Unable to create '/testbed/.git/index.lock': Read-only file system` | `benchmarks/suites/swebench_apptainer.py` stages the checkout on the host and binds it back over `/testbed`, the same trick the agent path uses |
+| a campaign ends with `no report file` although every agent ran | the per-trial instance list is copied from `_prepare/` **without** its `instances.grading.jsonl` sidecar, so the grader had no `eval_script` (`KeyError: 'eval_script'`) | `benchmarks/runner.py` copies the sidecar alongside the list |
+| `grading failed: No module named 'swebench'` | the grader is spawned with the *launcher's* interpreter; on this host `swebench` lives in the harbor env, not in the CLI's env | `_grader_python()` in `benchmarks/suites/swebench.py` probes for an interpreter that can `import swebench` (`options.grader_python`, `$BENCHMARK_GRADER_PYTHON`, then `~/miniconda3/envs/hb`) |
+
+A fifth one is not Apptainer-specific but bites the same way: with a thinking model,
+an output cap that is too small is *not* a neutral safety net. At `--max-tokens 4096`
+the model spent the whole budget on reasoning and returned neither text nor a tool
+call; the CLI ended the session, the patch came back empty and the instance scored
+unresolved. The `swe` setting now uses `8192`, and `agent_loop` nudges a truncated
+(`finish_reason == "length"`) turn to continue up to three times instead of stopping.
+
 * SWE-bench grading under Apptainer is §11, not this section: `tb_apptainer.py`
   derives images for Terminal-Bench only.
 
