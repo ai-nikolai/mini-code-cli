@@ -336,6 +336,39 @@ says what went wrong in red, so it does not get a cheerful summary box on top. W
 the old per-field `Token usage (this session)` block is printed above it as well.
 
 
+## Benchmarks (academic evaluation)
+
+Everything benchmark-related lives in **[`benchmarks/`](benchmarks/README.md)** — the harness,
+its tests, its dependencies and its scripts:
+
+```bash
+python -m pip install -r benchmarks/requirements.txt   # harbor (from its branch), swebench, vllm
+#                one 3.12 env is enough: harbor needs >=3.12, mini-code supports 3.10+
+benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 task set (data: clone, not pip)
+
+python benchmarks/run_benchmarks.py --dataset swe-bench         --agent mini-code --mode short_eval
+python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all       --mode short
+```
+
+Each run writes `results/<run-id>/summary_results.csv` — one row per agent, with
+`trials, resolved, pass_rate, mean_reward, mean_seconds`. `--mode short` is a smoke run
+(3 tasks, no grading), `short_eval` grades those 3, `full` runs everything, and `--dry-run`
+prints every command and starts nothing.
+
+The harness runs coding agents against **Terminal-Bench 2.x** and **SWE-bench Verified** and
+compares them — mini-code with several settings, Claude Code, Pi and a deterministic `mock`
+agent — by wrapping each benchmark's own official harness (`harbor`, `tb`,
+`swebench.harness.run_evaluation`). It supports Docker and Apptainer, exports a CSV and ships an
+analyser. Every agent gets the same instructions from one file,
+`benchmarks/agents/agent.md`, so a comparison cannot be explained by three different prompts.
+
+See **[benchmarks/README.md](benchmarks/README.md)** for prerequisites, the two harness forks and
+their branches (installed from GitHub, and cloned into `external_repos/` for local development by
+`benchmarks/scripts/setup_external_repos.sh`), the `plan` / `run --csv` / `analyze` commands
+underneath the entry point, the Docker and Apptainer variants, the configs
+(`benchmarks/configs/ornith_30b.json` for TB 2.0 + SWE-bench, `terminal_bench_21.json` for the
+local TB 2.1 checkout), and what a run produces.
+
 ## Serving a model locally
 
 Tested with vLLM v0.30 (tool calling enabled):

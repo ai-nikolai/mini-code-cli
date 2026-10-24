@@ -27,10 +27,18 @@ import tabnanny
 import tempfile
 
 #: Directories linted when no target is given (relative to the repo root).
-DEFAULT_TARGETS = ("mini_code_cli", "tests", "scripts")
+DEFAULT_TARGETS = ("mini_code_cli", "benchmarks", "tests", "scripts")
 
-#: Directories never worth walking into.
-SKIP_DIRS = {"__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+#: Directories never worth walking into. ``benchmarks/`` keeps generated trees
+#: (run artifacts, staged benchmark tasks, derived images) that are git-ignored
+#: and are not this repository's code -- linting vendored task files is noise.
+SKIP_DIRS = {
+    "__pycache__", ".git", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "runs", "results", "datasets", "vendor",
+    # Cloned forks for local development (benchmarks/scripts/setup_external_repos.sh):
+    # someone else's code, not ours to lint.
+    "external_repos",
+}
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
