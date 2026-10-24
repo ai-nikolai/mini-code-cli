@@ -17,9 +17,18 @@
 harbor @ git+https://github.com/ai-nikolai/harbor.git@mini-code/apptainer
 # Terminal-Bench 1.x ("terminal-bench-core" datasets), wrapped with
 # options.harness="tb". Optional: only needed for the older task sets.
-# The 2.1 tasks are a *data* repository, not a package: they are cloned by
-# benchmarks/scripts/setup_external_repos.sh into external_repos/ and pointed at
-# with `dataset_dir` (see benchmarks/README.md §2).
+#
+# The 2.1 tasks are the part pip cannot install. ai-nikolai/terminal-bench-2-1
+# is a data repository -- 89 task directories, no setup.py or pyproject.toml --
+# so it has to be cloned, which is what benchmarks/scripts/setup_external_repos.sh
+# does:
+#
+#     benchmarks/scripts/setup_external_repos.sh
+#     -> external_repos/terminal-bench-2-1 @ mini-code/bench
+#
+# `pip install "terminal-bench @ git+https://github.com/ai-nikolai/terminal-bench-2-1.git@mini-code/bench"`
+# fails with "does not appear to be a Python project: neither 'setup.py' nor
+# 'pyproject.toml' found", and the 2.1 config's dataset_dir points at that clone.
 terminal-bench>=0.2.18
 # SWE-bench 5.0.2: `python -m swebench.harness.run_evaluation`, wrapped by
 # benchmarks/suites/swebench.py. Pulls `datasets` and the Docker SDK.
