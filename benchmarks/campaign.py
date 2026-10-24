@@ -71,6 +71,11 @@ DATASETS = {
                           "terminal-bench", "terminalbench-2.1"),
     "terminal-bench-2.1": ("benchmarks/configs/terminal_bench_21.json",
                            "terminal-bench", "terminalbench-2.1"),
+    # One cached, fast 2.1 task, for scoring the Terminal-Bench path without
+    # paying for an image build or for the whole three-task list.
+    "terminalbench-2.1-bn": ("benchmarks/configs/terminal_bench_21.json",
+                             "terminal-bench", "terminalbench-2.1-bn",
+                             {"task_ids": ["bn-fit-modify"]}),
     "terminalbench-2.0": ("benchmarks/configs/ornith_30b.json",
                           "terminal-bench", "terminalbench-2.0"),
     "terminal-bench": ("benchmarks/configs/ornith_30b.json", "terminal-bench",
