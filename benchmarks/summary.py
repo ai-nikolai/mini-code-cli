@@ -113,11 +113,18 @@ def read_run_outcomes(run_dir):
     """
     from .results import read_results
 
-    for name in ("results.jsonl", os.path.join("results", "results.jsonl")):
-        path = os.path.join(run_dir, name)
-        if os.path.isfile(path):
-            return read_results(path)
-    return []
+    # A campaign runs *inside* the directory it hands the runner, so the file sits
+    # at <campaign>/<agent>/<run-id>/<trial>/results.jsonl -- one per trial, not
+    # one per agent. Reading only <agent>/results.jsonl silently reported every
+    # agent as "0 trials", which is the one number a summary must never get wrong.
+    direct = os.path.join(run_dir, "results.jsonl")
+    if os.path.isfile(direct):
+        return read_results(direct)
+    outcomes = []
+    for root, _dirs, files in os.walk(run_dir):
+        if "results.jsonl" in files:
+            outcomes.extend(read_results(os.path.join(root, "results.jsonl")))
+    return outcomes
 
 
 def run_metadata(run_dir):
