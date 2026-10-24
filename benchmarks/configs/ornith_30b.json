@@ -103,7 +103,7 @@
     {
       "name": "pi",
       "settings": [
-        "default"
+        "all-tools"
       ],
       "models": [
         "ornith-35b-a3b"

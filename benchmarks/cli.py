@@ -217,6 +217,12 @@ def _cmd_prepare(config, trials):
         run_dir = os.path.join(config.output_dir, "_prepare", trial.run_id)
         os.makedirs(run_dir, exist_ok=True)
         command = prepare(trial, run_dir)
+        if command is None:
+            # A suite that cannot know until runtime (a local task checkout, or a
+            # runtime with nothing to stage) says so by returning None rather than
+            # forcing every caller to guess.
+            print(f"{trial.run_id}: nothing to prepare")
+            continue
         log_path = os.path.join(run_dir, "prepare.log")
         status = _execute(command, log_path, print)
         print(f"{trial.run_id}: {status} (log: {log_path})")
