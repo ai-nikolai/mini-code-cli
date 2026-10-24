@@ -6,8 +6,9 @@
 #
 #     python -m pip install -r benchmarks/requirements.txt
 #
-# Python 3.12+ is needed by terminal-bench itself (0.2.x); SWE-bench and the
-# agents' CLIs work on 3.10+.
+# Python 3.12+ for the whole file: harbor needs >= 3.12, and mini-code itself
+# supports 3.10+ -- so one 3.12 environment can hold both. SWE-bench and the
+# agents' CLIs are happy on 3.10+ if you prefer to split them.
 
 # --- benchmark harnesses -----------------------------------------------------
 # Harbor: the official harness for Terminal-Bench 2.x (2.0 / 2.1), wrapped by
