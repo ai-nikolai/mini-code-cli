@@ -496,6 +496,24 @@ trial), while `pi` and `claude-code` solve the same instances in fewer, larger
 turns. None of the three needed a reprompt, a retry or a restart, which is what the
 four Apptainer fixes in §11 bought.
 
+### The same campaign on SWE-bench Lite (`swe-lite-5c`)
+
+```bash
+BENCHMARK_SCRATCH=/hx2-weka/home/nr1713/scratch/bench \
+  python benchmarks/run_benchmarks.py --dataset swe-bench-lite --agent all \
+      --mode short_eval --limit 5 --run-id swe-lite-5c
+```
+
+Same model, same three agents, same grading path -- the point of running it is that
+Lite needs *nothing* new (§5): the entry point pulls five more published instance
+images (`swe-django__django-11099.sif`, `swe-sympy__sympy-20590.sif`,
+`swe-matplotlib__matplotlib-26020.sif`, `swe-pytest-dev__pytest-11148.sif`,
+`swe-scikit-learn__scikit-learn-13496.sif`) and grades them with the same
+`swebench.harness.grading`. First-time cost is the pulls, not the harness: ~4 min per
+image (~1.0-1.1 GB each) on this filesystem, so budget ~20 min before the first agent
+turn; the Verified campaign's five images were already cached. Results land in
+`results/swe-lite-5c/summary_results.csv` exactly like Verified's.
+
 ### What the Docker-free path actually costs (measured)
 
 The first end-to-end run of a *Dockerfile-only* task on this host — the case that
