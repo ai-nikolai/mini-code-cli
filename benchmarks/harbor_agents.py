@@ -46,7 +46,7 @@ class CommandAgent(BaseInstalledAgent):
     def __init__(self, argv_template=None, agent_name="command", model=None,
                  base_url=None, api_key_env=None, extra_env=None,
                  install_commands=None, python_path=None, agent_md_file=None,
-                 **kwargs):
+                 exec_timeout_sec=None, **kwargs):
         super().__init__(**kwargs)
         template = _as_list(argv_template)
         if not template:
@@ -72,6 +72,15 @@ class CommandAgent(BaseInstalledAgent):
         # here either, so the preamble travels with the agent: uploaded to the
         # same fixed path the template refers to (see AGENT_MD_IN_CONTAINER).
         self._agent_md_file = str(agent_md_file) if agent_md_file else None
+        # One `exec` carries the whole agent session. Harbor's singularity
+        # environment falls back to a 600 s HTTP timeout when the caller passes
+        # none (`_DEFAULT_HTTP_TIMEOUT`), so a run that legitimately needed 20
+        # minutes was killed at 10 and reported as "Agent execution timed out
+        # after 3600.0 seconds" -- the budget, not the cap that fired. Passing the
+        # budget through makes the container kill the command (`timeout --signal
+        # =TERM`) instead of the client giving up on a live process.
+        self._exec_timeout_sec = (int(exec_timeout_sec)
+                                  if exec_timeout_sec else None)
 
     # -- harbor interface ------------------------------------------------
 
@@ -121,7 +130,8 @@ class CommandAgent(BaseInstalledAgent):
             f"{key}={shlex.quote(value)}" for key, value in self._env().items())
         command = f"env {assignments} {shlex.join(argv)}" if assignments \
             else shlex.join(argv)
-        await self.exec_as_agent(environment, command=command)
+        await self.exec_as_agent(environment, command=command,
+                                 timeout_sec=self._exec_timeout_sec)
         if hasattr(context, "metadata") and isinstance(context.metadata, dict):
             context.metadata.setdefault("agent", self._agent_name)
             if self._model:

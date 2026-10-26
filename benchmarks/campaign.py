@@ -77,16 +77,17 @@ DATASETS = {
                              "terminal-bench", "terminalbench-2.1-bn",
                              {"task_ids": ["bn-fit-modify"]}),
     # Three 2.1 tasks whose .sif is already cached (so the campaign pays for no
-    # image build) with the agent budget capped at the task's own 2x: a 2.1 task
-    # budget is 900 s and the config's 6x means 90 min per trial, which three
-    # agents x three tasks turns into half a day.
+    # image build) with the agent budget at the task's own 4x -- 900 s x 4 is
+    # exactly the config's `agent_timeout_sec` (3600 s) ceiling, so a trial can
+    # never outlive an hour. The config's own 6x (5400 s) is the one that made
+    # `adaptive-rejection-sampler` burn 90 min without a score.
     "terminalbench-2.1-3": ("benchmarks/configs/terminal_bench_21.json",
                             "terminal-bench", "terminalbench-2.1-3",
                             {"task_ids": ["adaptive-rejection-sampler",
                                           "bn-fit-modify",
                                           "break-filter-js-from-html"],
-                             "options": {"agent_timeout_multiplier": 2,
-                                         "agent_timeout_sec": 1800}}),
+                             "options": {"agent_timeout_multiplier": 4,
+                                         "agent_timeout_sec": 3600}}),
     "terminalbench-2.0": ("benchmarks/configs/ornith_30b.json",
                           "terminal-bench", "terminalbench-2.0"),
     "terminal-bench": ("benchmarks/configs/ornith_30b.json", "terminal-bench",

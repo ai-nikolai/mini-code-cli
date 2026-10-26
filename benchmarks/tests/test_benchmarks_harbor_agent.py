@@ -35,13 +35,18 @@ def _install_harbor_stub():
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-        async def exec_as_agent(self, environment, command=None):
+        async def exec_as_agent(self, environment, command=None,
+                                env=None, cwd=None, timeout_sec=None):
             # Record instead of executing: that is the assertion surface.
             environment.commands.append(command)
+            environment.timeouts.append(timeout_sec)
 
     class BaseEnvironment:
         def __init__(self):
             self.commands = []
+            # The agent passes the trial budget as the exec timeout (harbor's
+            # singularity client otherwise gives up at a hard-wired 600 s).
+            self.timeouts = []
 
     class AgentContext:
         def __init__(self):
