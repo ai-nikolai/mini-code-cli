@@ -26,8 +26,18 @@ jobs:
       - name: Lint
         run: python scripts/lint.py
 
-      - name: Test
+      - name: Test the CLI
         run: python -m unittest discover -s tests -p "test_*.py"
+
+      # The benchmark harness is a separate, dependency-free package: its tests
+      # need neither a dataset nor a container, so CI runs them like the CLI's.
+      - name: Test the benchmark harness
+        run: python -m unittest discover -s benchmarks/tests -t . -p "test_*.py"
+
+      # The renamed entry point is the command the docs promise; --help proves it
+      # imports (and therefore that nothing it needs was left behind in the move).
+      - name: Smoke-test the benchmark entry point
+        run: python benchmarks/run_benchmarks.py --help
 
   packaging:
     # Build the distributions on every push so a packaging break (a module left

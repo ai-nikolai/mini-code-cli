@@ -477,6 +477,12 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
 # the agent session
 # ---------------------------------------------------------------------------
 
+#: How many times a truncated (``finish_reason == "length"``) reply may be
+#: nudged to continue before the session gives up. Bounded on purpose: a model
+#: that only ever rambles must still terminate.
+TRUNCATED_RETRY_LIMIT = 3
+
+
 class AgentSession:
     """A single interactive agent session.
 
@@ -529,6 +535,7 @@ class AgentSession:
         # Keeping the two apart is what lets usage survive a compaction.
         self.token_stats = empty_usage()
         self.total_usage = empty_usage()
+        self._truncated_retries = 0
 
         # Compaction budget. History is compacted when the *projected input size*
         # of the next request would not leave room for the reply inside the
@@ -2248,7 +2255,29 @@ class AgentSession:
         if tool_calls:
             self._run_tool_calls(tool_calls)
 
+        truncated = (usage or {}).get("finish_reason") == "length"
         if not response_text and not made_tool_calls:
+            if truncated and self._truncated_retries < TRUNCATED_RETRY_LIMIT:
+                # A thinking model can spend the whole output budget on reasoning
+                # and return neither text nor a tool call. Ending the session
+                # there throws away a whole benchmark trial (the patch comes back
+                # empty and the instance is scored unresolved), so nudge it once
+                # -- bounded, so a model that only ever rambles still stops.
+                self._truncated_retries += 1
+                self.console.note(
+                    "The reply hit the output-token limit before any answer or "
+                    "tool call; asking it to continue.", "warn")
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous reply was cut off by the output-token "
+                        "limit before you produced any answer or tool call. "
+                        "Continue from where you stopped: either call a tool or "
+                        "give the final answer, and keep your reasoning shorter "
+                        "than the budget allows.",
+                    ),
+                })
+                return True
             self.console.note("Warning: no response was given by the LLM.", "error")
 
         # Mirror the running tool-call total into this call's usage dict so the
