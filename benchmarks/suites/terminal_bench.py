@@ -314,6 +314,14 @@ class TerminalBenchSuite(Suite):
         python_path = adapter.harbor_python_path()
         if python_path and not selection.get("agent"):
             kwargs.setdefault("python_path", python_path)
+        # The agent runs as a single `exec`, and harbor's singularity client
+        # otherwise gives up after 600 s regardless of the budget below (see
+        # CommandAgent.exec_timeout_sec). Hand it the same budget the trial
+        # enforces, so the container kills the command and the client just waits.
+        if python_path and not selection.get("agent"):
+            kwargs.setdefault(
+                "exec_timeout_sec",
+                int(options.get("agent_timeout_sec", _timeout(trial, "agent_seconds"))))
         for key, value in kwargs.items():
             rendered = _kwarg(value)
             if rendered == "":
