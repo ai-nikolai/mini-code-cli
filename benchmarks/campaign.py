@@ -76,6 +76,17 @@ DATASETS = {
     "terminalbench-2.1-bn": ("benchmarks/configs/terminal_bench_21.json",
                              "terminal-bench", "terminalbench-2.1-bn",
                              {"task_ids": ["bn-fit-modify"]}),
+    # Three 2.1 tasks whose .sif is already cached (so the campaign pays for no
+    # image build) with the agent budget capped at the task's own 2x: a 2.1 task
+    # budget is 900 s and the config's 6x means 90 min per trial, which three
+    # agents x three tasks turns into half a day.
+    "terminalbench-2.1-3": ("benchmarks/configs/terminal_bench_21.json",
+                            "terminal-bench", "terminalbench-2.1-3",
+                            {"task_ids": ["adaptive-rejection-sampler",
+                                          "bn-fit-modify",
+                                          "break-filter-js-from-html"],
+                             "options": {"agent_timeout_multiplier": 2,
+                                         "agent_timeout_sec": 1800}}),
     "terminalbench-2.0": ("benchmarks/configs/ornith_30b.json",
                           "terminal-bench", "terminalbench-2.0"),
     "terminal-bench": ("benchmarks/configs/ornith_30b.json", "terminal-bench",
@@ -177,10 +188,17 @@ def build_config(dataset, agent, mode, limit=None, n_concurrent=None,
         if suite.get("name") != suite_name:
             continue
         suite = dict(suite)
+        # Read the config's options *before* the update below replaces the dict:
+        # a dataset entry may narrow them (e.g. a cheaper agent timeout for a
+        # smoke run) and merging keeps `dataset_dir` and the harness binary, which
+        # a caller naming one flag should not have to repeat.
+        base_options = dict(suite.get("options") or {})
         suite.update(suite_overrides)
         if limit is not None:
             suite["limit"] = limit
-        options = dict(suite.get("options") or {})
+        options = base_options
+        if isinstance(suite_overrides.get("options"), dict):
+            options.update(suite_overrides["options"])
         if n_concurrent is not None:
             options["n_concurrent"] = n_concurrent
             options["max_workers"] = n_concurrent
