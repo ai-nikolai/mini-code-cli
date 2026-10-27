@@ -593,6 +593,31 @@ never wrote the task's output CSVs, so nine `FileNotFoundError`s is exactly what
 the verifier should say. `results/tb21-fix4` is the counter-example worth keeping --
 same task family, `AgentTimeoutError` at 5400 s, no reward at all.
 
+### Terminal-Bench 2.1: three agents x three tasks (`tb21-3c`, `tb21-3d`)
+
+```bash
+python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 \
+    --agent all --mode short --limit 3 --run-id tb21-3c
+```
+
+Three agents, the same three tasks, one shared `.sif` cache. The rewards are only
+half the information here: the `exception_info` column is what says whether a zero
+is a measurement or a harness fault.
+
+| Agent | Task | Reward | `exception_info` | What it means |
+| --- | --- | --- | --- | --- |
+| mini-code | `break-filter-js-from-html` | **1.0** | `null` | solved, verifier green |
+| mini-code | `bn-fit-modify` | 0.0 | `null` | ran to the verifier; measured zero (§9 `tb21-bn3` explains why) |
+| mini-code | `adaptive-rejection-sampler` | 0.0 | `AgentTimeoutError` | budget, not a harness fault |
+| pi | `bn-fit-modify`, `break-filter-js-from-html` | 0.0 | `null` | measured zeros |
+| pi | `adaptive-rejection-sampler` | -- | `NonZeroAgentExitCodeError` | install died: `apt-get install curl` hit the client's 600 s cap (§11) |
+| claude-code | `adaptive-rejection-sampler` | -- | `AgentAuthenticationError` | `Not logged in` -- a dummy `ANTHROPIC_API_KEY` is enough to *launch* Claude Code but not to get past its own check |
+
+`tb21-3d` repeated the two failing agents after the image cache was repaired and
+reproduced the same split (`pi`: `RuntimeError` in setup, i.e. the install again;
+mini-code: `NonZeroAgentExitCodeError` on the same task), which is why the fix went
+into the install path rather than into a task config -- see §11.
+
 ### What the Docker-free path actually costs (measured)
 
 The first end-to-end run of a *Dockerfile-only* task on this host — the case that
@@ -756,6 +781,27 @@ every Verified campaign had its `.sif` files already cached:
 | --- | --- | --- |
 | every Lite agent dies in ~2 s with `reading manifest latest in docker.io/swebench/sweb.eval.x86_64.<id>: requested access to the resource is denied` | the instance commands fell back to the `docker://` reference whenever the `.sif` was not on disk *at plan time* -- but the plan's first step is the pull that creates it, and the docker tag needs the dataset's `__` -> `_1776_` escaping | `swebench.py`: under apptainer the image is always the cache path; the pull step guarantees it exists |
 | every agent log opens with `Error processing line 1 of .../matplotlib-3.8.0.dev...-nspkg.pth` | `--cleanenv` does not stop apptainer from bind-mounting `$HOME`, so the host's `~/.local/lib/python3.11/site-packages` is on the container's `sys.path` (a dev matplotlib, injected into a matplotlib benchmark image) | `benchmarks/runtime.py`: `PYTHONNOUSERSITE=1` for every apptainer exec |
+
+Two of these were found by *reading the exception text* rather than the reward
+column, and both live in the install path, which no SWE-bench campaign exercises:
+
+| Symptom | Real cause | Fix |
+| --- | --- | --- |
+| `pi` fails setup with `Agent install failed: HTTP request timed out after 600 seconds`, and `pi`-side tasks never even start | the singularity client had a fixed `_DEFAULT_HTTP_TIMEOUT = 600` fallback for any `exec` that named no budget, and `ensure_system_dependencies` named none -- so `apt-get install curl` on a slow mirror was cut at ten minutes by the *client*, not by any task budget | `external_repos/harbor` (commit "singularity: do not cap an unlimited exec at 600 s"): the fallback is `HARBOR_SINGULARITY_EXEC_TIMEOUT` (default 3600 s), and the package-manager call passes `SYSTEM_PACKAGE_TIMEOUT_SEC` (1800 s) so a wedged apt is still killed inside the container |
+| `which curl` inside a derived Terminal-Bench `.sif` prints a usage error and then `NO_CURL`, which reads like "curl is not baked in" | `apptainer exec <sif> which curl` mangles the argv (`which` sees an argument it rejects), so the probe fails even when curl is present -- `curl --version` and `ls /usr/bin/curl` both work | probe with `curl --version`, never `which`; §11's image build already put `curl` in `POST_INSTALL`, but a `.sif` built **before** that line existed does not have it, so it has to be rebuilt |
+
+The second one is worth keeping precisely because the wrong diagnosis was cheap:
+`pi` needs `curl` for its installer, `curl` is already in `tb_apptainer`'s
+`POST_INSTALL` list, and the actual missing piece was that the cached image predated
+that list. Rebuilding is not optional after touching the package list, and a stale
+`.sif` is invisible in the summary CSV -- it shows up as an install failure three
+layers down.
+
+Note that a local task checkout skips `tb_apptainer prepare` entirely (harbor builds
+each `.sif` itself), so the file harbor reuses is the one named after the *image*
+(`alexgshaw_<task>_20251031.sif`), not the `<task>__<task>.sif` that `prepare` would
+write. `benchmarks/scripts/rebuild_tb_sifs.py` rebuilds the former with the same
+definition `prepare` uses (baked `curl`, tmux, and the `/opt/harbor-server` venv).
 
 A fifth one is not Apptainer-specific but bites the same way: with a thinking model,
 an output cap that is too small is *not* a neutral safety net. At `--max-tokens 4096`
