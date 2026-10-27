@@ -70,10 +70,7 @@
       ],
       "models": [
         "ornith-35b-a3b"
-      ],
-      "kwargs": {
-        "model_api": "openai-completions"
-      }
+      ]
     },
     {
       "name": "claude-code",
