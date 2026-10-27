@@ -130,7 +130,18 @@ class PiAgent(AgentAdapter):
     def harbor_selection(self, model):
         # Harbor ships a Pi agent, and it already knows how to point Pi at a
         # custom OpenAI-compatible endpoint -- so no bridge is needed here.
-        return {"agent": "pi", "kwargs": {}}
+        #
+        # The catch is that it only takes that path when the agent is given
+        # ``model_api``: without it harbor invokes ``pi --provider openai`` with
+        # no base URL, pi reaches api.openai.com with a dummy key, and every
+        # session ends with empty content and ``usage {input: 0, output: 0}``.
+        # The harness can only record that as a 0.0 reward, which reads exactly
+        # like a model that tried and failed. vLLM serves the chat-completions
+        # API, so that is the protocol to name.
+        selection = {"agent": "pi"}
+        if model.api == "openai":
+            selection["kwargs"] = {"model_api": "openai-completions"}
+        return selection
 
     def metadata(self):
         payload = super().metadata()
