@@ -42,7 +42,8 @@
       "name": "ornith-35b-a3b",
       "model": "ornith-ai/Ornith-1.5-35B-A3B",
       "base_url": "http://127.0.0.1:30000",
-      "api": "openai"
+      "api": "openai",
+      "api_key_env": "OPENAI_API_KEY"
     },
     {
       "name": "ornith-35b-a3b-anthropic",
@@ -69,7 +70,10 @@
       ],
       "models": [
         "ornith-35b-a3b"
-      ]
+      ],
+      "kwargs": {
+        "model_api": "openai-completions"
+      }
     },
     {
       "name": "claude-code",
@@ -101,7 +105,7 @@
         "test_timeout_sec": 3600,
         "harbor_bin": "~/miniconda3/envs/hb/bin/harbor",
         "environment_build_timeout_multiplier": 6,
-        "agent_setup_timeout_multiplier": 6,
+        "agent_setup_timeout_multiplier": 12,
         "agent_timeout_multiplier": 6
       }
     }
