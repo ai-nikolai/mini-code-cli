@@ -68,6 +68,14 @@ class FlagHelpersTest(unittest.TestCase):
             make_args(enable_shell=True)))
         self.assertFalse(permissions.shell_forces_ask_permission(make_args()))
 
+    def test_shell_execution_enabled_is_the_new_honest_name(self):
+        self.assertTrue(permissions.shell_execution_enabled(
+            make_args(enable_shell=True)))
+        self.assertFalse(permissions.shell_execution_enabled(make_args()))
+        # The old name is kept as an alias for external callers.
+        self.assertIs(permissions.shell_forces_ask_permission,
+                      permissions.shell_execution_enabled)
+
     def test_sudo_is_reported_from_the_flag(self):
         self.assertTrue(permissions.sudo_disables_prompts(make_args(sudo=True)))
         self.assertFalse(permissions.sudo_disables_prompts(make_args()))

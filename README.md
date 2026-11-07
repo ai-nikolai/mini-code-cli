@@ -48,7 +48,7 @@ mini-code --url "https://api.deepseek.com" --model "deepseek-v4-flash"
 **3 — The shortcuts** (plan mode, sub-agents, shell, auto-mode, no permission prompts):
 
 ```bash
-mini-code --all                    # = --plan --enable-subagents --enable-shell --auto-mode --sudo
+mini-code --all                    # = --plan --enable-subagents --enable-shell --skills --auto-mode --sudo
 mini-code --all-last               # ...and continue your last session
 ```
 
@@ -76,12 +76,12 @@ given a reference implementation.
 | `--prompt TEXT` | — | initial user prompt |
 | `-a`, `--auto-mode` | off | keep querying the model and running tools until no tool calls remain |
 | `--agent-md FILE` | — | append an `agent.md` file after the system prompt (e.g. `./skill.md`) |
-| `--ask-permission` | off | ask before every tool call (ALLOW-tier shell commands still skip the prompt) |
+| `--ask-permission` | off | ask before **every** tool call, including an ALLOW-tier shell command (`--sudo` disables all prompts) |
 | `--sudo` | off | **dangerous:** never ask. DENY-tier commands are still refused |
 | `--allowed-dir DIR` | `./` | sandbox for **file** tools (does not restrict the shell) |
 | `-s`, `--enable-shell` | off | allow shell execution (classifier always applies) |
 | `-g`, `--enable-subagents` | off | expose sub-agents as tools |
-| `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts) |
+| `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, `/plan`) |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
 | `--tool-timeout S` | `120` | timeout for a single tool call |
@@ -89,7 +89,7 @@ given a reference implementation.
 | `--cache-dir DIR` | `~/.cache/mini/sessions/` | where session histories are stored |
 | `--restore-session PATH` | — | continue a specific previous session |
 | `-l`, `--load-last-session` | off | continue the session recorded in the `.mini` pointer |
-| `--all` | off | `--plan --enable-subagents --enable-shell --auto-mode --sudo` |
+| `--all` | off | `--plan --enable-subagents --enable-shell --skills --auto-mode --sudo` |
 | `--all-last` | off | `--all` + `--load-last-session` |
 | `--verbose` | off | print full detail (default: user/assistant turns, token usage, tool calls only) |
 | `-h`, `--help` | — | show the built-in help |
@@ -132,8 +132,10 @@ mini-code --enable-subagents       # the available sub-agents then show up in /h
 
 > [!NOTE]
 > A sub-agent's `tools`, `enable_shell` and `max_steps` are always **intersected with the
-> parent's** permissions, so it can never do anything the main agent could not. Sub-agents
-> compose with `--plan`: each keeps its own `CURRENT_PLAN.md` / `CURRENT_GOAL.md`.
+> parent's** permissions, so it can never do anything the main agent could not. The `tools`
+> allowlist is enforced on the nested session itself (both the schemas offered to the model and
+> the dispatch table), not merely described in its prompt. Sub-agents compose with `--plan`:
+> each keeps its own `CURRENT_PLAN.md` / `CURRENT_GOAL.md`.
 
 <details>
 <summary><b>Adding your own sub-agent</b></summary>
@@ -231,6 +233,9 @@ command into one of three tiers:
 | **DENY** | `rm -rf /`, `dd of=/dev/...`, `mkfs.*`, fork bombs | refused outright, never run |
 | **ASK** | `rm file`, `sudo ...`, `chmod`, `curl ... \| sh` | requires your confirmation |
 | **ALLOW** | `ls`, `cat`, `git status` | runs without prompting |
+
+`--sudo` removes the confirmation prompts (ASK tier and `--ask-permission`); DENY commands are
+still refused. With no flags, an ASK-tier command prompts and an ALLOW-tier one runs unaided.
 
 > [!WARNING]
 > The classifier is **always enforced** — even in auto-mode and with `--sudo` — so the agent
@@ -360,7 +365,7 @@ If you use `mini-code-cli` in your research or writing, please cite it:
   author       = {Rozanov, Nikolai},
   title        = {mini-code-cli: A minimal, dependency-light coding agent},
   year         = {2026},
-  version      = {0.1.1.2},
+  version      = {0.1.1.3},
   howpublished = {\url{https://github.com/ai-nikolai/mini-code-cli}},
   note         = {A no-bloat, dependency-light agent CLI for experimenting.}
 }

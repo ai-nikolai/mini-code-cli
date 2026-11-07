@@ -35,9 +35,15 @@ def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_
     def _handler(signum, frame):
         raise _TimedOut()
 
+    # SIGALRM (and ``alarm``) are POSIX-only. On a platform without them (e.g.
+    # Windows) the attribute lookup itself raises AttributeError, which must not
+    # escape: fall back to running the tool unguarded, still shielded.
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "alarm"):
+        return _call_tool_safely(func, tool_params, name, console)
+
     try:
         previous = signal.signal(signal.SIGALRM, _handler)
-    except (ValueError, OSError):
+    except (ValueError, OSError, AttributeError):
         # signal only works in the main thread; if we cannot arm it, just run
         # the tool without the wall-clock guard rather than failing outright --
         # but still shield the loop from a tool that raises.
