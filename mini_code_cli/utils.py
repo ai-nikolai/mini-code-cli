@@ -1,4 +1,5 @@
 import json
+import time
 
 try:  # The only third-party import in the package.
     import requests
@@ -186,6 +187,28 @@ def unpack_llm_result(result):
     return content, tool_calls, usage, reasoning_content
 
 
+#: How many times a *retryable* model request is attempted before giving up.
+#: Transport failures and server-side errors (5xx / 429) are usually transient;
+#: a 4xx is not (the request itself is wrong), so it is reported immediately.
+LLM_MAX_ATTEMPTS = 3
+LLM_RETRY_BACKOFF_SECONDS = 1.0
+LLM_MAX_RETRY_BACKOFF_SECONDS = 5.0
+
+
+def _retryable_request_failure(response):
+    """Whether a failed request is worth retrying.
+
+    ``response is None`` means the request never produced an HTTP response (a
+    timeout, a refused connection, DNS, ...) -- transient by nature. Otherwise
+    only rate limiting (429) and server errors (5xx) are retried; any other 4xx
+    means the request itself is wrong and repeating it cannot help.
+    """
+    if response is None:
+        return True
+    status = getattr(response, "status_code", None)
+    return status == 429 or (isinstance(status, int) and status >= 500)
+
+
 def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="default",
                        server_url=None, api_key=None, tools=None, timeout=300):
     """Query an OpenAI-compatible server (local or remote) using ``requests``.
@@ -235,65 +258,81 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
-    # Bound up front so that a failure *during* the request itself (a timeout,
-    # a refused connection, DNS failure, ...) does not leave ``response``
-    # unassigned -- otherwise the error handler below crashes with
-    # "local variable 'response' where it is not associated with a value".
-    response = None
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=timeout
-        )
-        response.raise_for_status()
+    # A transient network/5xx failure should not silently end a turn (and, in a
+    # benchmark, a whole trial). Retry a bounded number of times with a short
+    # exponential backoff; a non-retryable failure is reported immediately.
+    last_error = None
+    last_response = None
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        # Bound up front so that a failure *during* the request itself (a
+        # timeout, a refused connection, DNS failure, ...) does not leave
+        # ``response`` unassigned -- otherwise the error handler below crashes
+        # with "local variable 'response' where it is not associated with a
+        # value".
+        response = None
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout
+            )
+            response.raise_for_status()
 
-        # Parse the body once: a second ``response.json()`` call re-decodes it
-        # and can raise on a server that sends a slightly different body.
-        body = response.json()
-        choice = body.get("choices", [{}])[0] or {}
-        result = choice.get("message", {})
-        content = result.get("content", "")
-        tool_calls = result.get("tool_calls", [])
-        # Thinking-mode servers return the chain of thought next to ``content``.
-        # Keep it verbatim (including an empty string, which is what such a
-        # model returns when it produced no reasoning) and keep it *distinct*
-        # from the reply. ``None`` means "this server/model did not return the
-        # field" -- in that case the caller omits it rather than inventing a
-        # value, since a fabricated reasoning_content would be sent back as if
-        # the model had produced it.
-        reasoning_content = result.get("reasoning_content")
+            # Parse the body once: a second ``response.json()`` call re-decodes it
+            # and can raise on a server that sends a slightly different body.
+            body = response.json()
+            choice = body.get("choices", [{}])[0] or {}
+            result = choice.get("message", {})
+            content = result.get("content", "")
+            tool_calls = result.get("tool_calls", [])
+            # Thinking-mode servers return the chain of thought next to ``content``.
+            # Keep it verbatim (including an empty string, which is what such a
+            # model returns when it produced no reasoning) and keep it *distinct*
+            # from the reply. ``None`` means "this server/model did not return the
+            # field" -- in that case the caller omits it rather than inventing a
+            # value, since a fabricated reasoning_content would be sent back as if
+            # the model had produced it.
+            reasoning_content = result.get("reasoning_content")
 
-        # Token usage, when the server reports it (many local servers do not).
-        usage = body.get("usage", {}) or {}
-        prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", 0))
-        completion_tokens = _coerce_usage_int(usage.get("completion_tokens", 0))
-        total_tokens = _coerce_usage_int(
-            usage.get("total_tokens",
-                      _usage_or_zero(usage.get("prompt_tokens"))
-                      + _usage_or_zero(usage.get("completion_tokens"))))
+            # Token usage, when the server reports it (many local servers do not).
+            usage = body.get("usage", {}) or {}
+            prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", 0))
+            completion_tokens = _coerce_usage_int(usage.get("completion_tokens", 0))
+            total_tokens = _coerce_usage_int(
+                usage.get("total_tokens",
+                          _usage_or_zero(usage.get("prompt_tokens"))
+                          + _usage_or_zero(usage.get("completion_tokens"))))
 
-        return content, tool_calls, {
-            # "stop" is a finished answer, "length" means the reply was cut off by
-            # the output-token cap -- often a thinking model that spent the whole
-            # budget on reasoning and never got to a tool call. The agent loop
-            # needs to tell those apart, or a truncated turn silently ends a run.
-            "finish_reason": choice.get("finish_reason"),
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        }, reasoning_content
+            return content, tool_calls, {
+                # "stop" is a finished answer, "length" means the reply was cut off by
+                # the output-token cap -- often a thinking model that spent the whole
+                # budget on reasoning and never got to a tool call. The agent loop
+                # needs to tell those apart, or a truncated turn silently ends a run.
+                "finish_reason": choice.get("finish_reason"),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            }, reasoning_content
 
-    except requests.exceptions.RequestException as e:
-        _report_request_failure(e, response)
-        return None, None, None, None
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        _report(f"Error processing the model's response: {e}")
-        return None, None, None, None
-    except Exception as e:  # noqa: BLE001 -- a network/parse hiccup must not crash the loop
-        _report(f"Unexpected error calling the model server: {e}")
-        return None, None, None, None
+        except requests.exceptions.RequestException as e:
+            last_error, last_response = e, response
+            if attempt < LLM_MAX_ATTEMPTS and _retryable_request_failure(response):
+                delay = min(LLM_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+                            LLM_MAX_RETRY_BACKOFF_SECONDS)
+                time.sleep(delay)
+                continue
+            break
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            _report(f"Error processing the model's response: {e}")
+            return None, None, None, None
+        except Exception as e:  # noqa: BLE001 -- a network/parse hiccup must not crash the loop
+            _report(f"Unexpected error calling the model server: {e}")
+            return None, None, None, None
+
+    if last_error is not None:
+        _report_request_failure(last_error, last_response)
+    return None, None, None, None
 
 
 def _report(message, level="error"):

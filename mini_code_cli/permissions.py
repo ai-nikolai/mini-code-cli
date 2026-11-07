@@ -7,15 +7,20 @@ unit-tested in isolation. ``AgentSession`` is the only caller.
 from . import shell_safety_utils
 
 
-def shell_forces_ask_permission(args):
-    """Whether enabling the shell should force per-command permission prompts.
+def shell_execution_enabled(args):
+    """Whether shell execution was requested (``-s`` / ``--enable-shell``).
 
-    Running shell commands without asking is dangerous (the agent can run any
-    command and escape ``--allowed-dir``), so whenever the shell is enabled we
-    force ask-permission for the whole session. Exposed as a pure function so it
-    can be unit-tested independently of argparse / stdin.
+    This says the shell tool is *available*. It does not mean every command
+    prompts: shell-safety decides that per command (ASK tier), ``--ask-permission``
+    can ask for everything, and ``--sudo`` removes the prompts. The old name
+    (``shell_forces_ask_permission``) claimed otherwise; it is kept as an alias
+    so external callers do not break.
     """
     return bool(getattr(args, "enable_shell", False))
+
+
+#: Backwards-compatible alias for the historical (misleading) name.
+shell_forces_ask_permission = shell_execution_enabled
 
 
 def sudo_disables_prompts(args):
@@ -34,9 +39,10 @@ def sudo_disables_prompts(args):
 def needs_permission(args, shell_cmd, shell_tier):
     """Whether a tool call needs a manual confirmation.
 
-    True when either ``--ask-permission`` was passed, or the shell-safety
+    True when either ``--ask-permission`` was passed (that asks before *every*
+    tool call, including an ALLOW-tier shell command), or the shell-safety
     classifier marked the command as risky (ASK tier) and we still need to
-    confirm it.
+    confirm it. With no flags, safe (ALLOW-tier) commands run unaided.
 
     ``--sudo`` bypasses every prompt (both ``--ask-permission`` and the ASK
     tier), so it wins outright and this returns False. Destructive DENY-tier

@@ -368,5 +368,93 @@ class DelegationContractTest(SubAgentTestCase):
         self.assertFalse(any("not allowed outside allowed directory" in r for r in results))
 
 
+class SubAgentToolAllowlistTest(SubAgentTestCase):
+    """The declared ``tools`` list must be enforced, not just described.
+
+    The system prompt is only text; the nested session used to be offered every
+    base tool regardless of ``SubAgent.tools``, so a "web-only" research agent
+    could still write files.
+    """
+
+    class WebOnly(SubAgent):
+        name = "web_only"
+        description = "Read-only web helper."
+        tools = ["web_search", "read_website"]
+
+    def test_the_child_is_offered_only_the_declared_tools(self):
+        register(self.WebOnly())
+        session = self.make_session()
+        subagent = session.subagents_registry["web_only"]
+        child_args = subagent._build_child_args(session, "look something up")
+        child = AgentSession(child_args, console=silent_console(),
+                             background_mode=True)
+
+        self.assertEqual(sorted(child.tools_dict),
+                         ["read_website", "web_search"])
+        self.assertEqual(
+            sorted(tool["function"]["name"] for tool in child.llm_tools),
+            ["read_website", "web_search"])
+
+    def test_inherited_tools_are_still_the_full_set(self):
+        class InheritAll(SubAgent):
+            name = "inherit_all"
+            description = "Uses the parent's tools."
+            tools = None
+
+        register(InheritAll())
+        session = self.make_session()
+        subagent = session.subagents_registry["inherit_all"]
+        child_args = subagent._build_child_args(session, "do it")
+        child = AgentSession(child_args, console=silent_console(),
+                             background_mode=True)
+        # The parent's own dict also carries the sub-agent sentinel tools (which
+        # a child must never inherit); compare the real tool functions only.
+        parent_tools = sorted(
+            name for name, entry in session.tools_dict.items()
+            if not entry.get("subagent"))
+        self.assertEqual(sorted(child.tools_dict), parent_tools)
+
+    def test_per_call_parameters_reach_the_sub_agent(self):
+        register(self.WebOnly())
+        session = self.make_session()
+
+        # A model-supplied integer may arrive as a string; it must be coerced
+        # before it is compared against a step counter.
+        with mock.patch.object(SubAgent, "run", return_value="ok") as run:
+            result = session._run_subagent(
+                "web_only",
+                {"task": "research this", "max_steps": "3",
+                 "sources": "wikipedia.org"})
+
+        self.assertEqual(result, "ok")
+        run.assert_called_once_with(
+            "research this", parent=session, max_steps=3,
+            sources="wikipedia.org")
+
+    def test_research_sources_reach_the_nested_prompt(self):
+        from mini_code_cli.subagents.builtin import ResearchSubAgent
+
+        register(ResearchSubAgent())
+        session = self.make_session()
+        prompt = session.subagents_registry["research"].system_prompt(
+            "find it", session, {"sources": "wikipedia.org only"})
+        self.assertIn("Prefer sources related to: wikipedia.org only", prompt)
+
+    def test_a_legacy_two_argument_system_prompt_still_works(self):
+        class Legacy(SubAgent):
+            name = "legacy"
+            description = "Overrides the old two-argument hook."
+            tools = ["write_file"]
+
+            def system_prompt(self, task, parent):
+                return f"legacy prompt for {task}"
+
+        register(Legacy())
+        session = self.make_session()
+        child_args = session.subagents_registry["legacy"]._build_child_args(
+            session, "do it", {"sources": "ignored"})
+        self.assertEqual(child_args.system_prompt, "legacy prompt for do it")
+
+
 if __name__ == "__main__":
     unittest.main()

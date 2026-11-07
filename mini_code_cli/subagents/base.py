@@ -35,6 +35,7 @@ That is all -- the agent loop discovers every registered sub-agent and exposes
 each one to the model as a tool automatically.
 """
 
+import inspect
 import io
 import os
 import types
@@ -131,15 +132,22 @@ class SubAgent:
 
     # -- prompt / tool selection ------------------------------------------
 
-    def system_prompt(self, task, parent):
+    def system_prompt(self, task, parent, options=None):
         """Return the system prompt for the nested agent.
 
         The default prepends a short "you are a sub-agent" preamble to the
         standard system prompt, and tells the nested agent where to write any
         report it wants handed back to the parent.
+
+        ``options`` is the effective option mapping for this invocation (the
+        instance's ``self.options`` with any per-call parameters, e.g. the
+        ``research`` agent's ``sources``, merged over it). It defaults to
+        ``self.options`` so a subclass that only wants construction-time options
+        can keep the old two-argument signature.
         """
         from .. import prompts
 
+        options = self.options if options is None else options
         allowed_tools = self._resolve_tools(parent)
         if allowed_tools is None:
             tools_dict = parent.tools_dict
@@ -166,6 +174,24 @@ class SubAgent:
         """The list of tool names this sub-agent may use (or None for all)."""
         return self.tools
 
+    def _build_system_prompt(self, task, parent, options):
+        """Call ``system_prompt``, tolerating subclasses written before ``options``.
+
+        ``options`` is a newer (optional) third argument. A user sub-agent that
+        still overrides ``system_prompt(self, task, parent)`` must keep working,
+        so the extra argument is only passed when the override can accept it.
+        """
+        try:
+            parameters = inspect.signature(self.system_prompt).parameters
+        except (TypeError, ValueError):  # a builtin / oddly wrapped callable
+            return self.system_prompt(task, parent)
+        accepts_options = "options" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values())
+        if accepts_options:
+            return self.system_prompt(task, parent, options)
+        return self.system_prompt(task, parent)
+
     def wants_plan_mode(self, parent):
         """Whether the nested agent should run in plan mode.
 
@@ -184,7 +210,7 @@ class SubAgent:
         """Location the nested agent should write its report to."""
         return os.path.join(self._child_cache_dir(parent), "report.md")
 
-    def run(self, task, parent, max_steps=None):
+    def run(self, task, parent, max_steps=None, **options):
         """Run the nested agent for ``task`` inside ``parent`` and return text.
 
         Spins up a child :class:`AgentSession` (reusing all the normal loop
@@ -193,6 +219,13 @@ class SubAgent:
         from the child's final answer and any ``report.md`` it wrote. Best
         effort: any failure degrades to an Error string rather than raising, so
         a broken sub-agent cannot take down the main session.
+
+        ``options`` are per-invocation settings the caller (the main agent) passed
+        in the tool call -- everything except ``task``/``max_steps``. They are
+        merged over the instance's construction-time ``self.options`` and handed
+        to :meth:`system_prompt` (and to :meth:`_build_child_args`), which is how
+        a subclass parameter such as ``research``'s ``sources`` reaches the nested
+        prompt instead of being silently dropped.
 
         The nested session runs in *background mode* (see
         :attr:`background_mode`): it starts a fresh isolated session without
@@ -203,8 +236,16 @@ class SubAgent:
         """
         from .. import agent_loop  # local import to avoid an import cycle
 
+        # Models routinely spell an integer knob as a string ("5"); comparing
+        # that against a step counter would raise and fail the delegation.
+        try:
+            max_steps = int(max_steps) if max_steps is not None else None
+        except (TypeError, ValueError):
+            max_steps = None
         max_steps = self.max_steps if max_steps is None else max_steps
-        child_args = self._build_child_args(parent, task)
+        effective_options = dict(self.options)
+        effective_options.update(options)
+        child_args = self._build_child_args(parent, task, effective_options)
         # Swallow the nested transcript so the parent's screen is not spammed;
         # only the parent's own notes/report get shown. The "Delegating" /
         # "finished" notes are emitted by the *parent loop* (AgentSession
@@ -249,17 +290,22 @@ class SubAgent:
             # parent step.
             return f"Error: sub-agent '{self.display_name}' failed: {e}"
 
-    def _build_child_args(self, parent, task):
+    def _build_child_args(self, parent, task, options=None):
         """Build the argparse-like namespace for the nested AgentSession.
 
         The child inherits the parent's server/cache/allow-dir/timeout config
         but is narrowed to this sub-agent's tools, shell setting and (optionally)
         its own model/url, and runs non-interactively in auto-mode.
+
+        ``options`` is the effective per-invocation option mapping built by
+        :meth:`run` (construction-time options merged with the tool-call
+        parameters). It defaults to ``self.options``.
         """
+        options = self.options if options is None else options
         child = types.SimpleNamespace()
         # LLM / server (allow an explicit override per sub-agent).
-        child.url = self.options.get("url", parent.args.url)
-        child.model = self.options.get("model", parent.args.model)
+        child.url = options.get("url", parent.args.url)
+        child.model = options.get("model", parent.args.model)
         child.api_key = parent.args.api_key
         child.max_tokens = parent.args.max_tokens
         child.temperature = parent.args.temperature
@@ -275,7 +321,12 @@ class SubAgent:
         child.ask_permission = getattr(parent.args, "ask_permission", False)
         child.sudo = getattr(parent.args, "sudo", False)
         child.agent_md = None
-        child.system_prompt = self.system_prompt(task, parent)
+        child.system_prompt = self._build_system_prompt(task, parent, options)
+        # The allowlist has to be enforced by the child session itself: the
+        # system prompt only *describes* the tools, so without this the nested
+        # agent would still be offered (and could call) every base tool --
+        # e.g. `research` could write files even though it declares web tools.
+        child.allowed_tools = self._resolve_tools(parent)
         # Sandbox + shell (sub-agents never widen the parent's permissions).
         child.allowed_dir = parent.allowed_dir
         child.enable_shell = bool(self.enable_shell and parent.args.enable_shell)

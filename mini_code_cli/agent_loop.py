@@ -66,6 +66,7 @@ from .persistence import (
 from .sandbox import is_within_allowed_dir, tool_paths_are_allowed, _FILE_TOOL_PATH_ARGS
 from .permissions import (
     needs_permission,
+    shell_execution_enabled,
     shell_forces_ask_permission,
     sudo_disables_prompts,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "maybe_compact",
     "accumulate_usage",
     "shell_forces_ask_permission",
+    "shell_execution_enabled",
     "sudo_disables_prompts",
     "needs_permission",
     "call_function_with_timeout",
@@ -154,8 +156,8 @@ def parse_args():
     parser.add_argument("--max-context-tokens", type=int, default=None, help="Input-token budget before the conversation is compacted into a summary. This is the primary compaction trigger: it is compared against the projected size of the next request (the server-reported prompt tokens, plus an estimate for whatever was appended since) plus the output reserve (--max-tokens, or a default). Unset (default): derived from the model's context window minus the output reserve and a safety margin, falling back to a conservative window for unknown models. Lower it to compact sooner.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
 
-    parser.add_argument("--all", action="store_true", help="Enable: --plan, --subagents, --shell, --automode, --sudo")
-    parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --subagents, --shell, --automode, --sudo, --load-last-session")
+    parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo")
+    parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --load-last-session")
 
     # Output verbosity
     parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
@@ -272,6 +274,27 @@ def _compaction_trigger(messages, token_limit, reserved_output_tokens, current_t
     return False, ""
 
 
+#: Prefixes of user messages the *loop* injects (plan authoring and plan
+#: review). They are loop bookkeeping, not instructions from the user, so the
+#: in-flight-tail scan must skip them when it looks for the turn to carry across
+#: a compaction -- otherwise, right after a plan is generated, the plan text
+#: would be treated as the user's request and the real instruction summarised
+#: away. The matching injection points are in ``_generate_plan_and_inject`` and
+#: ``_review_plan_completion``.
+_LOOP_INJECTED_USER_PREFIXES = (
+    "Current plan for the goal (from CURRENT_PLAN.md):",
+    "Plan completion summary (from CURRENT_PLAN.md):",
+)
+
+
+def _is_loop_injected(message):
+    """Whether ``message`` is a user turn this loop injected, not the user's own."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content") or ""
+    return str(content).lstrip().startswith(_LOOP_INJECTED_USER_PREFIXES)
+
+
 def _in_flight_tail(messages):
     """Return the messages of the turn that is still in flight, or ``[]``.
 
@@ -284,9 +307,11 @@ def _in_flight_tail(messages):
     user's request -- and the typed line never reaches the recorder, the new
     segment or a later restore.
 
-    The suffix starts at the last ``user`` message, which always begins a
+    The suffix starts at the last *real* ``user`` message, which always begins a
     self-contained turn: every ``assistant`` tool call inside it is followed by
-    its ``tool`` results, so the slice is a valid transcript on its own.
+    its ``tool`` results, so the slice is a valid transcript on its own. User
+    turns injected by the loop itself (plan authoring / review) are skipped so
+    they cannot be mistaken for the request being answered.
 
     ``[]`` when the transcript already ends with an ``assistant`` reply: that
     turn is answered, and re-sending it would ask the model to answer it twice.
@@ -298,14 +323,15 @@ def _in_flight_tail(messages):
         return []
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
-        if isinstance(message, dict) and message.get("role") == "user":
+        if (isinstance(message, dict) and message.get("role") == "user"
+                and not _is_loop_injected(message)):
             return list(messages[index:])
     return []
 
 
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
-                  current_tokens=None, plan_hook=None, console=None):
+                  current_tokens=None, plan_hook=None, console=None, preserve=()):
     """Compact the conversation history once it no longer fits the context window.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
@@ -333,6 +359,12 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     instead of referencing the owning session -- keeps ``maybe_compact`` a
     small, module-level, network-free helper that the test-suite can import and
     exercise directly.
+
+    ``preserve`` is a sequence of messages that must survive the rollover
+    verbatim, inserted right after the system prompt (in practice the
+    ``--agent-md`` preamble, which is a user turn rather than part of the system
+    prompt). Without it a compaction could summarise away the file's standing
+    instructions.
     """
     # ``console`` defaults to None so callers may omit it, but every branch below
     # reports through a console. Falling back to the shared one keeps the
@@ -414,6 +446,10 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         compacted = []
         if system_content:
             compacted.append({"role": "system", "content": system_content})
+        # Standing instructions that live outside the system prompt (the
+        # ``--agent-md`` preamble is inserted as a user turn) are re-added
+        # verbatim, before the summary, so a rollover cannot summarise them away.
+        compacted.extend(dict(message) for message in (preserve or ()))
         compacted.append({
             "role": "user",
             "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
@@ -521,6 +557,11 @@ class AgentSession:
         # report_path is set on a *sub-agent child* session (by
         # SubAgent._build_child_args)
         self.report_path = getattr(args, "report_path", None)
+
+        # Messages that must survive a compaction verbatim but are not part of
+        # the system prompt (currently the --agent-md preamble, which is a user
+        # turn). maybe_compact re-inserts them after the system prompt.
+        self._persistent_messages = []
 
         self.plan_mode = bool(getattr(self.args, "plan", False))
 
@@ -742,6 +783,19 @@ class AgentSession:
             self.messages = restored
             self.summary = records
             self.history_index = int(loaded_index)
+            # A restored transcript may already contain an --agent-md user turn,
+            # but the *content* is not stored anywhere else: reload the file (if
+            # it is still configured) so a later compaction can re-inject it
+            # verbatim instead of summarising it away.
+            self._persistent_messages = []
+            agent_md = getattr(self.args, "agent_md", None)
+            if agent_md and os.path.isfile(agent_md):
+                try:
+                    with open(agent_md, "r", encoding="utf-8") as handle:
+                        self._persistent_messages = [
+                            {"role": "user", "content": handle.read()}]
+                except OSError:
+                    self._persistent_messages = []
             # No prompt has been sent in *this* process yet, so any remembered
             # size would be stale: start from a plain estimate of the restored
             # transcript (which is what project_input_tokens falls back to).
@@ -776,6 +830,7 @@ class AgentSession:
         self.total_usage = empty_usage()
         self.last_prompt_tokens = 0
         self.last_prompt_message_count = 0
+        self._persistent_messages = []
         return False
 
     def _resolve_model(self, args):
@@ -823,8 +878,15 @@ class AgentSession:
             without --enable-shell.
         """
         forbidden = None if args.enable_shell else tools.shell_tools
-        self.tools_dict = tools.util_get_tools_dict(forbidden_tools=forbidden)
-        self.llm_tools = tools.util_get_tools(forbidden_tools=forbidden)
+        # A sub-agent narrows the nested session by setting ``allowed_tools``
+        # on its child args. It must be applied to BOTH the schemas offered to
+        # the model and the dispatch table: filtering only the system-prompt
+        # text (as this used to) left every base tool callable.
+        allowed_tools = getattr(args, "allowed_tools", None)
+        self.tools_dict = tools.util_get_tools_dict(
+            allowed_tools=allowed_tools, forbidden_tools=forbidden)
+        self.llm_tools = tools.util_get_tools(
+            allowed_tools=allowed_tools, forbidden_tools=forbidden)
 
         self.enable_subagents = bool(getattr(args, "enable_subagents", False))
         self.subagents_registry = subagents.get_registry() if self.enable_subagents else {}
@@ -854,6 +916,7 @@ class AgentSession:
             )
 
         messages = [{"role": "system", "content": system_prompt}]
+        self._persistent_messages = []
 
         if self.args.agent_md:
             self.console.note(f"AGENT.md '{self.args.agent_md}' specified.", "warn")
@@ -864,7 +927,13 @@ class AgentSession:
                     agent_md_content = f.read()
                 self.console.note(f"AGENT.md '{self.args.agent_md}' loaded.", "ok")
                 # Append Agent.md as a user turn, right after the system prompt.
-                messages.insert(1, {"role": "user", "content": agent_md_content})
+                # It is also recorded in ``_persistent_messages`` so a history
+                # compaction re-injects it verbatim instead of summarising it
+                # away (it is not part of the system prompt, so the default
+                # compaction would otherwise drop it).
+                agent_md_message = {"role": "user", "content": agent_md_content}
+                messages.insert(1, agent_md_message)
+                self._persistent_messages = [agent_md_message]
 
         return messages
 
@@ -1269,8 +1338,9 @@ class AgentSession:
         """
         self.console.announce_api_key(present=bool(self.api_key))
 
-        if shell_forces_ask_permission(self.args):
-            self.console.announce_shell()
+        if shell_execution_enabled(self.args):
+            self.console.announce_shell(
+                prompts_disabled=sudo_disables_prompts(self.args))
 
         # --sudo hands the agent unattended control, so make that impossible to miss.
         if sudo_disables_prompts(self.args):
@@ -1280,6 +1350,13 @@ class AgentSession:
             self.console.note(
                 f"Sub-agents enabled ({len(self.subagents_registry)} available: "
                 f"{', '.join(self.subagents_registry)}).", "ok")
+
+        if self.enable_skills:
+            self.console.note(
+                "Skills enabled: run_skill executes the Python scripts stored in "
+                "the .mini directory (arbitrary code execution, even without "
+                "--enable-shell). Only enable this for a directory you trust.",
+                "warn")
 
     def _print_session_id(self):
         """Print the session's unique id as a minimal "Assistant" turn.
@@ -1560,21 +1637,13 @@ class AgentSession:
 
         self.plan_manager.write_plan(plan_text)
         if plan_text and plan_text.strip():
+            # Loop bookkeeping, not a user instruction: the leading text is one
+            # of _LOOP_INJECTED_USER_PREFIXES, so the compaction tail scan skips
+            # it when looking for the turn being answered.
             self.messages.append({
                 "role": "user",
                 "content": "Current plan for the goal (from CURRENT_PLAN.md):\n%s" % plan_text.strip(),
             })
-
-    def _finish_goal_and_shutdown(self):
-        """Mark the active goal finished in CURRENT_PLAN.md, then quit/save.
-
-        The goal is whatever the loop last recorded; if the loop never recorded
-        one we fall back to reading the goal file back so a one-shot --prompt
-        preset still marks its goal finished. A no-op in method behaviour when
-        --plan is off (PlanManager no-ops), so it is safe to call unconditionally.
-        """
-        self.plan_manager.mark_finished(self.plan_manager.goal)
-        self.shutdown()
 
     def _review_plan_completion(self):
         """Once the work looks done, review the plan's completion.
@@ -1606,6 +1675,7 @@ class AgentSession:
         # the model works from the review result.
         self.plan_manager.write_plan_summary(summary)
         if summary and summary.strip():
+            # Another loop-injected user turn (see _LOOP_INJECTED_USER_PREFIXES).
             self.messages.append({
                 "role": "user",
                 "content": "Plan completion summary (from CURRENT_PLAN.md):\n%s"
@@ -1654,7 +1724,7 @@ class AgentSession:
         # instruction instead of the summary text.
         current_input = None
         for m in reversed(list(tail or ())):
-            if m.get("role") == "user":
+            if m.get("role") == "user" and not _is_loop_injected(m):
                 current_input = m.get("content")
                 break
         if current_input and not goal_text:
@@ -1978,10 +2048,18 @@ class AgentSession:
         """Run a sub-agent for ``task`` and return the text to feed back."""
         subagent = self.subagents_registry[name]
         task = tool_params.get("task", "")
-        max_steps = tool_params.get("max_steps")
+        # Models routinely send integers as strings; coerce once, here, so the
+        # child's step cap is a number (``"5"`` used to raise a TypeError inside
+        # the nested loop, failing the delegation).
+        max_steps = _safe_int(tool_params.get("max_steps"), 0) or None
+        # Everything the model passed beyond the two common knobs is a
+        # per-invocation option for the sub-agent (e.g. ``sources``). Forward it
+        # instead of silently dropping it.
+        extra = {key: value for key, value in tool_params.items()
+                 if key not in ("task", "max_steps")}
         self.console.note(f"Delegating to sub-agent '{name}' (task: {oneline(task, 80)})", "info")
         try:
-            result = subagent.run(task, parent=self, max_steps=max_steps)
+            result = subagent.run(task, parent=self, max_steps=max_steps, **extra)
             self.console.note(f"Sub-agent '{name}' finished.", "ok")
             return result
         except Exception as e:
@@ -2146,6 +2224,7 @@ class AgentSession:
             current_tokens=projected,
             plan_hook=self._handle_compaction if self.plan_mode else None,
             console=self.console,
+            preserve=self._persistent_messages,
         )
         # The compaction call itself was billed to the segment that is being
         # closed, so fold its delta into the session total here (the rollover
@@ -2284,11 +2363,13 @@ class AgentSession:
         # per-call usage line reports the actual tool-call count (the server
         # does not, so usage.get("tool_calls") would always be 0 otherwise).
         usage["tool_calls"] = self.total_usage["tool_calls"]
-        # Print the usage line LAST, transiently, so it always sits at the very
-        # bottom of the screen. That way the next step can clear it in place
-        # (cursor up + wipe + reprint) instead of jumping up past the assistant
-        # turn above it -- which is what made the screen keep scrolling.
-        self.console.usage_line(usage, transient=False,
+        # Print the usage line LAST, transiently in the quiet default view (it
+        # is cleared in place by the next step, so it always sits at the very
+        # bottom of the screen instead of making the transcript scroll) and
+        # permanently under --verbose. Passing ``transient=None`` is exactly
+        # that policy; forcing ``False`` made every step's line permanent even
+        # in non-verbose mode.
+        self.console.usage_line(usage, transient=None,
                                 llm_calls=self.total_usage["llm_calls"])
 
         # Append this step's turn to the high-level recorder. On compaction the
