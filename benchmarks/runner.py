@@ -305,14 +305,30 @@ class Runner:
 
         The block is how a run points all agents at one endpoint
         (``ANTHROPIC_BASE_URL`` and friends) without repeating it per agent; a
-        command's own value wins, because the adapter knows its agent's needs
-        better than the config does.
+        command's own *literal* value wins, because the adapter knows its
+        agent's needs better than the config does.
+
+        A bare ``{env:NAME}`` placeholder is different: it asks for NAME to be
+        passed through from the environment the runner inherited, and that is
+        exactly what the config block replaces. Letting the placeholder win
+        would resolve it against the parent process (where the variable is
+        usually absent) and blank a value the config had just supplied -- Claude
+        Code then starts with ``apiKeySource: none`` and dies with "Not logged
+        in". So resolve such a placeholder from the config block when it names a
+        variable the block defines.
         """
         if not self.config.env:
             return commands
         for command in commands:
             merged = dict(self.config.env)
-            merged.update(command.env or {})
+            for key, value in (command.env or {}).items():
+                text = str(value)
+                if text.startswith("{env:") and text.endswith("}"):
+                    source = text[5:-1]
+                    if source in merged:
+                        merged[key] = merged[source]
+                        continue
+                merged[key] = value
             command.env = merged
         return commands
 

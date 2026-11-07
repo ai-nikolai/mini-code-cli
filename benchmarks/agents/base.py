@@ -213,7 +213,12 @@ class AgentAdapter:
                 "model": model.model,
                 "base_url": model.base_url,
                 "api_key_env": model.api_key_env or "",
-                "extra_env": self.env(model),
+                # No ``extra_env`` here: harbor's factory already resolves the
+                # config's ``env`` block and passes it to the agent constructor
+                # as ``extra_env``. Supplying it again through --agent-kwarg is
+                # a duplicate keyword and the agent is never constructed
+                # ("got multiple values for keyword argument 'extra_env'").
+                # The config's env is exactly what this used to carry.
                 "install_commands": self.install_commands(),
                 # The shared preamble: uploaded into the task container so an
                 # agent that reads it from a file finds it at the path its argv
