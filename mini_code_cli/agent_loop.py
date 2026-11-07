@@ -2353,7 +2353,7 @@ class AgentSession:
                         "limit before you produced any answer or tool call. "
                         "Continue from where you stopped: either call a tool or "
                         "give the final answer, and keep your reasoning shorter "
-                        "than the budget allows.",
+                        "than the budget allows."
                     ),
                 })
                 return True
