@@ -486,6 +486,34 @@ zero. A five-task, three-agent Terminal-Bench campaign therefore costs hours and
 will not flatter a 30B model, which is why the campaign numbers in §9 are
 SWE-bench; the path itself is proven, task by task.
 
+### Terminal-Bench 2.1, three agents (`tb21-3j-mini`, `tb21-3j-pi`, `tb21-3j-cc2`)
+
+Same model and server, `--mode short --limit 3`, the three cached 2.1 tasks
+(`adaptive-rejection-sampler`, `break-filter-js-from-html`, `bn-fit-modify`):
+
+| agent | resolved | tasks resolved | note |
+| --- | --- | --- | --- |
+| mini-code | 0/3 | -- | R installed but unusable (`libblas.so.3` missing); XSS bypass failed; bn outputs missing |
+| pi | 2/3 | bn-fit-modify, break-filter-js-from-html | adaptive-rejection: no tool call, 65 536 output tokens spent on reasoning |
+| claude-code | 2/3 | bn-fit-modify, break-filter-js-from-html | adaptive-rejection: 7/9 verifier tests pass |
+| **all** | **4/9 (44%)** | | no exceptions, no timeouts |
+
+All nine trials produced a real graded reward (`0.0`/`1.0`) with
+`exception_info: null`; the zeros are attempts, not crashes. `mini-code` is the
+cheapest per task (~4.5 min), `pi` and `claude-code` take 15-20 min each, and on
+`adaptive-rejection-sampler` all three hinge on getting a working R into the
+container: `claude-code` does (7/9), `mini-code`'s install cannot load
+`libblas.so.3`, and `pi` never reaches a tool call.
+
+Two harness bugs were found and fixed to get a real `claude-code` row:
+
+* `benchmarks/agents/base.py`: harbor's factory already resolves the config
+  `env` block and passes it to the agent constructor as `extra_env`; supplying
+  it again through `--agent-kwarg` was a duplicate keyword, so no trial ran.
+* `benchmarks/runner.py`: a command's `{env:NAME}` pass-through blanked a
+  literal the config `env` block supplied, so Claude Code started with
+  `apiKeySource: none` and every trial died with "Not logged in".
+
 ### Five data points x three agents, SWE-bench Verified (`swe-verified-5c`)
 
 The run this section exists for: the same fixed model, `--mode short_eval`,

@@ -683,6 +683,20 @@ class ExecutionTests(unittest.TestCase):
                                      timeout=0.2)
         self.assertEqual(status, "timeout")
 
+    def test_config_env_is_not_blanked_by_a_pass_through_placeholder(self):
+        # The config block supplies the literal; an adapter that passes the same
+        # variable through by name ({env:NAME}) must not blank it. That is how
+        # Claude Code started with apiKeySource: none ("Not logged in").
+        config = minimal_config(env={"ANTHROPIC_API_KEY": "local-vllm"})
+        runner = Runner(config, dry_run=True)
+        command = PlannedCommand(
+            label="agent", argv=["true"],
+            env={"ANTHROPIC_API_KEY": "{env:ANTHROPIC_API_KEY}",
+                 "ANTHROPIC_AUTH_TOKEN": "{env:ANTHROPIC_API_KEY}"})
+        runner._with_config_env([command])
+        self.assertEqual(command.env["ANTHROPIC_API_KEY"], "local-vllm")
+        self.assertEqual(command.env["ANTHROPIC_AUTH_TOKEN"], "local-vllm")
+
     def test_env_placeholders_reach_the_process(self):
         os.environ["BENCH_EXEC_KEY"] = "abc"
         try:
