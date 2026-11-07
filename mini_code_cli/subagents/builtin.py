@@ -39,9 +39,10 @@ class ResearchSubAgent(SubAgent):
             },
         }
 
-    def system_prompt(self, task, parent):
-        sources = self.options.get("sources")
-        base = super().system_prompt(task, parent)
+    def system_prompt(self, task, parent, options=None):
+        options = self.options if options is None else options
+        sources = options.get("sources")
+        base = super().system_prompt(task, parent, options)
         if sources:
             base += f"\n\nPrefer sources related to: {sources}"
         return base
@@ -72,8 +73,8 @@ class PlanSubAgent(SubAgent):
         # self-contained example, then reports the plan back via report.md.
         return True
 
-    def system_prompt(self, task, parent):
-        base = super().system_prompt(task, parent)
+    def system_prompt(self, task, parent, options=None):
+        base = super().system_prompt(task, parent, options)
         return base + (
             "\n\nProduce a clear, step-by-step plan for this goal and return it "
             "as text; copy it verbatim into report.md so the main agent receives "
@@ -107,8 +108,8 @@ class SoftwareEngineeringSubAgent(SubAgent):
     enable_shell = True
     max_steps = 20
 
-    def system_prompt(self, task, parent):
-        base = super().system_prompt(task, parent)
+    def system_prompt(self, task, parent, options=None):
+        base = super().system_prompt(task, parent, options)
         return base + (
             "\n\n---\nYou are the SOFTWARE ENGINEERING sub-agent: you write and "
             "modify code to get a real task done. Follow these guidelines:\n"
@@ -151,8 +152,8 @@ class GenericSubAgent(SubAgent):
     enable_shell = True
     max_steps = 12
 
-    def system_prompt(self, task, parent):
-        base = super().system_prompt(task, parent)
+    def system_prompt(self, task, parent, options=None):
+        base = super().system_prompt(task, parent, options)
         return base + (
             "\n\n---\nYou are a GENERAL-PURPOSE sub-agent: a capable, careful "
             "helper handed a single task. Follow these guidelines:\n"

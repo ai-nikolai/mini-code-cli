@@ -50,7 +50,7 @@ import unittest
 from unittest import mock
 
 from mini_code_cli import persistence, tools, ui, utils
-from mini_code_cli.agent_loop import AgentSession, maybe_compact
+from mini_code_cli.agent_loop import AgentSession, _in_flight_tail, maybe_compact
 from mini_code_cli.tools import grep as grep_tool
 from mini_code_cli.subagents import SubAgent, register, clear_registry
 
@@ -526,6 +526,58 @@ class CompactionTest(unittest.TestCase):
 
         self.assertTrue(did_compact)
         self.assertEqual(out[-1]["content"], "GOAL + PLAN")
+
+    def test_preserve_keeps_standing_messages_after_the_system_prompt(self):
+        messages = self._messages(4)
+        standing = {"role": "user", "content": "AGENT MD RULES"}
+        out, did_compact, _ = self._compact(
+            messages, token_limit=10, current_tokens=50, preserve=[standing])
+
+        self.assertTrue(did_compact)
+        self.assertEqual(out[0]["role"], "system")
+        self.assertEqual(out[1], standing)                  # verbatim, not summarised
+        self.assertIn("A short summary of the session.", out[2]["content"])
+
+    def test_the_in_flight_tail_skips_loop_injected_plan_turns(self):
+        messages = [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "the real instruction"},
+            {"role": "user",
+             "content": "Current plan for the goal (from CURRENT_PLAN.md):\n1. x"},
+        ]
+        tail = _in_flight_tail(messages)
+
+        self.assertEqual(len(tail), 2)          # the real turn, plus the plan message
+        self.assertEqual(tail[0]["content"], "the real instruction")
+
+    def test_agent_md_survives_a_compaction_step(self):
+        workdir = tempfile.mkdtemp()
+        cache_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, cache_dir, ignore_errors=True)
+        agent_md = os.path.join(workdir, "agent.md")
+        with open(agent_md, "w", encoding="utf-8") as handle:
+            handle.write("STANDING RULES: always answer in one line.")
+
+        args = make_args(workdir, cache_dir)
+        args.agent_md = agent_md
+        args.max_context_tokens = 1              # any transcript is "over budget"
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+        session.messages.append({"role": "user", "content": "do the thing"})
+
+        stub = StubLLM([
+            ("A short summary of the session.", [], USAGE),   # compaction
+            ("Done.", [], USAGE),                              # this step
+        ])
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            session._step()
+        session.shutdown()
+
+        contents = [m.get("content", "") for m in session.messages
+                    if m.get("role") == "user"]
+        self.assertEqual(contents[0], "STANDING RULES: always answer in one line.")
+        self.assertTrue(any("summary of the session" in c for c in contents))
 
 
 # ---------------------------------------------------------------------------

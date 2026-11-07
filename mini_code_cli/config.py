@@ -99,12 +99,12 @@ MODEL_CONTEXT_WINDOWS = {
     "gemma-2": 8_192,
     "gemma": 8_192,
     # -- other local families ---------------------------------------------
-    "ornith-ai/Ornith-1.5-397B-FP8" : 250_000,
-    "ornith-ai/Ornith-1.5-397B" : 250_000,
-    "ornith-ai/Ornith-1.5-35B-A3B-FP8" : 250_000,
-    "ornith-ai/Ornith-1.5-35B-A3B" : 250_000,
-    "ornith-ai/Ornith-1.5-122B-FP8" : 250_000,
-    "ornith-ai/Ornith-1.5-122B" : 250_000,
+    "ornith-ai/ornith-1.5-397b-fp8" : 250_000,
+    "ornith-ai/ornith-1.5-397b" : 250_000,
+    "ornith-ai/ornith-1.5-35b-a3b-fp8" : 250_000,
+    "ornith-ai/ornith-1.5-35b-a3b" : 250_000,
+    "ornith-ai/ornith-1.5-122b-fp8" : 250_000,
+    "ornith-ai/ornith-1.5-122b" : 250_000,
 }
 
 # Used when the model is unknown / unnamed. Conservative on purpose.
@@ -146,12 +146,21 @@ class CompactionBudget(NamedTuple):
     source: str
 
 
+# A lowercase view of the table. Model ids reach us in whatever casing the
+# server/API uses (``ornith-ai/Ornith-1.5-35B-A3B``, ``Qwen/Qwen2.5-...``), so
+# both the id and the keys are lowercased before matching -- otherwise a mixed
+# case key such as the Ornith entries could never be found.
+_CONTEXT_WINDOWS_LOWER = {
+    str(key).strip().lower(): value
+    for key, value in MODEL_CONTEXT_WINDOWS.items()
+}
+
 # Longest key first, so ``gpt-4o`` is tested before ``gpt-4`` and
 # ``qwen2.5`` before ``qwen2``: a substring match on the *most specific* family
 # name is what makes ``Qwen/Qwen2.5-Coder-32B-Instruct`` resolve to 131k rather
 # than 32k.
 _CONTEXT_KEYS_BY_SPECIFICITY = tuple(
-    sorted(MODEL_CONTEXT_WINDOWS, key=len, reverse=True)
+    sorted(_CONTEXT_WINDOWS_LOWER, key=len, reverse=True)
 )
 
 
@@ -169,11 +178,11 @@ def context_window_for(model, default=None):
     name = str(model).strip().lower()
     if not name:
         return default
-    if name in MODEL_CONTEXT_WINDOWS:
-        return MODEL_CONTEXT_WINDOWS[name]
+    if name in _CONTEXT_WINDOWS_LOWER:
+        return _CONTEXT_WINDOWS_LOWER[name]
     for key in _CONTEXT_KEYS_BY_SPECIFICITY:
         if key in name:
-            return MODEL_CONTEXT_WINDOWS[key]
+            return _CONTEXT_WINDOWS_LOWER[key]
     return default
 
 
@@ -201,8 +210,7 @@ def compaction_budget(model=None, explicit_limit=None, max_output_tokens=None):
     if explicit_limit and int(explicit_limit) > 0:
         limit = int(explicit_limit)
         window = context_window_for(model) or DEFAULT_CONTEXT_TOKENS
-        if reserve <= 0:
-            reserve = _reserve_for(window)
+        reserve = _reserve_for(window, reserve)
         return CompactionBudget(limit, reserve, window, "explicit")
 
     window = context_window_for(model)

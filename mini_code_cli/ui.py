@@ -766,7 +766,12 @@ class Console:
             self.note("No API key found. Set MINI_CODE_API_KEY='sk-...' if your server needs one.",
                       "warn")
 
-    def announce_shell(self):
+    def announce_shell(self, prompts_disabled=False):
+        if prompts_disabled:
+            self.note("Shell execution is ENABLED. Every command is checked by the "
+                      "safety classifier: destructive commands are blocked, but no "
+                      "confirmation is asked (--sudo).", "warn")
+            return
         self.note("Shell execution is ENABLED. Every command is checked by the safety "
                   "classifier: destructive commands are blocked, risky ones ask for confirmation.",
                   "warn")

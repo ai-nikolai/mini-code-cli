@@ -191,7 +191,7 @@ and the parameters the *LLM* can pass when it invokes the tool.
 | --- | --- | --- | --- |
 | `name` | str | `"subagent"` | Tool name the model calls. Must be unique in the registry. |
 | `description` | str | generic text | One-line description shown to the model in the tool schema (the help text / sub-agents list). |
-| `tools` | list[str] or None | `None` (inherit parent's full set) | Restricts which tools the nested agent may use, e.g. `["web_search", "read_website"]`. `None` inherits everything. |
+| `tools` | list[str] or None | `None` (inherit parent's full set) | Restricts which tools the nested agent may use, e.g. `["web_search", "read_website"]`. `None` inherits everything. Enforced when the child session registers its tools (`_register_tools` filters both `llm_tools` and `tools_dict`), not just in the prompt. |
 | `enable_shell` | bool | `False` | Whether the nested agent may run shell commands. Always intersected with the parent's `--enable-shell` -- a sub-agent can never widen the parent's permissions. |
 | `max_steps` | int or None | `None` (unbounded) | Cap on how many model calls the nested agent may make before returning. Guards against loops. |
 | `system_prompt` | method | default | Override to customise the nested system prompt (called with `task, parent`). See `research` / `planner` for `super().system_prompt(...)` extension. |
@@ -208,7 +208,7 @@ read inside `system_prompt`, `_resolve_tools`, etc.
 | --- | --- | --- |
 | `task` (required) | string | A clear, self-contained description of the task the sub-agent should complete. |
 | `max_steps` (optional) | integer | Per-invocation cap on model calls. Overrides the subclass default for this one call; leaving it out uses the subclass default. |
-| *(subclass-defined)* | varies | Any parameters added via `_extra_tool_parameters`, e.g. `sources` (a domain hint the `research` sub-agent folds into its prompt). Advisory only. |
+| *(subclass-defined)* | varies | Any parameters added via `_extra_tool_parameters`, e.g. `sources` (a domain hint the `research` sub-agent folds into its prompt). Passed through `SubAgent.run(..., **options)`, merged over `self.options` and handed to `system_prompt(task, parent, options)`. |
 
 ### 3.3 Inheritance: what the child gets from the parent
 
@@ -255,16 +255,20 @@ small:
   path-bearing parameter (like `glob`'s `root` or the shell's `cwd`) must be added there too.
 * **Compaction** is decided in `agent_loop._compaction_trigger` from the projected input
   tokens plus the reply reserve against `config.compaction_budget`; the message count is
-  deliberately not consulted. The replacement transcript is the system prompt, the summary,
-  any plan-mode goal/plan, and then the **turn still in flight** (`_in_flight_tail`): the
-  user message being answered, or the tool exchange the model is waiting on. Summarising that
-  turn away would make the model answer the summary instead of the request -- and the typed
-  line would never reach the new segment, the recorder or a restore. The console is the only
-  record a user gets of the rollover, so every compaction note is `warn`-level (visible
-  without `--verbose`) and states what was folded away (a truncated summary preview), how much
-  (the closing segment's message count), where it went (`history_{n}.json` closed,
-  `history_{n+1}.json` started) and that the turn in flight was kept verbatim; the failure
-  paths say explicitly that the transcript and the segment are unchanged.
+  deliberately not consulted. The replacement transcript is the system prompt, any
+  **standing messages** that must not be summarised (the `--agent-md` preamble, passed as
+  `preserve`), the summary, any plan-mode goal/plan, and then the **turn still in flight**
+  (`_in_flight_tail`): the user message being answered, or the tool exchange the model is
+  waiting on. The tail scan skips user turns the loop injected itself (plan authoring and
+  plan review), so a plan generated just before a rollover is never mistaken for the request.
+  Summarising the in-flight turn away would make the model answer the summary instead of the
+  request -- and the typed line would never reach the new segment, the recorder or a restore.
+  The console is the only record a user gets of the rollover, so every compaction note is
+  `warn`-level (visible without `--verbose`) and states what was folded away (a truncated
+  summary preview), how much (the closing segment's message count), where it went
+  (`history_{n}.json` closed, `history_{n+1}.json` started) and that the turn in flight was
+  kept verbatim; the failure paths say explicitly that the transcript and the segment are
+  unchanged.
 * **New permissions behaviour** lives in `permissions.py` and `shell_safety_utils.py`.
 * **New persistence shapes** live in `persistence.py` (best-effort loaders throughout).
 * **New sub-agents** live in `subagents/` (see §2.4).

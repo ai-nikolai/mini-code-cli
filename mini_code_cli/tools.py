@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 
@@ -34,6 +35,13 @@ DEFAULT_TOOL_TIMEOUT = 120
 # be megabytes, which would fill the context window in one call; the default is
 # generous but bounded, and read_website exposes it as ``max_chars``.
 DEFAULT_MAX_WEBPAGE_CHARS = 100_000
+
+# A hard ceiling on how many bytes a single fetch may download. Without it a
+# hostile (or merely huge) page is read into memory in full before
+# ``max_chars`` is applied, which can exhaust the agent process. ``max_chars``
+# is a *character* limit, so the download cap is derived from it (UTF-8 uses at
+# most four bytes per character) and bounded by this ceiling.
+DEFAULT_MAX_FETCH_BYTES = 10_000_000
 
 # Matched grep lines longer than this are truncated (a minified JS/CSS file is
 # one line, and echoing it whole would drown the conversation).
@@ -116,16 +124,49 @@ def _coerce_text(value):
     return str(value)
 
 
-def _fetch(url, timeout=DEFAULT_TOOL_TIMEOUT):
+def _fetch(url, timeout=DEFAULT_TOOL_TIMEOUT, max_bytes=DEFAULT_MAX_FETCH_BYTES):
     """GET `url` and return its decoded body, sending a browser User-Agent.
 
-    Undecodable bytes are replaced rather than raising, so a page with a stray
-    non-UTF-8 byte is still readable instead of failing the whole fetch.
+    At most ``max_bytes`` bytes are read (``0``/``None`` = no explicit cap), so a
+    huge or hostile response cannot be pulled into memory in full. Undecodable
+    bytes are replaced rather than raising, so a page with a stray non-UTF-8
+    byte is still readable instead of failing the whole fetch.
     """
     request = urllib.request.Request(
         url, headers={"User-Agent": _USER_AGENT, "Accept": "*/*"})
     with urllib.request.urlopen(request, timeout=_coerce_timeout(timeout)) as response:
-        return response.read().decode("utf-8", errors="replace")
+        limit = max(_coerce_int(max_bytes, 0), 0)
+        body = response.read(limit) if limit else response.read()
+    return body.decode("utf-8", errors="replace")
+
+
+def _atomic_write_text(path, text, newline=""):
+    """Write ``text`` to ``path`` atomically (temp file + ``os.replace``).
+
+    A plain ``open(path, "w")`` truncates the file first, so an interrupt, a
+    crash or a full disk in the middle of the write leaves a truncated source
+    file behind. Writing next to the target and renaming makes the swap atomic:
+    a reader sees either the old file or the new one, never half of each. An
+    existing file's permission bits are preserved (a rewritten executable script
+    stays executable).
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".mini-write-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as handle:
+            handle.write(text)
+        try:
+            os.chmod(tmp_path, os.stat(path).st_mode & 0o7777)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +180,32 @@ def read_file(file_path, offset: int = 0, limit: int = 0, *args, **kwargs):
     of the file); limit (maximum number of lines, 0 = to the end of the file).
 
     Use offset/limit to page through a large file instead of reading it all.
-    A partial read is prefixed with a ``[lines X-Y of N]`` header.
+    A partial read is prefixed with a ``[lines X-Y of N]`` header. The page is
+    streamed line by line, so a huge file is not loaded into memory just to
+    return a small slice of it.
     """
+    offset = max(_coerce_int(offset, 0), 0)
+    limit = max(_coerce_int(limit, 0), 0)
+
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+            # The common whole-file read is already bounded by what the caller
+            # asked for; no need to pay for the streaming path.
+            if not offset and not limit:
+                return f.read()
+
+            start = max(offset - 1, 0) if offset else 0
+            selected = []
+            total = 0
+            for number, line in enumerate(f, start=1):
+                total = number
+                if number <= start:
+                    continue
+                if limit and number > start + limit:
+                    # Keep iterating purely to count the file's lines for the
+                    # header, but do not hold the remaining content in memory.
+                    continue
+                selected.append(line)
     except FileNotFoundError:
         return f"Error: no such file: {file_path}"
     except IsADirectoryError:
@@ -152,20 +214,12 @@ def read_file(file_path, offset: int = 0, limit: int = 0, *args, **kwargs):
     except Exception as e:
         return f"Error: {e}"
 
-    offset = max(_coerce_int(offset, 0), 0)
-    limit = max(_coerce_int(limit, 0), 0)
-    if not offset and not limit:
-        return text
-
-    lines = text.splitlines(keepends=True)
-    start = max(offset - 1, 0) if offset else 0
-    end = start + limit if limit else len(lines)
-    if start >= len(lines):
+    if start >= total:
         return (f"Error: offset {offset} is past the end of {file_path} "
-                f"({len(lines)} line(s)).")
-    chunk = "".join(lines[start:end])
-    header = f"[lines {start + 1}-{min(end, len(lines))} of {len(lines)}]\n"
-    return header + chunk
+                f"({total} line(s)).")
+    end = start + len(selected)
+    header = f"[lines {start + 1}-{end} of {total}]\n"
+    return header + "".join(selected)
 
 
 def write_file(file_path, content, append: bool = False, create_dirs: bool = True,
@@ -184,9 +238,11 @@ def write_file(file_path, content, append: bool = False, create_dirs: bool = Tru
             parent = os.path.dirname(os.path.abspath(file_path))
             if parent:
                 os.makedirs(parent, exist_ok=True)
-        mode = "a" if append else "w"
-        with open(file_path, mode, encoding="utf-8") as f:
-            f.write(content)
+        if append:
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            _atomic_write_text(file_path, content)
         verb = "Appended to" if append else "Wrote to"
         return f"{verb} file: {file_path} ({len(content)} chars)"
     except IsADirectoryError:
@@ -240,8 +296,7 @@ def edit(file_path, old_string, new_string, replace_all: bool = False,
 
     updated = text.replace(old_string, new_string, -1 if replace_all else 1)
     try:
-        with open(file_path, "w", encoding="utf-8", newline="") as f:
-            f.write(updated)
+        _atomic_write_text(file_path, updated, newline="")
     except Exception as e:
         return f"Error: {e}"
 
@@ -451,18 +506,25 @@ def read_website(url, timeout: int = DEFAULT_TOOL_TIMEOUT,
     """Fetch and return the text content of a given URL.
 
     Param: url (required); timeout (seconds before the fetch is aborted);
-    max_chars (maximum characters to return, 0 = unlimited, default 100000 --
-    a raw page can be enormous, so it is truncated rather than flooding the
-    context).
+    max_chars (maximum characters to return, 0 = no character truncation,
+    default 100000 -- a raw page can be enormous, so it is truncated rather than
+    flooding the context).
 
-    Returns the page's raw text/HTML (tags included); it is not rendered.
+    Returns the page's raw text/HTML (tags included); it is not rendered. The
+    download itself is capped as well (four bytes per requested character, and
+    at most 10 MB), so a huge page cannot exhaust memory before ``max_chars`` is
+    applied.
     """
     url = _coerce_text(url)
     if not url:
         return "Error: url must not be empty."
     max_chars = max(_coerce_int(max_chars, DEFAULT_MAX_WEBPAGE_CHARS), 0)
+    # UTF-8 needs at most four bytes per character, so this is enough to fill
+    # the requested character budget without downloading the whole page.
+    byte_cap = min(max_chars * 4, DEFAULT_MAX_FETCH_BYTES) if max_chars \
+        else DEFAULT_MAX_FETCH_BYTES
     try:
-        text = _fetch(url, timeout=timeout)
+        text = _fetch(url, timeout=timeout, max_bytes=byte_cap)
     except Exception as e:
         return f"Error: {e}"
 
