@@ -67,8 +67,20 @@ def sif_path(sif_cache, instance_id):
 
 
 def pull(apptainer, image, path, log_path, env=None, force=False, timeout=7_200):
-    """``apptainer pull`` one instance image; returns ``(ok, message)``."""
-    if os.path.isfile(path) and not force:
+    """``apptainer pull`` one instance image; returns ``(ok, message)``.
+
+    A ``.complete`` sidecar is written only after a successful pull. An existing
+    image without one predates the marker; it is accepted once and labelled, so
+    the next interrupted pull is not mistaken for a cache hit.
+    """
+    marker = f"{path}.complete"
+    if os.path.isfile(path) and os.path.getsize(path) > 0 and not force:
+        if not os.path.isfile(marker):
+            try:
+                with open(marker, "w", encoding="utf-8") as handle:
+                    handle.write(image_ref(image) + "\n")
+            except OSError:
+                pass
         return True, "cached"
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     argv = [apptainer, "pull", "--force", path, image_ref(image)]
@@ -83,6 +95,11 @@ def pull(apptainer, image, path, log_path, env=None, force=False, timeout=7_200)
             return False, f"apptainer pull failed: {e}"
     if result.returncode != 0:
         return False, f"apptainer pull exited {result.returncode} (see {log_path})"
+    try:
+        with open(marker, "w", encoding="utf-8") as handle:
+            handle.write(image_ref(image) + "\n")
+    except OSError:
+        pass
     return True, "pulled"
 
 

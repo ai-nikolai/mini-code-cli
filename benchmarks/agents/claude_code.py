@@ -161,8 +161,12 @@ class ClaudeCodeAgent(AgentAdapter):
 
     def harbor_selection(self, model):
         # Harbor ships a Claude Code agent; the baseline should be the one the
-        # leaderboard uses, not a re-implementation of it.
-        return {"agent": "claude-code", "kwargs": {}}
+        # leaderboard uses, not a re-implementation of it. The model id must be
+        # handed to the CLI without the `anthropic/` routing prefix: the CLI
+        # rejects `anthropic/<id>` as an unrecognized model when the endpoint is
+        # a local Anthropic-compatible server.
+        return {"agent": "claude-code",
+                "kwargs": {"model_name": _anthropic_model_id(model.model)}}
 
     def metadata(self):
         payload = super().metadata()

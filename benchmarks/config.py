@@ -126,9 +126,12 @@ class SuiteSpec:
         self.dataset = str(dataset) if dataset else None
         self.version = str(version) if version else None
         self.split = str(split) if split else None
-        self.limit = int(limit) if limit else None
+        self.limit = int(limit) if limit is not None else None
         self.task_ids = tuple(str(t) for t in (task_ids or ()))
         self.options = dict(options or {})
+        # Filled in by RunConfig so a suite's preflight/notes can resolve the
+        # runtime the config pinned (it is a run-level setting, not a suite key).
+        self.runtime = None
 
     def __repr__(self):
         return f"SuiteSpec({self.name!r}, {self.dataset!r}, {self.version!r})"
@@ -156,7 +159,7 @@ class RunConfig:
         self.agents = list(agents)
         self.models = list(models)
         self.output_dir = str(output_dir)
-        self.concurrency = max(int(concurrency), 1)
+        self.concurrency = int(concurrency)
         self.timeouts = dict(DEFAULT_TIMEOUTS)
         self.timeouts.update(timeouts or {})
         self.docker = dict(DEFAULT_DOCKER)
@@ -167,6 +170,8 @@ class RunConfig:
         # their own commands, and the manifest records what was actually used.
         self.runtime = str(runtime).strip().lower() if runtime else DEFAULT_RUNTIME
         self.source = source
+        for suite in self.suites:
+            suite.runtime = self.runtime
 
     def resolved_runtime(self):
         """The runtime this machine will use, or ``None`` when none is installed."""
@@ -277,11 +282,21 @@ def parse_config(data, source=None):
     if unknown:
         raise ConfigError(f"unknown config key(s): {', '.join(unknown)}")
 
+    def _reject_unknown(entry, allowed, kind):
+        """Reject a typo inside a suite/model/agent entry (not inside options)."""
+        unknown = sorted(key for key in set(entry) - set(allowed)
+                         if not str(key).startswith("_"))
+        if unknown:
+            raise ConfigError(f"{kind} entry has unknown key(s): "
+                              f"{', '.join(unknown)}")
+
     suites = []
     for entry in _require(data, "suites", "config"):
         if isinstance(entry, str):
             suites.append(SuiteSpec(name=entry))
             continue
+        _reject_unknown(entry, {"name", "dataset", "version", "split", "limit",
+                                "task_ids", "options"}, "suite")
         suites.append(SuiteSpec(
             name=_require(entry, "name", "suite"),
             dataset=entry.get("dataset"),
@@ -294,6 +309,8 @@ def parse_config(data, source=None):
 
     models = []
     for entry in _require(data, "models", "config"):
+        _reject_unknown(entry, {"name", "model", "base_url", "api",
+                                "api_key_env", "notes"}, "model")
         models.append(ModelSpec(
             name=_require(entry, "name", "model"),
             model=_require(entry, "model", "model"),
@@ -308,6 +325,8 @@ def parse_config(data, source=None):
         if isinstance(entry, str):
             agents.append(AgentSpec(name=entry))
             continue
+        _reject_unknown(entry, {"name", "setting", "settings", "options",
+                                "models"}, "agent")
         settings = entry.get("settings") or [entry.get("setting") or "default"]
         for setting in settings:
             agents.append(AgentSpec(name=_require(entry, "name", "agent"),
@@ -368,6 +387,12 @@ def validate_config(config, check_env=False):
     duplicates = {label for label in labels if labels.count(label) > 1}
     for label in sorted(duplicates):
         problems.append(f"agent setting listed twice: {label!r}")
+
+    for suite in config.suites:
+        if suite.limit is not None and suite.limit <= 0:
+            problems.append(
+                f"suite {suite.name!r}: limit must be a positive integer, "
+                f"not {suite.limit}")
 
     for model in config.models:
         if model.api not in ("openai", "anthropic"):

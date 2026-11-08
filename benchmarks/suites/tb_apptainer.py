@@ -128,6 +128,29 @@ def sif_name(dataset, task_name):
     return re.sub(r"[^A-Za-z0-9._-]+", "-", clean) + ".sif"
 
 
+def cache_key(image, definition_text, mini_code_dir=None):
+    """Content hash for a derived SIF (source image + definition + baked code)."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    digest.update(str(image).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(str(definition_text).encode("utf-8"))
+    if mini_code_dir:
+        root = os.path.abspath(str(mini_code_dir))
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                try:
+                    with open(path, "rb") as handle:
+                        digest.update(name.encode("utf-8"))
+                        digest.update(handle.read())
+                except OSError:
+                    continue
+    return digest.hexdigest()
+
+
 def build_sif(apptainer, definition, sif_path, log_path, env=None, force=False,
               timeout=3_600):
     """``apptainer build --fakeroot`` one definition; returns ``(ok, message)``."""
@@ -168,7 +191,7 @@ def prepare(dataset_dir, out_dir, sif_cache, limit=None, task_ids=(),
     if task_ids:
         wanted = {str(t) for t in task_ids}
         names = [name for name in names if name in wanted]
-    if limit:
+    if limit and not task_ids:
         names = names[:int(limit)]
     if not names:
         raise SystemExit(f"tb_apptainer: no tasks under {dataset_dir!r}")
@@ -184,20 +207,43 @@ def prepare(dataset_dir, out_dir, sif_cache, limit=None, task_ids=(),
                     "reason": "task.toml names no docker_image"}
         sif = os.path.join(sif_cache, sif_name(name, name))
         target = os.path.join(out_dir, name)
-        if os.path.isdir(os.path.join(target, "task.toml")) and \
-                os.path.isfile(sif) and not force:
-            return {"task": name, "status": "cached", "sif": sif,
-                    "dir": target, "image": image}
         definition = os.path.join(log_dir, f"{name}.def")
         os.makedirs(log_dir, exist_ok=True)
+        rendered = render_def(image, mini_code_dir)
+        key = cache_key(image, rendered, mini_code_dir)
+        key_path = f"{sif}.key"
+        try:
+            with open(key_path, encoding="utf-8") as handle:
+                cached_key = handle.read().strip()
+        except OSError:
+            cached_key = None
+        if os.path.isdir(os.path.join(target, "task.toml")) and \
+                os.path.isfile(sif) and (cached_key in (None, key)) and not force:
+            # A cache from before key sidecars existed is accepted once and then
+            # labelled, so the next definition/package change is detected.
+            if cached_key != key:
+                try:
+                    with open(key_path, "w", encoding="utf-8") as handle:
+                        handle.write(key + "\n")
+                except OSError:
+                    pass
+            return {"task": name, "status": "cached", "sif": sif,
+                    "dir": target, "image": image}
         with open(definition, "w", encoding="utf-8") as handle:
-            handle.write(render_def(image, mini_code_dir))
+            handle.write(rendered)
         ok, message = build_sif(apptainer, definition, sif,
                                 os.path.join(log_dir, f"{name}.build.log"),
-                                env=env, force=force)
+                                env=env,
+                                force=force or (os.path.isfile(sif)
+                                                and cached_key != key))
         if not ok:
             return {"task": name, "status": "failed", "reason": message,
                     "image": image}
+        try:
+            with open(key_path, "w", encoding="utf-8") as handle:
+                handle.write(key + "\n")
+        except OSError:
+            pass
         if os.path.isdir(target):
             shutil.rmtree(target)
         shutil.copytree(source, target)

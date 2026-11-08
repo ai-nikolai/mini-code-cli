@@ -137,8 +137,10 @@ def _dispatch(args, parser):
         runner = Runner(config, dry_run=False, allow_host=args.allow_host,
                         resume=not args.no_resume)
         csv_path = _csv_target(args.csv, args.run_id)
-        runner.run(trials, run_id=args.run_id, csv_path=csv_path)
-        return EXIT_OK
+        manifest = runner.run(trials, run_id=args.run_id, csv_path=csv_path)
+        bad = [trial for trial in (manifest or {}).get("trials", [])
+               if trial.get("status") != "done"]
+        return EXIT_OK if not bad else EXIT_PROBLEM
     runner = Runner(config, dry_run=True)
     runner.plan(trials)
     return EXIT_OK
@@ -174,8 +176,14 @@ def _cmd_validate(config, allow_host):
     for agent_spec in config.agents:
         adapter = get_adapter(agent_spec)
         for model in _models_for(config, agent_spec):
-            problems += adapter.preflight(model, require_binary=True)
-    if not allow_host and docker_module.docker_version() is None:
+            # A harness that ships its own agent (harbor's pi/claude-code) runs
+            # that agent inside the task container; the host CLI is not needed.
+            # Only check for a host binary when the adapter's own argv will run.
+            built_in = bool((adapter.harness_selection(model) or {}).get("agent")
+                            or (adapter.harbor_selection(model) or {}).get("agent"))
+            problems += adapter.preflight(model, require_binary=not built_in)
+    if (not allow_host and config.resolved_runtime() == "docker"
+            and docker_module.docker_version() is None):
         problems.append("docker is not available on this host (pass --allow-host "
                         "only if the agents really should run here)")
 
