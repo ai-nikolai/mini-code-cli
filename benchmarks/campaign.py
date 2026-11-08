@@ -127,6 +127,8 @@ def build_parser():
                         help="where the campaign directory and CSV go (default: results)")
     parser.add_argument("--n-concurrent", type=int, default=None,
                         help="override concurrency")
+    parser.add_argument("--agent-timeout-multiplier", type=float, default=None,
+                        help="scale the task's own agent budget (e.g. 1 = 900 s)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the commands and the summary path, run nothing")
     parser.add_argument("--scratch-dir", default=None,
@@ -160,7 +162,7 @@ def _timestamp():
 
 
 def build_config(dataset, agent, mode, limit=None, n_concurrent=None,
-                 config_path=None):
+                 config_path=None, agent_timeout_multiplier=None):
     """The config for one agent's run, with the mode applied on top.
 
     The config file stays the source of truth for models and endpoints; this only
@@ -203,6 +205,8 @@ def build_config(dataset, agent, mode, limit=None, n_concurrent=None,
         if n_concurrent is not None:
             options["n_concurrent"] = n_concurrent
             options["max_workers"] = n_concurrent
+        if agent_timeout_multiplier is not None:
+            options["agent_timeout_multiplier"] = float(agent_timeout_multiplier)
         if suite_name == "swebench":
             options["skip_evaluation"] = not evaluate
             if "instance_seconds" in overrides:
@@ -233,7 +237,8 @@ def main(argv=None):
         for agent in agents:
             config, suite_name, _ = build_config(
                 args.dataset, agent, args.mode, limit=args.limit,
-                n_concurrent=args.n_concurrent)
+                n_concurrent=args.n_concurrent,
+                agent_timeout_multiplier=args.agent_timeout_multiplier)
             problems = validate_config(config, check_env=not args.dry_run)
             if problems:
                 raise ConfigError("; ".join(problems))
