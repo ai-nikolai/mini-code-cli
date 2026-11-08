@@ -22,7 +22,7 @@ import sys
 
 from .results import (CSV_COLUMNS, read_csv, read_results, summarise, to_csv)
 
-KEY = ("suite", "agent", "setting", "model")
+KEY = ("dataset", "suite", "agent", "setting", "model")
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +89,7 @@ def aggregate(rows):
         key = tuple(row.get(part) for part in KEY)
         if key not in merged:
             merged[key] = {
+                "dataset": row.get("dataset"),
                 "suite": row.get("suite"),
                 "agent": row.get("agent"),
                 "setting": row.get("setting"),
@@ -120,7 +121,7 @@ def aggregate(rows):
         cell["rate"] = round(cell["resolved"] / cell["n"], 4) if cell["n"] else None
         cell["mean_seconds"] = round(total / n, 2) if n else None
         out.append(cell)
-    out.sort(key=lambda r: (str(r.get("suite")), str(r.get("agent")),
+    out.sort(key=lambda r: (str(r.get("dataset")), str(r.get("suite")), str(r.get("agent")),
                             str(r.get("setting")), str(r.get("model"))))
     return out
 
@@ -131,15 +132,19 @@ def totals(rows):
     resolved = sum(int(r.get("resolved") or 0) for r in rows)
     duration_total = sum(float(r["mean_seconds"]) * int(r.get("n") or 0)
                          for r in rows if r.get("mean_seconds") is not None)
+    duration_n = sum(int(r.get("n") or 0)
+                     for r in rows if r.get("mean_seconds") is not None)
     return {
-        "suite": "ALL", "agent": "", "setting": "", "model": "", "run_id": "",
+        "dataset": "", "suite": "ALL", "agent": "", "setting": "", "model": "",
+        "run_id": "",
         "n": n, "resolved": resolved,
         "unresolved": sum(int(r.get("unresolved") or 0) for r in rows),
         "errors": sum(int(r.get("errors") or 0) for r in rows),
         "timeouts": sum(int(r.get("timeouts") or 0) for r in rows),
         "command_errors": sum(int(r.get("command_errors") or 0) for r in rows),
         "rate": round(resolved / n, 4) if n else None,
-        "mean_seconds": round(duration_total / n, 2) if n else None,
+        "mean_seconds": round(duration_total / duration_n, 2)
+        if duration_n else None,
     }
 
 

@@ -415,7 +415,9 @@ class TerminalBenchSuiteTests(unittest.TestCase):
 
     def test_tb_trial_limits_become_harness_flags(self):
         argv = self.commands().argv
-        self.assertEqual(argv[argv.index("--n-tasks") + 1], "3")
+        # Explicit ids define the sample: with one id the count is 1, not the
+        # mode's limit (which used to truncate/pad the requested list).
+        self.assertEqual(argv[argv.index("--n-tasks") + 1], "1")
         self.assertEqual(argv[argv.index("--task-id") + 1], "t1")
         self.assertIn("--global-agent-timeout-sec", argv)
 
@@ -531,13 +533,12 @@ class SweBenchSuiteTests(unittest.TestCase):
             self.suite.apptainer_backend(self.trial),
             (self.trial.container_runtime or "docker") == "apptainer")
 
-    def test_agent_command_mounts_only_the_agents_own_code(self):
-        """The agent may mount *itself*, and nothing of the user's.
+    def test_agent_and_patch_capture_share_a_writable_testbed(self):
+        """The agent may mount *itself*, its tools, and a writable /testbed.
 
-        mini-code runs from this repository, so the checkout is mounted read-only;
-        the agent-tools directory carries the npm tree that does not fit in the
-        image's 64 MiB overlay. Anything else -- a home directory, a dataset --
-        would leak host state into the instance and change the measurement.
+        The last one is the fix for Docker (a `--rm` capture container otherwise
+        starts from the pristine image and loses every edit). Everything else --
+        a home directory, a dataset -- would leak host state into the instance.
         """
         with tempfile.TemporaryDirectory() as run_dir:
             write_instances([{"instance_id": "i-1", "problem_statement": "p"}],
@@ -545,16 +546,18 @@ class SweBenchSuiteTests(unittest.TestCase):
             commands = self.suite.commands(self.trial, "/tmp", run_dir,
                                            get_adapter(self.trial.agent))
         agent = next(c for c in commands if c.label.startswith("swebench: agent"))
-        mounts = [agent.argv[i + 1] for i, part in enumerate(agent.argv)
-                  if part in ("-v", "--bind")]
-        self.assertTrue(all("/testbed" not in mount for mount in mounts))
-        self.assertTrue(any(mount.endswith("/opt/agent") for mount in mounts))
-        for mount in mounts:
-            self.assertTrue(
-                mount.split(":")[1].startswith(("/opt/mini-code", "/opt/agent")),
-                f"unexpected mount: {mount}")
+        capture = next(c for c in commands if c.label.startswith("swebench: capture"))
+        self.assertTrue(any(c.label.startswith("swebench: copy checkout")
+                            for c in commands))
+        for command in (agent, capture):
+            mounts = [command.argv[i + 1] for i, part in enumerate(command.argv)
+                      if part in ("-v", "--bind")]
+            self.assertTrue(any(mount.endswith(":/testbed") for mount in mounts),
+                            f"{command.label} does not mount /testbed: {mounts}")
+        agent_mounts = [agent.argv[i + 1] for i, part in enumerate(agent.argv)
+                        if part in ("-v", "--bind")]
+        self.assertTrue(any(mount.endswith(":/opt/agent") for mount in agent_mounts))
         self.assertIn("--rm", agent.argv)
-        self.assertIn("/testbed", agent.argv)
 
     def test_predictions_have_the_mandated_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -830,7 +833,8 @@ class ResultsTests(unittest.TestCase):
         self.assertEqual(rows["t1"]["rate"], 0.5)
         self.assertEqual(rows["t1"]["mean_seconds"], 15.0)
         self.assertEqual(rows["t2"]["errors"], 1)
-        self.assertEqual(rows["t2"]["rate"], 0.0)
+        # A pure harness error has no comparable denominator; it is None, not 0.
+        self.assertIsNone(rows["t2"]["rate"])
         self.assertEqual(rows["t3"]["n"], 0)
         self.assertIsNone(rows["t3"]["rate"])
 
@@ -866,3 +870,194 @@ class ModelsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessSemanticsTests(unittest.TestCase):
+    """The P0 result-semantics fixes: one outcome per task, errors not zeros."""
+
+    def test_redaction_does_not_corrupt_token_counts(self):
+        self.assertEqual(redact("tokens : 2,741"),
+                         "tokens : 2,741")
+        self.assertEqual(redact("Authorization: Bearer sk-abcdefgh"),
+                         "Authorization: Bearer ***")
+        self.assertEqual(redact("x-api-key: abc123"), "x-api-key: ***")
+
+    def test_harbor_stats_merge_reward_and_exception_per_task(self):
+        suite = get_suite(SuiteSpec(
+            name="terminal-bench", dataset="terminal-bench", version="2.1",
+            options={"harness": "harbor"}))
+        payload = {
+            "stats": {"evals": {"e": {
+                "reward_stats": {"reward": {
+                    "0.0": ["task__AttemptA"]}},
+                "exception_stats": {"AgentAuthenticationError":
+                                    ["task__AttemptA"]},
+            }}},
+        }
+        with tempfile.TemporaryDirectory() as run_dir:
+            target = os.path.join(run_dir, "harbor", "job")
+            os.makedirs(target)
+            with open(os.path.join(target, "result.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            outcomes = suite.collect(run_dir, "job")
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].instance_id, "task")
+        self.assertEqual(outcomes[0].outcome, TrialOutcome.ERROR)
+        self.assertIn("AgentAuthenticationError", outcomes[0].detail)
+
+    def test_a_resolved_retry_beats_an_errored_attempt(self):
+        suite = get_suite(SuiteSpec(
+            name="terminal-bench", dataset="terminal-bench", version="2.1",
+            options={"harness": "harbor"}))
+        payload = {"stats": {"evals": {"e": {
+            "reward_stats": {"reward": {
+                "1.0": ["task__AttemptA"],
+                "0.0": ["task__AttemptB"]}},
+            "exception_stats": {"AgentTimeoutError": ["task__AttemptB"]},
+        }}}}
+        with tempfile.TemporaryDirectory() as run_dir:
+            target = os.path.join(run_dir, "harbor", "job")
+            os.makedirs(target)
+            with open(os.path.join(target, "result.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            outcomes = suite.collect(run_dir, "job")
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].outcome, TrialOutcome.RESOLVED)
+
+    def test_swebench_empty_patch_is_unresolved_and_missing_report_is_error(self):
+        suite = get_suite(SuiteSpec(
+            name="swebench", dataset="SWE-bench/SWE-bench_Lite",
+            version="test", split="test"))
+        with tempfile.TemporaryDirectory() as run_dir:
+            write_instances([
+                {"instance_id": "i-1", "problem_statement": "p"},
+                {"instance_id": "i-2", "problem_statement": "p"}],
+                os.path.join(run_dir, "instances.jsonl"))
+            os.makedirs(os.path.join(run_dir, "instances", "i-1"))
+            os.makedirs(os.path.join(run_dir, "instances", "i-2"))
+            open(os.path.join(run_dir, "instances", "i-1", "model.patch"),
+                 "w").close()
+            with open(os.path.join(run_dir, "instances", "i-2", "model.patch"),
+                      "w", encoding="utf-8") as handle:
+                handle.write("diff --git a/x b/x\n")
+            with open(os.path.join(run_dir, "job.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump({"resolved_ids": ["i-2"], "unresolved_ids": [],
+                           "error_ids": []}, handle)
+            outcomes = {o.instance_id: o for o in suite.collect(run_dir, "job")}
+            self.assertEqual(outcomes["i-2"].outcome, TrialOutcome.RESOLVED)
+            self.assertEqual(outcomes["i-1"].outcome, TrialOutcome.UNRESOLVED)
+            self.assertIn("empty patch", outcomes["i-1"].detail)
+            # Without a report, every expected instance is an error, not an
+            # empty (and therefore silently "fine") result set.
+            os.remove(os.path.join(run_dir, "job.json"))
+            missing = suite.collect(run_dir, "job")
+            self.assertEqual({o.outcome for o in missing}, {TrialOutcome.ERROR})
+            self.assertEqual(len(missing), 2)
+
+    def test_summary_rate_excludes_harness_errors_and_flags_them(self):
+        from benchmarks.summary import row_for
+
+        errors = [TrialOutcome(suite="s", instance_id="x",
+                               outcome=TrialOutcome.ERROR)]
+        row = row_for("d", "a", "m", "r", errors)
+        self.assertIsNone(row["pass_rate"])
+        self.assertEqual(row["errors"], 1)
+        self.assertEqual(row["status"], "all_failed")
+        empty = row_for("d", "a", "m", "r", [])
+        self.assertEqual(empty["status"], "no_results")
+
+    def test_manifest_env_values_are_redacted(self):
+        config = minimal_config(env={"OPENAI_API_KEY": "super-secret"})
+        runner = Runner(config, dry_run=True)
+        manifest = runner._manifest("run", config.trials())
+        self.assertEqual(manifest["config"]["env"]["OPENAI_API_KEY"], "***")
+
+    def test_execute_expands_env_placeholders_in_argv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "x.log")
+            command = PlannedCommand(
+                label="echo", argv=["bash", "-lc", 'printf "%s" "$1"', "_",
+                                    "{env:BENCH_TEST_VALUE}"])
+            with unittest.mock.patch.dict(os.environ,
+                                          {"BENCH_TEST_VALUE": "expanded"}):
+                status = _execute(command, log, lambda *a: None)
+            with open(log, encoding="utf-8") as handle:
+                text = handle.read()
+        self.assertEqual(status, "ok")
+        self.assertIn("expanded", text)
+
+    def test_trial_identity_changes_with_the_sample(self):
+        first = minimal_config().trials()[0]
+        same = minimal_config().trials()[0]
+        different = minimal_config(suites=[{
+            "name": "terminal-bench", "dataset": "terminal-bench",
+            "version": "2.1", "limit": 9}]).trials()[0]
+        self.assertEqual(first.identity("abc"), same.identity("abc"))
+        self.assertNotEqual(first.identity("abc"), different.identity("abc"))
+
+
+class ReportingKeyTests(unittest.TestCase):
+    """The reader must not collapse different datasets or invent durations."""
+
+    def test_analyze_keeps_verified_and_lite_apart(self):
+        from benchmarks.analyze import aggregate
+
+        rows = [
+            {"dataset": "SWE-bench_Verified", "suite": "swebench",
+             "agent": "mini-code", "setting": "swe", "model": "m",
+             "n": 5, "resolved": 4, "unresolved": 1, "errors": 0,
+             "timeouts": 0, "command_errors": 0, "mean_seconds": 10.0},
+            {"dataset": "SWE-bench_Lite", "suite": "swebench",
+             "agent": "mini-code", "setting": "swe", "model": "m",
+             "n": 5, "resolved": 1, "unresolved": 4, "errors": 0,
+             "timeouts": 0, "command_errors": 0, "mean_seconds": 20.0},
+        ]
+        merged = aggregate(rows)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual({row["dataset"] for row in merged},
+                         {"SWE-bench_Verified", "SWE-bench_Lite"})
+
+    def test_analyze_total_duration_uses_only_rows_with_durations(self):
+        from benchmarks.analyze import aggregate, totals
+
+        rows = [
+            {"dataset": "d", "suite": "s", "agent": "a", "setting": "x",
+             "model": "m", "n": 2, "resolved": 2, "unresolved": 0,
+             "errors": 0, "timeouts": 0, "command_errors": 0,
+             "mean_seconds": 10.0},
+            {"dataset": "d", "suite": "s", "agent": "b", "setting": "x",
+             "model": "m", "n": 8, "resolved": 8, "unresolved": 0,
+             "errors": 0, "timeouts": 0, "command_errors": 0,
+             "mean_seconds": None},
+        ]
+        total = totals(aggregate(rows))
+        self.assertEqual(total["mean_seconds"], 10.0)
+
+    def test_summary_csv_has_errors_and_timeouts_columns(self):
+        from benchmarks.summary import SUMMARY_COLUMNS, row_for
+
+        row = row_for("d", "a", "m", "r", [
+            TrialOutcome("s", "x", TrialOutcome.ERROR)])
+        self.assertIn("errors", SUMMARY_COLUMNS)
+        self.assertIn("timeouts", SUMMARY_COLUMNS)
+        self.assertEqual(row["errors"], 1)
+
+    def test_invalid_limits_and_concurrency_are_rejected(self):
+        with self.assertRaises(ConfigError):
+            config_module.parse_config({
+                "suites": [{"name": "terminal-bench", "limit": 0}],
+                "models": [{"name": "m", "model": "m",
+                            "base_url": "http://x:1"}],
+                "agents": [{"name": "mini-code"}],
+            })
+        with self.assertRaises(ConfigError):
+            config_module.parse_config({
+                "concurrency": 0,
+                "suites": [{"name": "terminal-bench"}],
+                "models": [{"name": "m", "model": "m",
+                            "base_url": "http://x:1"}],
+                "agents": [{"name": "mini-code"}],
+            })

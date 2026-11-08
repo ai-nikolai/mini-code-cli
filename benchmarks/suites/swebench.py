@@ -139,7 +139,9 @@ class SweBenchSuite(Suite):
         ]
         if spec.version:
             argv += ["--revision", spec.version]
-        if trial.limit:
+        ids = (trial.suite.options or {}).get("instance_ids") or trial.suite.task_ids
+        if trial.limit and not ids:
+            # Explicit ids define the sample; a mode limit would truncate them.
             argv += ["--limit", str(trial.limit)]
         if trial.suite.options.get("instances_file"):
             argv += ["--from-file", str(trial.suite.options["instances_file"])]
@@ -147,7 +149,6 @@ class SweBenchSuite(Suite):
         # second campaign -- SWE-bench Lite after Verified -- draw *different*
         # instances instead of repeating the same first N, which would make the
         # two "campaigns" one campaign run twice.
-        ids = trial.suite.options.get("instance_ids") or trial.suite.task_ids
         if ids:
             argv += ["--instance-ids", ",".join(str(i) for i in ids)]
         skip = trial.suite.options.get("skip_ids")
@@ -173,8 +174,9 @@ class SweBenchSuite(Suite):
         # Apptainer has no daemon, so an instance image has to exist as a .sif
         # *before* the agent runs inside it -- pulling after the agent was a
         # 1.8s exit 255 ("failed to get checksum for docker://...").
-        if not (trial.suite.options or {}).get("skip_evaluation") \
-                and self.apptainer_backend(trial):
+        if self.apptainer_backend(trial):
+            # Pull every image the agent commands will use, independent of
+            # grading: `--mode short` must still be runnable on a cold cache.
             commands.append(self.images_command(trial, run_dir))
         commands.extend(self._instance_commands(trial, instances, run_dir,
                                                 adapter, timeouts))
@@ -203,7 +205,10 @@ class SweBenchSuite(Suite):
             "--sif-cache", self.sif_cache(),
             "--log-dir", self.ensure_dir(os.path.join(run_dir, "pulls")),
         ]
-        if trial.limit:
+        ids = (trial.suite.options or {}).get("instance_ids") or trial.suite.task_ids
+        if trial.limit and not ids:
+            # With explicit ids the prepared instance list is already the sample;
+            # applying the mode's limit would pull only the first N of it.
             argv += ["--limit", str(trial.limit)]
         return PlannedCommand(label="swebench: cache instance images as .sif",
                               argv=argv,
@@ -292,18 +297,21 @@ class SweBenchSuite(Suite):
             # checkout is copied to the host and bind-mounted back: same effect,
             # no root, and it survives both commands.
             workspace = os.path.join(workdir, "testbed")
-            if container == "apptainer":
-                os.makedirs(workspace, exist_ok=True)
-                commands.append(PlannedCommand(
-                    label=f"swebench: copy checkout for {instance_id}",
-                    argv=runtime_module.container_argv(
-                        container, image,
-                        ["bash", "-lc", "cp -a /testbed/. /out/"],
-                        mounts=[(workspace, "/out")],
-                        workdir="/"),
-                    timeout=900,
-                    notes=["/testbed is read-only inside the .sif; the working copy "
-                           "is bind-mounted back for the agent and the patch"]))
+            os.makedirs(workspace, exist_ok=True)
+            # Both runtimes get a host working copy bind-mounted at /testbed:
+            # an Apptainer .sif is read-only, and a Docker `--rm` container
+            # would otherwise start the patch-capture step from the pristine
+            # image and lose every edit.
+            commands.append(PlannedCommand(
+                label=f"swebench: copy checkout for {instance_id}",
+                argv=runtime_module.container_argv(
+                    container, image,
+                    ["bash", "-lc", "cp -a /testbed/. /out/"],
+                    mounts=[(workspace, "/out")],
+                    workdir="/"),
+                timeout=900,
+                notes=["the instance checkout is copied to the host and "
+                       "bind-mounted back for the agent and the patch"]))
 
             agent_argv = adapter.argv(_problem_statement(instance), trial.model,
                                       workspace="/testbed", container=True)
@@ -325,7 +333,7 @@ class SweBenchSuite(Suite):
                     env=adapter.container_env(trial.model),
                     mounts=list(adapter.container_mounts())
                     + [(tools_dir, container_setup.PREFIX)]
-                    + ([(workspace, "/testbed")] if container == "apptainer" else []),
+                    + [(workspace, "/testbed")],
                     limits=trial.docker,
                     network=trial.docker.get("network"),
                     workdir="/testbed"),
@@ -347,8 +355,7 @@ class SweBenchSuite(Suite):
                      "git add -A -- . ':!.mini' ':!.claude' ':!node_modules' "
                      "&& git diff --cached > /out/model.patch"],
                     limits=trial.docker,
-                    mounts=[(workdir, "/out")]
-                    + ([(workspace, "/testbed")] if container == "apptainer" else []),
+                    mounts=[(workdir, "/out"), (workspace, "/testbed")],
                     workdir="/testbed"),
                 cwd=run_dir,
                 timeout=int(options.get("patch_timeout_sec", 600)),
@@ -502,9 +509,27 @@ class SweBenchSuite(Suite):
     # -- results ---------------------------------------------------------
 
     def collect(self, run_dir, run_id=None):
-        """Read the harness report; fall back to the predictions file."""
+        """Read the harness report, keeping every expected instance in the set.
+
+        A report only lists the ids the harness classified. Seeding the outcomes
+        from the prepared instance list is what stops an empty/partial report (or
+        a 0-byte patch) from silently shrinking the denominator to zero.
+        """
+        expected = []
+        try:
+            expected = [str(i.get("instance_id")) for i in self.load_instances(run_dir)
+                        if i.get("instance_id")]
+        except SuiteError:
+            expected = []
+        empty_patches = _empty_patch_ids(run_dir)
         report = self._find_report(run_dir, run_id)
         if report is None:
+            if expected:
+                return [TrialOutcome(
+                    suite=self.name, instance_id=instance_id,
+                    outcome=TrialOutcome.ERROR,
+                    detail="no evaluation report")
+                    for instance_id in expected]
             raise SuiteError(
                 f"swebench: no report file in {run_dir} (expected "
                 f"<report_dir>/<model>.<run_id>.json from run_evaluation)")
@@ -513,26 +538,49 @@ class SweBenchSuite(Suite):
         resolved = set(payload.get("resolved_ids") or [])
         unresolved = set(payload.get("unresolved_ids") or [])
         errors = set(payload.get("error_ids") or [])
+        completed = set(payload.get("completed_ids") or [])
+        classified = resolved | unresolved | errors | completed
         outcomes = []
-        for instance_id in sorted(resolved | unresolved | errors):
+        for instance_id in sorted(set(expected) | classified):
             if instance_id in resolved:
                 outcome = TrialOutcome.RESOLVED
+                detail = ""
             elif instance_id in errors:
                 outcome = TrialOutcome.ERROR
-            else:
+                detail = "harness reported an error"
+            elif instance_id in unresolved:
                 outcome = TrialOutcome.UNRESOLVED
-            outcomes.append(TrialOutcome(suite=self.name, instance_id=instance_id,
-                                         outcome=outcome))
+                detail = ""
+            elif instance_id in completed:
+                outcome = TrialOutcome.UNRESOLVED
+                detail = "completed without a verdict"
+            elif instance_id in empty_patches:
+                outcome = TrialOutcome.UNRESOLVED
+                detail = "empty patch"
+            else:
+                outcome = TrialOutcome.ERROR
+                detail = "missing from the evaluation report"
+            if (instance_id in empty_patches
+                    and outcome != TrialOutcome.RESOLVED and not detail):
+                detail = "empty patch"
+            outcomes.append(TrialOutcome(
+                suite=self.name, instance_id=instance_id, outcome=outcome,
+                detail=detail, extra={"patch_empty": instance_id in empty_patches}))
         return outcomes
 
     @staticmethod
     def _find_report(run_dir, run_id=None):
         if not os.path.isdir(run_dir):
             return None
+        # The runner declares <run_dir>/<run_id>.json as the artifact; prefer it
+        # so a stale diagnostic JSON in a resumed directory cannot win on mtime.
+        if run_id:
+            declared = os.path.join(run_dir, f"{run_id}.json")
+            if os.path.isfile(declared):
+                return declared
         candidates = []
-        # The harness puts its report where *it* likes -- the apptainer backend
-        # writes logs/evaluation/<run_id>/results.json -- so look at every depth
-        # and identify the report by its contents, not by its name or directory.
+        # The fork writes logs/evaluation/<run_id>/results.json -- look at every
+        # depth and identify the report by its contents.
         for root, _dirs, names in os.walk(run_dir):
             for name in names:
                 if not name.endswith(".json"):
@@ -553,6 +601,22 @@ class SweBenchSuite(Suite):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+def _empty_patch_ids(run_dir):
+    """Instance ids whose captured ``model.patch`` is missing or empty."""
+    empty = set()
+    root = os.path.join(run_dir, "instances")
+    if not os.path.isdir(root):
+        return empty
+    for name in os.listdir(root):
+        patch = os.path.join(root, name, "model.patch")
+        try:
+            if not os.path.isfile(patch) or os.path.getsize(patch) == 0:
+                empty.add(name)
+        except OSError:
+            empty.add(name)
+    return empty
+
 
 def _module_available(name):
     import importlib.util

@@ -17,9 +17,12 @@ import json
 import os
 
 #: Column order of ``summary_results.csv`` -- part of the interface, do not reorder.
+#: ``errors``/``timeouts`` are appended so the comparable ``pass_rate`` is not
+#: the only place a harness failure is visible.
 SUMMARY_COLUMNS = (
     "dataset", "agent", "mode", "trials", "resolved", "pass_rate",
     "mean_reward", "mean_seconds", "mean_tokens", "run_id", "status",
+    "errors", "timeouts",
 )
 
 #: Filename written into the campaign directory.
@@ -44,6 +47,10 @@ def _rewards(outcomes):
     """
     values = []
     for outcome in outcomes:
+        # Harness errors/timeouts are not rewards; including them as 0.0 would
+        # put infrastructure noise into the mean reward.
+        if outcome.outcome in ("error", "timeout"):
+            continue
         extra = getattr(outcome, "extra", None) or {}
         rewards = extra.get("rewards") if isinstance(extra, dict) else None
         if rewards:
@@ -61,20 +68,33 @@ def _tokens(outcomes):
         if not isinstance(extra, dict):
             continue
         tokens = extra.get("tokens") or extra.get("total_tokens")
+        if tokens is None and ("input_tokens" in extra or "output_tokens" in extra):
+            tokens = (int(extra.get("input_tokens") or 0)
+                      + int(extra.get("output_tokens") or 0))
         if isinstance(tokens, (int, float)):
             values.append(tokens)
     return values
 
 
 def row_for(dataset, agent, mode, run_id, outcomes, status="ok"):
-    """Build one summary row from a run's outcomes."""
+    """Build one summary row from a run's outcomes.
+
+    ``pass_rate`` is ``resolved / (resolved + unresolved)``: a harness error or
+    timeout is reported in its own column and does not become a wrong answer.
+    ``status`` still reflects the raw outcome mix, so a cell with errors can
+    never look as clean as one without.
+    """
     trials = len(outcomes)
     resolved = sum(1 for o in outcomes if o.resolved)
+    errors = sum(1 for o in outcomes if o.outcome == "error")
+    timeouts = sum(1 for o in outcomes if o.outcome == "timeout")
+    comparable = trials - errors - timeouts
     if status == "ok":
-        errors = [o for o in outcomes if o.outcome in ("error", "timeout")]
-        if errors and not resolved and len(errors) == trials:
+        if trials == 0:
+            status = "no_results"
+        elif resolved == 0 and (errors or timeouts) == trials:
             status = "all_failed"
-        elif errors:
+        elif errors or timeouts:
             status = "partial_failures"
     return {
         "dataset": dataset,
@@ -82,12 +102,14 @@ def row_for(dataset, agent, mode, run_id, outcomes, status="ok"):
         "mode": mode,
         "trials": trials,
         "resolved": resolved,
-        "pass_rate": (round(resolved / trials, 4) if trials else None),
+        "pass_rate": (round(resolved / comparable, 4) if comparable else None),
         "mean_reward": _mean(_rewards(outcomes)),
         "mean_seconds": _mean([o.duration_seconds for o in outcomes]),
         "mean_tokens": _mean(_tokens(outcomes)),
         "run_id": run_id,
         "status": status,
+        "errors": errors,
+        "timeouts": timeouts,
     }
 
 
@@ -121,7 +143,10 @@ def read_run_outcomes(run_dir):
     if os.path.isfile(direct):
         return read_results(direct)
     outcomes = []
-    for root, _dirs, files in os.walk(run_dir):
+    for root, dirs, files in os.walk(run_dir):
+        # `_prepare` holds dataset inputs, not trial results; walking it (or a
+        # stale nested campaign) must not add the same trial twice.
+        dirs[:] = [name for name in dirs if name not in ("_prepare",)]
         if "results.jsonl" in files:
             outcomes.extend(read_results(os.path.join(root, "results.jsonl")))
     return outcomes

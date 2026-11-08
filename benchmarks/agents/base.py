@@ -155,10 +155,9 @@ class AgentAdapter:
                 f"agent {self.label!r} speaks the {self.speaks!r} API but model "
                 f"{model.name!r} is {model.api!r}; run it through the proxy "
                 f"described in benchmarks/models.py")
-        if model.api_key_env and not os.environ.get(model.api_key_env):
-            problems.append(
-                f"agent {self.label!r} needs {model.api_key_env} in the "
-                f"environment (model {model.name!r})")
+        # The API-key presence check lives in validate_config, which also accepts
+        # a key supplied by the config's own `env` block. Repeating it here
+        # (checking only os.environ) rejected configurations that work.
         return problems
 
     def install_commands(self):

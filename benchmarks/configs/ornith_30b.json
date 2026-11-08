@@ -35,7 +35,8 @@
     "OPENAI_API_KEY": "local-vllm",
     "ANTHROPIC_API_KEY": "local-vllm",
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:30000",
-    "ANTHROPIC_MODEL": "ornith-ai/Ornith-1.5-35B-A3B"
+    "ANTHROPIC_MODEL": "ornith-ai/Ornith-1.5-35B-A3B",
+    "OPENAI_BASE_URL": "http://127.0.0.1:30000/v1"
   },
   "suites": [
     {

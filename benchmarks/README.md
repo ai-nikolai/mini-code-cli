@@ -101,6 +101,25 @@ Modes:
 `--dry-run` prints every command it would run and the summary path, and starts
 nothing.
 
+### Running on a Slurm allocation, one agent at a time
+
+Concurrent campaigns compete for the same model server; the first attempt at
+this produced 3.7 h trials that were all timeouts, not model measurements. Use
+the wrapper — it starts vLLM on the allocation (with the vLLM env's `bin` on
+`PATH`, so flashinfer's JIT finds `ninja`), waits for `/health`, then runs one
+campaign per agent:
+
+```bash
+scripts/run_benchmark_slurm.sh
+```
+
+Every knob is a variable at the top of the script (`JOBID`, `DATASET`,
+`AGENTS="mini-code pi claude-code"`, `MODE`, `LIMIT`, `RUN_PREFIX`,
+`START_SERVER`, `STOP_SERVER`, ...), and it can be overridden in the
+environment. It writes `results/<RUN_PREFIX>-<agent>/summary_results.csv`
+and a per-agent log under `/tmp/opencode/bench-slurm/`. It never edits the
+checkout and never pushes.
+
 ### The same thing one layer down
 
 `benchmarks/run_benchmarks.py` is a thin front end over `python -m benchmarks`; the flags below are
@@ -351,7 +370,18 @@ plus one directory per task (with `trial.log`, `exception.txt`); SWE-bench write
 * `n` is the number of instances that produced an outcome; `n = 0` means the trial never ran.
 * `cmd fail` counts commands that did not finish cleanly — a missing harness lands there, never
   in the score. A cell with `n = 0, cmd fail = 1` is a *broken* run, not a bad agent.
-* Runs are resumable: a trial with a `DONE` marker is skipped unless `--no-resume` is passed.
+* `errors`/`timeouts` are harness failures, not wrong answers. `rate` is
+  `resolved / (resolved + unresolved)`; the error/timeout counts are in their own columns, and
+  `summary_results.csv` appends them after `status`. A pure error cell has `rate = -`, not 0%.
+* `status` is `ok` only when every selected instance produced a verdict; otherwise it is
+  `no_results`, `partial_failures` or `all_failed`. `run`/`campaign` exit non-zero when a cell
+  is not `ok`, so a shell script cannot mistake a broken run for a score.
+* Runs are resumable, but `DONE` means "a verdict exists": a trial that failed a command or
+  collected no outcomes is retried, and a `DONE` marker is only reused when the trial's
+  content identity (dataset + sample + agent/model + git SHA) still matches. `--no-resume`
+  starts the trial directory clean.
+* `--agent` is run **one agent at a time**; concurrent campaigns share one model server and
+  turn contention into timeouts. The Slurm wrapper above encodes this.
 
 ---
 
@@ -364,7 +394,8 @@ python -m benchmarks analyze results/*.csv --md report.md --json report.json --c
 ```
 
 The analyser reads a CSV, a `summary.json` or a whole run directory, merges rows that share
-`(suite, agent, setting, model)` (so several runs of the same configuration add up), and prints:
+`(dataset, suite, agent, setting, model)` (so several runs of the same configuration add up,
+while Verified and Lite never collapse into one cell), and prints:
 
 ```
 suite           agent        setting             model                    n  ok  rate  err  to  cmdfail  mean s
@@ -374,9 +405,46 @@ terminal-bench  mini-code    default             ornith-35b-a3b           3  0  
 ALL                                                                       9  0   0%    9    0   3        0
 ```
 
-`ok` = resolved instances, `rate` = `ok/n`, `to` = timeouts, `cmdfail` = commands that did not
-finish, `mean s` = mean wall-clock per outcome (pooled, not a mean of means). `--md`, `--json`
-and `--csv` write the same table for a README, a script or a spreadsheet.
+`ok` = resolved instances, `rate` = `ok/(ok + unresolved)` (errors/timeouts are not wrong
+answers), `to` = timeouts, `cmdfail` = commands that did not finish, `mean s` = mean wall-clock
+per outcome that reported one (pooled, not a mean of means; `-` when none did). `--md`,
+`--json` and `--csv` write the same table for a README, a script or a spreadsheet.
+
+---
+
+## 8.5 What the harness guarantees now
+
+* **One outcome per task.** Harbor's per-attempt suffix (`task__AbC123`) is
+  stripped, a reward and an exception for the same task are merged, and
+  `resolved > error > timeout > unresolved` is applied across retries.
+* **Errors are not zeros.** `summary_results.csv` carries `errors` and
+  `timeouts`; `pass_rate` excludes them; `status` is `no_results` /
+  `partial_failures` / `all_failed` when they occur; the CLI exits non-zero.
+* **No empty patches by design.** SWE-bench seeds outcomes from the prepared
+  instance list, marks a 0-byte `model.patch` `unresolved` with reason
+  `empty patch`, and a missing report is an `error`, not `n = 0`.
+* **Docker SWE-bench keeps edits.** The agent and patch-capture commands share
+  a host working copy bind-mounted at `/testbed`, for both Docker and Apptainer.
+* **Keys travel by value only where needed.** `{env:NAME}` is expanded in argv
+  at execution time (and the rendered log line is redacted); the manifest
+  records only `env` key names. Redaction no longer confuses `tokens : 2,741`
+  with a credential, and covers `Authorization` / `x-api-key` headers.
+  *Caveat:* harbor writes its own `trial.log`/agent transcripts directly and
+  those are **not** passed through the redactor; treat a run directory that
+  used real credentials as sensitive.
+* **Timeouts are bounded.** A harness command gets
+  `max(configured, instance_seconds × tasks)`; the runner streams output, kills
+  the process group on timeout, and records a `timeout` outcome when nothing
+  was collected.
+* **Resume is content-addressed.** `DONE` is written only for a verdict, and it
+  is reused only when `trial.identity()` (dataset + sample + agent/model + git
+  SHA) matches; `--no-resume` clears the trial directory first.
+* **Caches are labelled.** Derived TB SIFs carry a `.key` hash of the source
+  image + definition + baked `mini_code_cli`; SWE SIFs carry a `.complete`
+  marker written only after a successful pull.
+* **Local endpoints are health-gated.** A run against a `127.0.0.1` /
+  `localhost` OpenAI endpoint probes `/health` for 30 s before starting;
+  `BENCH_SKIP_HEALTH=1` opts out.
 
 ---
 

@@ -13,6 +13,8 @@ execution and evaluation:
 * :meth:`Suite.commands`   -- the exact argv(s) to execute for one trial;
 * :meth:`Suite.collect`    -- parse the harness's own artifacts into outcomes.
 """
+import hashlib
+import json
 import os
 
 
@@ -52,6 +54,25 @@ class Trial:
         from ..config import _slug
 
         return _slug(f"{self.suite.name}-{self.agent.label}-{self.model.name}")
+
+    def identity(self, git_sha=None):
+        """A content hash of everything that changes what a trial measures.
+
+        ``run_id`` is a short human-readable label; it deliberately omits the
+        dataset, split, limit, selected ids and code revision, so it cannot be
+        used alone to decide whether a ``DONE`` marker is still valid. This hash
+        is what a resume compares: same dataset + sample + agent/model + code in,
+        same identity out. It is recorded in ``trial.json`` and the manifest.
+        """
+        payload = {
+            "suite": self.suite.to_dict(),
+            "agent": self.agent.to_dict(),
+            "model": self.model.to_dict(),
+            "limit": self.limit,
+            "git_sha": git_sha,
+        }
+        blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()[:16]
 
     def __repr__(self):
         return f"Trial({self.run_id!r})"

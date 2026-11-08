@@ -30,8 +30,10 @@ import datetime
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -42,6 +44,7 @@ from . import runtime as runtime_module
 from .agents import get_adapter
 from .results import read_results, summarise, write_results, write_summary
 from .suites import get_suite
+from .suites.base import SuiteError
 
 
 class Runner:
@@ -126,7 +129,8 @@ class Runner:
                 self.say(f"   note: {note}")
             try:
                 commands = self._with_config_env(
-                    suite.commands(trial, os.getcwd(), trial_dir, adapter))
+                    suite.commands(trial, os.getcwd(), trial_dir, adapter,
+                                    timeouts=trial.timeouts))
             except Exception as e:  # noqa: BLE001 - a plan must never crash
                 self.say(f"   ! cannot expand yet: {e}")
                 for line in suite.describe(trial, adapter, trial_dir):
@@ -161,12 +165,18 @@ class Runner:
         manifest = self._manifest(run_id, trials)
         self._write_manifest(run_dir, manifest)
         self.say(f"run: {run_id} -> {run_dir}")
+        if not self.dry_run:
+            self._check_endpoints(trials)
 
         outcomes_by_trial = {}
         failures_by_trial = {}
         for index, trial in enumerate(trials, 1):
             self.say(f"[{index}/{len(trials)}] {trial.run_id}")
             trial_dir = os.path.join(run_dir, "trials", trial.run_id)
+            if not self.resume and os.path.isdir(trial_dir):
+                # A non-resumed attempt starts clean: a previous workspace or
+                # patch must not be captured again as if this agent produced it.
+                shutil.rmtree(trial_dir, ignore_errors=True)
             self._reuse_prepared_inputs(trial, trial_dir)
             outcomes, failures = self._run_trial(trial, trial_dir)
             outcomes_by_trial[trial.run_id] = outcomes
@@ -176,8 +186,10 @@ class Runner:
 
         manifest["finished_at"] = _now()
         manifest["trials"] = [
-            _trial_record(t, self._trial_status(outcomes_by_trial, t),
-                          failures_by_trial.get(t.run_id, []))
+            _trial_record(t, self._trial_status(
+                              outcomes_by_trial, failures_by_trial, t),
+                          failures_by_trial.get(t.run_id, []),
+                          git_sha_value=manifest["git_sha"])
             for t in trials]
         self._write_manifest(run_dir, manifest)
         rows = summarise(manifest["trials"], outcomes_by_trial)
@@ -191,6 +203,36 @@ class Runner:
             self.say(f"analyse: python -m benchmarks.analyze {csv_path}")
         return manifest
 
+    def _check_endpoints(self, trials):
+        """Fail fast when a local OpenAI endpoint is not answering.
+
+        A run started before vLLM is ready spends an hour producing 5xx-shaped
+        model zeros. Remote APIs are skipped (they have no common ``/health``),
+        and ``BENCH_SKIP_HEALTH=1`` opts out for unusual deployments.
+        """
+        import os
+
+        from . import models
+
+        if os.environ.get("BENCH_SKIP_HEALTH"):
+            return
+        checked = set()
+        for trial in trials:
+            model = trial.model
+            base = model.base_url
+            if model.api != "openai" or base in checked:
+                continue
+            host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+            if host not in ("127.0.0.1", "localhost", "0.0.0.0"):
+                continue
+            checked.add(base)
+            healthy, waited = models.wait_for_health(base, timeout=30, interval=2)
+            if not healthy:
+                raise SuiteError(
+                    f"model endpoint {base} did not answer /health within "
+                    f"{waited:.0f}s; start the server first (or set "
+                    f"BENCH_SKIP_HEALTH=1 to bypass this check)")
+
     def _reuse_prepared_inputs(self, trial, trial_dir):
         """Give a trial the dataset an earlier ``prepare`` materialised.
 
@@ -198,7 +240,8 @@ class Runner:
         run reads them from its own trial directory, so the documented
         ``prepare`` then ``run`` sequence used to stop at "no instance list".
         """
-        source_dir = os.path.join(self.output, "_prepare", trial.run_id)
+        source_dir = os.path.join(self.config.output_dir, "_prepare",
+                                  trial.run_id)
         target_dir = trial_dir
         if not os.path.isfile(os.path.join(source_dir, "instances.jsonl")):
             return
@@ -222,19 +265,26 @@ class Runner:
         suite = get_suite(trial.suite)
         os.makedirs(os.path.join(trial_dir, "logs"), exist_ok=True)
         done_marker = os.path.join(trial_dir, "DONE")
+        identity = trial.identity(git_sha())
 
         if self.resume and os.path.isfile(done_marker):
-            self.say("   (already done; keeping recorded results)")
             recorded = _read_json(os.path.join(trial_dir, "trial.json"), {})
-            return (read_results(os.path.join(trial_dir, "results.jsonl")),
-                    recorded.get("failed_commands", []))
+            stored = recorded.get("identity")
+            if stored and stored == identity:
+                self.say("   (already done; keeping recorded results)")
+                return (read_results(os.path.join(trial_dir, "results.jsonl")),
+                        recorded.get("failed_commands", []))
+            why = ("no identity recorded" if not stored
+                   else "for a different trial identity")
+            self.say(f"   (DONE marker is {why}; rerunning)")
 
         if not self.dry_run:
             self.container_guard(adapter)
 
         try:
             commands = self._with_config_env(
-                suite.commands(trial, os.getcwd(), trial_dir, adapter))
+                suite.commands(trial, os.getcwd(), trial_dir, adapter,
+                                    timeouts=trial.timeouts))
         except Exception as e:  # noqa: BLE001 - one broken suite must not hide the rest
             # A trial that cannot even expand (missing instance list, no runtime,
             # unresolvable agent) is a *result*: it is recorded as a failed command
@@ -243,6 +293,7 @@ class Runner:
             if not self.dry_run:
                 _write_json(os.path.join(trial_dir, "trial.json"), {
                     "run_id": trial.run_id,
+                    "identity": identity,
                     "suite": trial.suite.to_dict(),
                     "agent": adapter.metadata(),
                     "model": trial.model.to_dict(),
@@ -250,15 +301,13 @@ class Runner:
                                          "status": "error", "log": None}],
                     "error": str(e),
                 })
-                with open(os.path.join(trial_dir, "DONE"), "w",
-                          encoding="utf-8") as handle:
-                    handle.write(_now() + "\n")
             self.say(f"   ! cannot expand this trial: {e}")
             return [], [{"label": f"expand trial: {e}", "status": "error",
                          "log": None}]
 
         _write_json(os.path.join(trial_dir, "trial.json"), {
             "run_id": trial.run_id,
+            "identity": identity,
             "suite": trial.suite.to_dict(),
             "dataset": suite.dataset_label(trial.suite),
             "agent": adapter.metadata(),
@@ -293,11 +342,33 @@ class Runner:
             except Exception as e:  # noqa: BLE001 - a missing report is a result
                 self.say(f"   ! could not collect results: {e}")
                 outcomes = []
+            # A command-level timeout with no parsed outcomes is a timeout, not a
+            # silent empty trial. (When outcomes *were* parsed, the timed-out
+            # command is visible in trial.json's failed_commands.)
+            if not outcomes and any(f["status"] == "timeout" for f in failures):
+                from .suites.base import TrialOutcome
+
+                outcomes = [TrialOutcome(
+                    suite=trial.suite.name, instance_id="<harness>",
+                    outcome=TrialOutcome.TIMEOUT,
+                    detail="a harness command hit its timeout")]
             record = _read_json(os.path.join(trial_dir, "trial.json"), {})
             record["failed_commands"] = failures
+            # DONE means "a verdict exists": a failed command, an unparsed
+            # report, or an empty outcome list must be retried, not skipped.
+            completed = not failures and bool(outcomes)
+            record["completed"] = completed
+            if not completed:
+                record["incomplete_reason"] = (
+                    "command(s) failed" if failures else "no outcomes collected")
             _write_json(os.path.join(trial_dir, "trial.json"), record)
-            with open(done_marker, "w", encoding="utf-8") as handle:
-                handle.write(_now() + "\n")
+            if completed:
+                with open(done_marker, "w", encoding="utf-8") as handle:
+                    handle.write(_now() + "\n")
+            else:
+                self.say(
+                    f"   ! trial left without DONE ({record['incomplete_reason']}); "
+                    f"a later run will retry it")
         return outcomes, failures
 
     def _with_config_env(self, commands):
@@ -358,19 +429,21 @@ class Runner:
             # Which patched upstream checkouts the run actually imported: a result
             # is only reproducible if the fork state travels with it.
             "forks": forks_module.summary(),
-            "config": self.config.to_dict(),
+            "config": _redacted_config(self.config),
             "config_source": self.config.source,
             "suites": sorted({t.suite.name for t in trials}),
             "datasets": {t.suite.name: _suite_dataset(t.suite) for t in trials},
-            "trials": [_trial_record(t, "pending") for t in trials],
+            "trials": [_trial_record(t, "pending", git_sha_value=git_sha()) for t in trials],
         }
 
     def _write_manifest(self, run_dir, manifest):
         _write_json(os.path.join(run_dir, "manifest.json"), manifest)
 
-    def _trial_status(self, outcomes_by_trial, trial):
+    def _trial_status(self, outcomes_by_trial, failures_by_trial, trial):
         if trial.run_id not in outcomes_by_trial:
             return "pending"
+        if failures_by_trial.get(trial.run_id):
+            return "incomplete"
         return "done" if outcomes_by_trial[trial.run_id] else "no-results"
 
 
@@ -383,11 +456,12 @@ def _suite_dataset(suite_spec):
             "split": suite_spec.split}
 
 
-def _trial_record(trial, status, failures=None):
+def _trial_record(trial, status, failures=None, git_sha_value=None):
     return {
         "run_id": trial.run_id,
+        "identity": trial.identity(git_sha_value),
         "suite": trial.suite.name,
-        "dataset": trial.suite.dataset,
+        "dataset": _trial_dataset(trial),
         "agent": trial.agent.name,
         "setting": trial.agent.setting,
         "model": trial.model.name,
@@ -396,6 +470,27 @@ def _trial_record(trial, status, failures=None):
         "status": status,
         "failed_commands": [f["label"] for f in (failures or [])],
     }
+
+
+def _trial_dataset(trial):
+    """``dataset@version`` for a trial (so analyze cannot merge 2.0 and 2.1)."""
+    label = str(trial.suite.dataset or "")
+    version = getattr(trial.suite, "version", None)
+    if version:
+        label = f"{label}@{version}"
+    return label
+
+
+def _redacted_config(config):
+    """``config.to_dict()`` with every ``env`` value replaced by ``***``.
+
+    The manifest is written next to the logs and is routinely copied off the
+    machine; a key supplied through ``config.env`` must not travel with it. The
+    names stay (they say which key a run used), the values do not.
+    """
+    payload = config.to_dict()
+    payload["env"] = {str(key): "***" for key in (payload.get("env") or {})}
+    return payload
 
 
 def _command_record(command):
@@ -411,40 +506,88 @@ def _command_record(command):
 
 
 def _execute(command, log_path, say):
-    """Run one planned command, teeing its output into ``log_path``.
+    """Run one planned command, streaming its output into ``log_path``.
 
-    The environment is the parent's plus ``command.env`` with ``{env:NAME}``
-    placeholders resolved from the parent environment, so a key is passed by name
-    and never written into a command line or a log.
+    ``{env:NAME}`` placeholders are resolved in **argv** as well as in the
+    environment: an adapter that passes a key by reference (``--api-key
+    {env:OPENAI_API_KEY}``) would otherwise hand the literal placeholder to the
+    agent. The rendered log line is redacted, so the resolved value does not
+    leak into an artifact.
+
+    Output is streamed (not buffered by ``capture_output=True``), so a timeout
+    keeps everything the command managed to print. The command runs in its own
+    process group; on timeout the whole group is killed, which also stops the
+    container client's children.
     """
+    import shlex
+
     from .results import redact
 
     env = dict(os.environ)
     for key, value in command.env.items():
         env[key] = expand_env(str(value), os.environ)
+    argv = [expand_env(str(part), os.environ) for part in command.argv]
 
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     started = time.monotonic()
     with open(log_path, "w", encoding="utf-8") as log:
-        log.write(f"$ {redact(command.rendered())}\n")
+        log.write(f"$ {redact(shlex.join(argv))}\n")
         log.flush()
         try:
-            result = subprocess.run(
-                command.argv, cwd=command.cwd, env=env, timeout=command.timeout,
-                input=command.stdin, capture_output=True, text=True)
-        except subprocess.TimeoutExpired:
-            log.write(f"\n[timeout after {command.timeout}s]\n")
-            return "timeout"
+            process = subprocess.Popen(
+                argv, cwd=command.cwd, env=env,
+                stdin=subprocess.PIPE if command.stdin is not None else None,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, start_new_session=True)
         except (OSError, ValueError) as e:
             log.write(f"\n[could not start: {e}]\n")
             return "error"
-        # Redacted on the way in: agent output routinely echoes its own
-        # environment, and a log is the artifact most likely to be shared.
-        log.write(redact(result.stdout or ""))
-        log.write(redact(result.stderr or ""))
-        log.write(f"\n[exit {result.returncode} in "
+
+        def pump():
+            try:
+                for line in process.stdout:
+                    log.write(redact(line))
+                    log.flush()
+            except (OSError, ValueError):
+                pass
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        if command.stdin is not None:
+            try:
+                process.stdin.write(str(command.stdin))
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+        try:
+            returncode = process.wait(timeout=command.timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except OSError:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            reader.join(timeout=5)
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
+                pass
+            log.write(f"\n[timeout after {command.timeout}s]\n")
+            return "timeout"
+        reader.join(timeout=5)
+        try:
+            process.stdout.close()
+        except (OSError, ValueError):
+            pass
+        log.write(f"\n[exit {returncode} in "
                   f"{time.monotonic() - started:.1f}s]\n")
-    return "ok" if result.returncode == 0 else f"exit {result.returncode}"
+    return "ok" if returncode == 0 else f"exit {returncode}"
 
 
 def expand_env(value, environ=None):

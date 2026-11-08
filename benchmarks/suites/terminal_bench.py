@@ -116,17 +116,19 @@ class TerminalBenchSuite(Suite):
                 f"({' or '.join(runtime_module.RUNTIMES)} not on PATH); every task "
                 "runs in a container")
         elif require_binary and chosen == "apptainer" and \
-                self.harness(spec) == "harbor":
+                self.harness(spec) == "harbor" and \
+                self.binary(spec) and self.local_dataset_dir(spec) and \
+                not self._harbor_has_dockerfile_support(spec):
             problems.append(
-                "suite 'terminal-bench': harbor drives task containers through "
-                "Docker; its Apptainer backend (`--env singularity`) converts the "
-                "images but then needs /usr/bin/python3 inside them to bootstrap "
-                "its RPC server, which Terminal-Bench images do not ship, so this "
-                "suite needs a Docker host (see benchmarks/README.md)")
+                "suite 'terminal-bench': the local task checkout needs a harbor "
+                "build with Dockerfile->SIF support under Apptainer; the "
+                "installed harbor is not that build (see "
+                "benchmarks/scripts/setup_external_repos.sh)")
         return problems
 
     def _runtime_hint(self):
-        return getattr(self, "runtime", None)
+        return (getattr(self, "runtime", None)
+                or getattr(self.spec, "runtime", None))
 
     def notes(self, model):
         spec = getattr(self, "spec", None)
@@ -227,7 +229,7 @@ class TerminalBenchSuite(Suite):
 
     # -- commands --------------------------------------------------------
 
-    def commands(self, trial, workspace, run_dir, adapter):
+    def commands(self, trial, workspace, run_dir, adapter, timeouts=None):
         if self.harness(trial.suite) == "harbor":
             commands = []
             if self._needs_apptainer_prepare(trial, run_dir):
@@ -235,9 +237,10 @@ class TerminalBenchSuite(Suite):
                 # `run` on a Docker-free machine has to work in one command.
                 commands.append(self.prepare_command(trial, run_dir))
             commands.append(self._harbor_command(trial, workspace, run_dir,
-                                                 adapter))
+                                                 adapter, timeouts=timeouts))
             return commands
-        return [self._tb_command(trial, workspace, run_dir, adapter)]
+        return [self._tb_command(trial, workspace, run_dir, adapter,
+                                 timeouts=timeouts)]
 
     def _harbor_has_dockerfile_support(self, spec):
         """Whether the harbor that will run supports Dockerfile-only tasks.
@@ -262,8 +265,15 @@ class TerminalBenchSuite(Suite):
         staged = self.apptainer_dataset_dir(run_dir)
         if not os.path.isdir(staged):
             return True
-        return not any(os.path.isfile(os.path.join(staged, name, "task.toml"))
-                       for name in os.listdir(staged))
+        present = [name for name in os.listdir(staged)
+                   if os.path.isfile(os.path.join(staged, name, "task.toml"))]
+        if trial.suite.task_ids:
+            # All requested tasks must be staged: "any one task.toml" silently
+            # dropped the rest of the sample.
+            return not set(trial.suite.task_ids).issubset(present)
+        if trial.limit:
+            return len(present) < int(trial.limit)
+        return not present
 
     def _harbor_dataset_args(self, trial, run_dir):
         """``-d dataset@version`` or, under Apptainer, ``-p <staged dataset>``.
@@ -284,7 +294,7 @@ class TerminalBenchSuite(Suite):
             return ["-d", self.dataset_label(spec)]
         return ["-p", self.apptainer_dataset_dir(run_dir)]
 
-    def _harbor_command(self, trial, workspace, run_dir, adapter):
+    def _harbor_command(self, trial, workspace, run_dir, adapter, timeouts=None):
         """``harbor run ...`` -- one job per trial; harbor parallelises inside."""
         spec = trial.suite
         model = trial.model
@@ -334,10 +344,10 @@ class TerminalBenchSuite(Suite):
         provider = options.get("provider") or (
             "anthropic" if model.api == "anthropic" else "openai")
         argv += ["-m", f"{provider}/{model.model}"]
-        argv += ["--n-concurrent", str(int(options.get(
-            "n_concurrent", trial.limit or 1)))]
-        if trial.limit:
-            argv += ["--n-tasks", str(int(trial.limit))]
+        argv += ["--n-concurrent", str(int(options.get("n_concurrent", 1)))]
+        task_count = len(spec.task_ids) if spec.task_ids else trial.limit
+        if task_count:
+            argv += ["--n-tasks", str(int(task_count))]
         # Without this harbor takes the first tasks of the dataset directory in
         # its own order: asking for the `bn-fit-modify` campaign still ran
         # `adaptive-rejection-sampler` (the trial directory said so). Pin the ids
@@ -405,7 +415,7 @@ class TerminalBenchSuite(Suite):
             argv=argv,
             env=env,
             cwd=workspace,
-            timeout=options.get("harness_timeout_sec"),
+            timeout=_harness_timeout(trial, options, timeouts),
             artifacts=(os.path.join(jobs_dir, job_name, "result.json"),
                        os.path.join(jobs_dir, job_name, "config.json")),
             notes=[f"dataset: {self.dataset_label(spec)}",
@@ -413,7 +423,7 @@ class TerminalBenchSuite(Suite):
                    "harbor writes <jobs-dir>/<job-name>/result.json"],
         )
 
-    def _tb_command(self, trial, workspace, run_dir, adapter):
+    def _tb_command(self, trial, workspace, run_dir, adapter, timeouts=None):
         """``tb run ...`` (Terminal-Bench 1.x / core datasets)."""
         spec = trial.suite
         model = trial.model
@@ -451,14 +461,15 @@ class TerminalBenchSuite(Suite):
             "anthropic" if model.api == "anthropic" else "openai")
         argv += ["--model", f"{provider}/{model.model}"]
         argv += ["--n-concurrent-trials", str(int(options.get(
-            "n_concurrent_trials", trial.limit or 1)))]
+            "n_concurrent_trials", 1)))]
         argv += ["--n-attempts", str(int(options.get("n_attempts", 1)))]
         argv += ["--global-agent-timeout-sec", str(int(
             options.get("agent_timeout_sec", _timeout(trial, "agent_seconds"))))]
         argv += ["--global-test-timeout-sec", str(int(
             options.get("test_timeout_sec", _timeout(trial, "test_seconds"))))]
-        if trial.limit:
-            argv += ["--n-tasks", str(int(trial.limit))]
+        task_count = len(spec.task_ids) if spec.task_ids else trial.limit
+        if task_count:
+            argv += ["--n-tasks", str(int(task_count))]
         for task_id in spec.task_ids:
             argv += ["--task-id", task_id]
         for excluded in options.get("exclude_task_ids", ()):
@@ -473,7 +484,7 @@ class TerminalBenchSuite(Suite):
             argv=argv,
             env=dict(adapter.env(model)),
             cwd=workspace,
-            timeout=options.get("harness_timeout_sec"),
+            timeout=_harness_timeout(trial, options, timeouts),
             artifacts=(os.path.join(runs_dir, run_id, "results.json"),
                        os.path.join(runs_dir, run_id, "run_metadata.json")),
             notes=[f"dataset: {self.dataset_label(spec)}",
@@ -551,7 +562,7 @@ class TerminalBenchSuite(Suite):
                 extra={"rewards": rewards,
                        "trial_name": entry.get("trial_name")},
             ))
-        return outcomes
+        return _dedupe(outcomes)
 
     def _collect_harbor_stats(self, payload):
         """Outcomes from harbor's per-eval summary (no per-trial records).
@@ -681,21 +692,46 @@ def _newest(pattern):
 
 
 def _dedupe(outcomes):
-    """One outcome per task: harbor retries report the same task several times.
+    """One outcome per task, merging retries and reward/exception records.
 
-    The *best* attempt wins (resolved > unresolved > error), because a task that
-    succeeded on a retry was solved; an un-deduplicated count would silently
-    inflate ``n`` and turn a solved task into a half-error.
+    Harbor retries report the same task several times, and its stats file can
+    carry a 0.0 reward and an exception for the *same* attempt. Normalise the
+    per-attempt suffix (`task__AbC123` -> `task`) and merge:
+
+    * a resolved attempt wins (a task solved on a retry was solved);
+    * otherwise error > timeout > unresolved (an infrastructure failure must not
+      be reported as a wrong answer);
+    * rewards, exception type and details are carried on the single outcome.
     """
-    rank = {TrialOutcome.RESOLVED: 3, TrialOutcome.UNRESOLVED: 2,
-            TrialOutcome.ERROR: 0, TrialOutcome.TIMEOUT: 1}
+    rank = {TrialOutcome.RESOLVED: 3, TrialOutcome.ERROR: 2,
+            TrialOutcome.TIMEOUT: 1, TrialOutcome.UNRESOLVED: 0}
     best = {}
     for outcome in outcomes:
-        current = best.get(outcome.instance_id)
-        if current is None or rank.get(outcome.outcome, 0) > rank.get(
-                current.outcome, 0):
-            best[outcome.instance_id] = outcome
+        key = _task_key(outcome.instance_id)
+        outcome.instance_id = key
+        current = best.get(key)
+        if current is None:
+            best[key] = outcome
+            continue
+        current.extra.update(getattr(outcome, "extra", {}) or {})
+        if rank.get(outcome.outcome, 0) > rank.get(current.outcome, 0):
+            current.outcome = outcome.outcome
+        detail = outcome.detail or ""
+        if detail and detail not in (current.detail or ""):
+            current.detail = " | ".join(
+                part for part in (current.detail, detail) if part)
+        if outcome.duration_seconds is not None and \
+                current.duration_seconds is None:
+            current.duration_seconds = outcome.duration_seconds
+        current.artifacts = tuple(dict.fromkeys(
+            list(current.artifacts) + list(outcome.artifacts)))
     return [best[key] for key in sorted(best)]
+
+
+def _task_key(name):
+    """Strip harbor's per-attempt suffix: ``task__AbC123`` -> ``task``."""
+    text = str(name or "")
+    return text.rsplit("__", 1)[0] if "__" in text else text
 
 
 def _exception_detail(entry):
@@ -726,3 +762,21 @@ def _kwarg(value):
 def _timeout(trial, key):
     """The trial's budget for ``key``, with the config's default as a floor."""
     return (trial.timeouts or {}).get(key, 3_600 if key == "agent_seconds" else 1_800)
+
+
+def _harness_timeout(trial, options, timeouts=None):
+    """A hard wall-clock cap for one harness job.
+
+    The harness owns the per-task timeout, but without a wrapper cap a stuck
+    harbor/tb process can run forever. Prefer an explicit
+    ``harness_timeout_sec``; otherwise derive one from the configured
+    ``instance_seconds`` times the number of tasks in this trial.
+    """
+    configured = (options or {}).get("harness_timeout_sec")
+    if configured:
+        return int(configured)
+    budget = (timeouts or trial.timeouts or {}).get("instance_seconds")
+    if not budget:
+        return None
+    count = len(trial.suite.task_ids) or trial.limit or 1
+    return int(budget) * max(1, int(count))

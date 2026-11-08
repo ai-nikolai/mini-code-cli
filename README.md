@@ -354,6 +354,10 @@ benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 task set (da
 python benchmarks/run_benchmarks.py --dataset swe-bench         --agent mini-code --mode short_eval
 python benchmarks/run_benchmarks.py --dataset swe-bench-lite    --agent all       --mode short_eval
 python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all       --mode short
+
+# On an existing Slurm GPU allocation: start vLLM, wait for /health, then run
+# one agent at a time (variables at the top of the script):
+scripts/run_benchmark_slurm.sh
 ```
 
 Both SWE-bench splits work on this cluster and need no extra repository — `swe-bench-lite`

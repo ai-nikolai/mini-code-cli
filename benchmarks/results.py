@@ -17,10 +17,19 @@ import os
 import re
 
 #: An environment assignment whose *value* is replaced: the name is kept because
-#: "which key was used" is useful, the value never is.
+#: "which key was used" is useful, the value never is. ``TOKEN`` alone is not a
+#: sufficient signal -- it also matches ``tokens : 2,741`` in an agent's usage
+#: banner and used to corrupt every logged token count -- so the token variants
+#: are spelled out (``AUTH_TOKEN``/``ACCESS_TOKEN``/``API_TOKEN``).
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Z0-9_]*(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)"
-    r"[A-Z0-9_]*)(\s*[=:]\s*)(['\"]?)([^\s'\",&]+)")
+    r"(?i)\b([A-Z0-9_]*(?:API_?KEY|AUTH_TOKEN|ACCESS_TOKEN|API_TOKEN|SECRET|"
+    r"PASSWORD|PASSWD|CREDENTIALS?)[A-Z0-9_]*)"
+    r"(\s*[=:]\s*)(['\"]?)([^\s'\",&]+)")
+
+#: Credentials that appear inside a header value rather than an assignment.
+_AUTH_HEADER = re.compile(
+    r"(?i)\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)([^\s'\"]+)")
+_X_API_KEY_HEADER = re.compile(r"(?i)\b(x-api-key\s*:\s*)([^\s'\"]+)")
 
 #: Bare keys that agents print in headers or JSON bodies.
 _BARE_SECRET = re.compile(
@@ -41,7 +50,20 @@ def redact(text):
     text = str(text)
     text = _SECRET_ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}"
                                            f"{m.group(3)}***", text)
+    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}***", text)
+    text = _X_API_KEY_HEADER.sub(lambda m: f"{m.group(1)}***", text)
     return _BARE_SECRET.sub("***", text)
+
+
+def _redact_value(value):
+    """Redact strings inside an ``extra`` payload, leaving the shape intact."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_value(item) for item in value]
+    return value
 
 
 def outcome_from_dict(payload):
@@ -69,7 +91,13 @@ def read_results(path):
             line = line.strip()
             if not line:
                 continue
-            outcomes.append(outcome_from_dict(json.loads(line)))
+            try:
+                outcomes.append(outcome_from_dict(json.loads(line)))
+            except (ValueError, TypeError):
+                # A truncated/interrupted line must not make the whole report
+                # unreadable: skip it and let the missing outcome show up as a
+                # count mismatch in the summary.
+                continue
     return outcomes
 
 
@@ -81,6 +109,8 @@ def write_results(path, outcomes):
             payload = outcome.to_dict()
             if payload.get("detail"):
                 payload["detail"] = redact(payload["detail"])
+            if payload.get("extra"):
+                payload["extra"] = _redact_value(payload["extra"])
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
     return path
 
@@ -108,6 +138,7 @@ def _row(trial, outcomes):
     durations = [o.duration_seconds for o in outcomes
                  if o.duration_seconds is not None]
     return {
+        "dataset": trial.get("dataset"),
         "suite": trial.get("suite"),
         "agent": trial.get("agent"),
         "setting": trial.get("setting"),
@@ -119,7 +150,11 @@ def _row(trial, outcomes):
         "errors": errors,
         "timeouts": timeouts,
         "command_errors": len(trial.get("failed_commands") or []),
-        "rate": (round(resolved / total, 4) if total else None),
+        # The comparable denominator excludes harness errors/timeouts: an
+        # infrastructure failure is not a wrong answer. The raw counts stay in
+        # the row so the exclusion is visible rather than hidden.
+        "rate": (round(resolved / (total - errors - timeouts), 4)
+                 if (total - errors - timeouts) else None),
         "mean_seconds": (round(sum(durations) / len(durations), 2)
                          if durations else None),
     }
@@ -130,7 +165,7 @@ def _row(trial, outcomes):
 CSV_COLUMNS = (
     "suite", "agent", "setting", "model", "run_id",
     "n", "resolved", "unresolved", "errors", "timeouts", "command_errors",
-    "rate", "mean_seconds",
+    "rate", "mean_seconds", "dataset",
 )
 
 #: Where a CSV goes when the caller does not name one. Untracked (``.gitignore``):

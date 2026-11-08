@@ -267,19 +267,17 @@ def main(argv=None):
             print(f"error: could not prepare inputs for {agent}", file=sys.stderr)
             return EXIT_PROBLEM
         _reuse_prepared_inputs(config, trials)
-        runner = Runner(config, dry_run=args.dry_run, output=agent_dir)
+        runner = Runner(config, dry_run=args.dry_run, output=directory)
         if args.dry_run:
             for message in runner.plan(trials):
                 print(message)
             rows.append(summary_module.row_for(
                 label, agent, args.mode, f"{run_id}/{agent}", [], status="dry-run"))
             continue
-        manifest = runner.run(trials, run_id=f"{run_id}/{agent}")
-        outcomes = summary_module.read_run_outcomes(
-            runner.run_dir(f"{run_id}/{agent}"))
+        manifest = runner.run(trials, run_id=agent)
+        outcomes = summary_module.read_run_outcomes(runner.run_dir(agent))
         rows.append(summary_module.row_for(
-            label, agent, args.mode,
-            (manifest or {}).get("run_id") or f"{run_id}/{agent}", outcomes))
+            label, agent, args.mode, f"{run_id}/{agent}", outcomes))
 
     if args.dry_run:
         dry_dir = os.path.join(args.results_dir, "_dry_run", run_id)
@@ -292,7 +290,8 @@ def main(argv=None):
         print()
         print(handle.read().rstrip())
     print(f"\nsummary written to {path}")
-    return EXIT_OK
+    bad = [row for row in rows if row.get("status") not in ("ok",)]
+    return EXIT_OK if not bad else EXIT_PROBLEM
 
 
 __all__ = ["ALL_AGENTS", "DATASETS", "MODES", "build_config", "build_parser",
