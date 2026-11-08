@@ -25,6 +25,7 @@ AGENTS="${AGENTS:-mini-code pi claude-code}"  # space-separated; run one by one
 MODE="${MODE:-short}"                      # short | short_eval | full
 LIMIT="${LIMIT:-}"                         # empty = mode default
 N_CONCURRENT="${N_CONCURRENT:-1}"          # inside one campaign (tasks), not across agents
+AGENT_TIMEOUT_MULTIPLIER="${AGENT_TIMEOUT_MULTIPLIER:-}"  # e.g. 1 = task's 900 s
 RUN_PREFIX="${RUN_PREFIX:-serial}"         # run-id prefix, e.g. tb21-serial-mini-code
 RESULTS_DIR="${RESULTS_DIR:-results}"      # git-ignored campaign directory
 EXTRA_ARGS="${EXTRA_ARGS:-}"               # extra args passed to run_benchmarks.py
@@ -135,6 +136,8 @@ run_agent() {
                 --n-concurrent "$N_CONCURRENT")
     [[ "$DRY_RUN" == "1" ]] && args+=(--dry-run)
     [[ -n "$LIMIT" ]] && args+=(--limit "$LIMIT")
+    [[ -n "$AGENT_TIMEOUT_MULTIPLIER" ]] && \
+        args+=(--agent-timeout-multiplier "$AGENT_TIMEOUT_MULTIPLIER")
     # EXTRA_ARGS is intentionally word-split: it is a convenience for flags such
     # as "--run-id ..." and must not be used to pass quoted task text.
     # shellcheck disable=SC2206
