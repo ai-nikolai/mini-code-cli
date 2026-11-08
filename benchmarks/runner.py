@@ -526,7 +526,9 @@ def _execute(command, log_path, say):
     env = dict(os.environ)
     for key, value in command.env.items():
         env[key] = expand_env(str(value), os.environ)
-    argv = [expand_env(str(part), os.environ) for part in command.argv]
+    # Expand against the *effective* environment too: a key supplied by
+    # the config env block is in `env`, not necessarily in the parent process.
+    argv = [expand_env(str(part), env) for part in command.argv]
 
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     started = time.monotonic()
