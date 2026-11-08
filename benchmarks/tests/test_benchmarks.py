@@ -989,6 +989,19 @@ class HarnessSemanticsTests(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertIn("expanded", text)
 
+    def test_execute_expands_from_the_command_env_not_only_the_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "x.log")
+            command = PlannedCommand(
+                label="echo", argv=["bash", "-lc", 'printf "%s" "$1"', "_",
+                                    "{env:BENCH_TEST_VALUE}"],
+                env={"BENCH_TEST_VALUE": "from-command"})
+            status = _execute(command, log, lambda *a: None)
+            with open(log, encoding="utf-8") as handle:
+                text = handle.read()
+        self.assertEqual(status, "ok")
+        self.assertIn("from-command", text)
+
     def test_trial_identity_changes_with_the_sample(self):
         first = minimal_config().trials()[0]
         same = minimal_config().trials()[0]
