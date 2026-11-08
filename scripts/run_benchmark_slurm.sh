@@ -35,6 +35,7 @@ MODEL="${MODEL:-ornith-ai/Ornith-1.5-35B-A3B}"
 PORT="${PORT:-30000}"
 START_SERVER="${START_SERVER:-1}"          # 1 = start vLLM, 0 = use a running one
 STOP_SERVER="${STOP_SERVER:-1}"            # stop the server we started on exit
+DRY_RUN="${DRY_RUN:-0}"                    # 1 = print commands, start nothing
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"    # seconds to wait for /health
 LOG_DIR="${LOG_DIR:-/tmp/opencode/bench-slurm}"
 # -------------------------------------------------------------------------
@@ -132,6 +133,7 @@ run_agent() {
     local args=(--dataset "$DATASET" --agent "$agent" --mode "$MODE"
                 --run-id "$run_id" --results-dir "$RESULTS_DIR"
                 --n-concurrent "$N_CONCURRENT")
+    [[ "$DRY_RUN" == "1" ]] && args+=(--dry-run)
     [[ -n "$LIMIT" ]] && args+=(--limit "$LIMIT")
     # EXTRA_ARGS is intentionally word-split: it is a convenience for flags such
     # as "--run-id ..." and must not be used to pass quoted task text.
@@ -158,8 +160,12 @@ main() {
     if [[ -n "$JOBID" ]]; then
         say "allocation $JOBID on $(squeue -h -j "$JOBID" -o '%N')"
     fi
-    say "dataset=$DATASET mode=$MODE agents=$AGENTS"
-    start_server
+    say "dataset=$DATASET mode=$MODE agents=$AGENTS dry_run=$DRY_RUN"
+    if [[ "$DRY_RUN" == "1" ]]; then
+        say "dry run: not starting or waiting for the model server"
+    else
+        start_server
+    fi
 
     for agent in $AGENTS; do
         run_agent "$agent"
