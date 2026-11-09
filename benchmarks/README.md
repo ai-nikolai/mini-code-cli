@@ -120,6 +120,49 @@ environment. It writes `results/<RUN_PREFIX>-<agent>/summary_results.csv`
 and a per-agent log under `/tmp/opencode/bench-slurm/`. It never edits the
 checkout and never pushes.
 
+### Full matrix with `sbatch` (1–4 GPUs, different models)
+
+`scripts/submit_benchmark_slurm.sh` generates a batch script under
+`experiments/slurm/` (git-ignored), regenerates the model configs under
+`experiments/configs/`, and submits it. Every knob is at the top of the file:
+
+```bash
+NUM_GPUS=4                 # 1..4 -> model tensor-parallel size
+BENCH_GPUS=0               # GPUs reserved for the runner (0 is normal here)
+MODEL_NAME="ornith-ai/Ornith-1.5-35B-A3B"
+SERVER_BACKEND="vllm"      # or sglang
+MODEL_ENV="env_vllm30"     # conda env with the server
+BENCH_ENV="hb"             # conda env with harbor + swebench
+BENCHMARKS="terminalbench-2.1 swe-bench-lite-full"
+AGENTS="mini-code pi claude-code"
+MODE="full"                # full | short_eval | short
+FULL=1                     # drop the checked-in smoke limits/task_ids
+SUBMIT=1                   # 1 = sbatch; 0 = only write the file
+```
+
+`DRY_RUN=1 SUBMIT=0` writes everything without submitting. The generated job
+starts the server on the first `NUM_GPUS - BENCH_GPUS` GPUs, waits for
+`/health`, then runs every benchmark × agent **sequentially** (one agent at a
+time) and writes `results/<RUN_PREFIX>_<benchmark>_<agent>/summary_results.csv`.
+The model config is rewritten by `scripts/make_benchmark_config.py`, so changing
+`MODEL_NAME` is enough.
+
+The two "full" sets are large: the local Terminal-Bench 2.1 checkout has **90
+tasks**, and SWE-bench Lite has **300 instances**. From the measured campaigns
+(one H200, serial, `n_concurrent=1`):
+
+| 1 agent / 1 model / 1 benchmark | Terminal-Bench 2.1 (90) | SWE-bench Lite (300) |
+|---|---|---|
+| mini-code | ~5–10 h | ~10–20 h |
+| Pi | ~15–30 h | ~12–25 h |
+| Claude Code | ~12–25 h | ~15–30 h |
+
+So a full 3-agent × 2-benchmark matrix is roughly **3–6 days** serial. GPU
+count mainly buys model throughput (and lets a larger checkpoint fit); the
+agents are tool/container-bound. For a shorter result, run one benchmark or a
+`LIMIT` subset, or submit one job per agent on separate allocations (do not
+share a model server between jobs unless you accept contention).
+
 ### The same thing one layer down
 
 `benchmarks/run_benchmarks.py` is a thin front end over `python -m benchmarks`; the flags below are
