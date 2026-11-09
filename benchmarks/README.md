@@ -163,6 +163,28 @@ agents are tool/container-bound. For a shorter result, run one benchmark or a
 `LIMIT` subset, or submit one job per agent on separate allocations (do not
 share a model server between jobs unless you accept contention).
 
+**Storage is the other constraint.** The measured SIFs average ~0.33 GB per
+TB task and ~1.28 GB per SWE-bench Lite instance:
+
+| Artefact | Full TB 2.1 (90) | Full Lite (300) |
+|---|---|---|
+| persistent SIFs | ~30–90 GB | ~300–600 GB (≈385 GB at the measured mean) |
+| Apptainer cache/tmp | several GB | ~200–400 GB unless pruned |
+| results / testbeds / logs | ~2–10 GB | ~20–60 GB |
+
+The full pair therefore needs roughly **0.6–1.0 TB** of scratch before model
+weights. Point the launcher at real scratch storage, not a 1 TB home:
+
+```bash
+SIF_CACHE=/scratch/$USER/sif TB_CACHE=/scratch/$USER/cache \
+SCRATCH_DIR=/scratch/$USER/tmp APPTAINER_CACHEDIR=/scratch/$USER/apcache \
+APPTAINER_TMPDIR=/scratch/$USER/aptmp \
+  scripts/submit_benchmark_matrix.sh
+```
+
+If only home is available, run one benchmark at a time, prune SIFs/testbeds
+between chunks, and expect the full Lite split to be close to the quota.
+
 ### The same thing one layer down
 
 `benchmarks/run_benchmarks.py` is a thin front end over `python -m benchmarks`; the flags below are

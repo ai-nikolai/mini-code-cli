@@ -44,6 +44,11 @@ SERVER_PORT="${SERVER_PORT:-30000}"
 SERVER_TIMEOUT="${SERVER_TIMEOUT:-1800}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 SERVER_EXTRA="${SERVER_EXTRA:-}"
+SIF_CACHE="${SIF_CACHE:-}"
+TB_CACHE="${TB_CACHE:-}"
+SCRATCH_DIR="${SCRATCH_DIR:-}"
+APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-}"
+APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-}"
 
 VERSION="${VERSION:-v1}"
 WALLTIME="${WALLTIME:-48:00:00}"
@@ -107,6 +112,11 @@ for model_entry in "${MODELS[@]}"; do
                 SERVER_EXTRA="$SERVER_EXTRA" \
                 SERVER_PORT="$SERVER_PORT" \
                 SERVER_TIMEOUT="$SERVER_TIMEOUT" \
+                SIF_CACHE="$SIF_CACHE" \
+                TB_CACHE="$TB_CACHE" \
+                SCRATCH_DIR="$SCRATCH_DIR" \
+                APPTAINER_CACHEDIR="$APPTAINER_CACHEDIR" \
+                APPTAINER_TMPDIR="$APPTAINER_TMPDIR" \
                 BENCHMARKS="$bench" \
                 AGENTS="$agent" \
                 EXTRA_ARGS="$agent_extra" \

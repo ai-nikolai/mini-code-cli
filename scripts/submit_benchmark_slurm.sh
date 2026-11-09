@@ -32,6 +32,13 @@ SERVER_EXTRA="${SERVER_EXTRA:-}"           # extra vLLM flags, word-split
 TB_CONFIG="${TB_CONFIG:-benchmarks/configs/terminal_bench_21.json}"
 SWE_CONFIG="${SWE_CONFIG:-benchmarks/configs/ornith_30b.json}"
 
+# Where the large artefacts live. Empty = the repository defaults.
+SIF_CACHE="${SIF_CACHE:-}"                 # e.g. /scratch/$USER/sif  (TB + SWE)
+TB_CACHE="${TB_CACHE:-}"                   # e.g. /scratch/$USER/cache (datasets/TB)
+SCRATCH_DIR="${SCRATCH_DIR:-}"             # e.g. /scratch/$USER/tmp (apptainer unpack)
+APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-}"
+APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-}"
+
 # Full sets: terminalbench-2.1 (90 tasks) and swe-bench-lite-full (300
 # instances). Use terminalbench-2.1-3 or swe-bench-lite for the smoke sets.
 BENCHMARKS="${BENCHMARKS:-terminalbench-2.1 swe-bench-lite-full}"
@@ -87,10 +94,12 @@ for bench in $BENCHMARKS; do
     esac
     slug="$(printf '%s' "$bench" | sed 's/[^a-zA-Z0-9]/_/g')"
     config="$CONFIG_DIR/${SIGNATURE}_${slug}.json"
+    SIF_FLAG=""
+    [[ -n "$SIF_CACHE" ]] && SIF_FLAG="--sif-cache $SIF_CACHE/swe"
     # shellcheck disable=SC2086
     "$CONFIG_PYTHON" scripts/make_benchmark_config.py "$template" "$config" \
         --model "$MODEL_NAME" \
-        --base-url "http://127.0.0.1:${SERVER_PORT}" $FULL_FLAG
+        --base-url "http://127.0.0.1:${SERVER_PORT}" $FULL_FLAG $SIF_FLAG
     BENCH_LIST+=("$bench")
     CONFIG_LIST+=("$config")
 done
@@ -101,6 +110,8 @@ LIMIT_ARG=""
 TIMEOUT_ARG=""
 [[ -n "$AGENT_TIMEOUT_MULTIPLIER" ]] && \
     TIMEOUT_ARG="--agent-timeout-multiplier $AGENT_TIMEOUT_MULTIPLIER"
+SCRATCH_ARG=""
+[[ -n "$SCRATCH_DIR" ]] && SCRATCH_ARG="--scratch-dir $SCRATCH_DIR"
 AGENT_LIST="$(printf '%q ' $AGENTS)"
 BENCH_LIST_Q="$(printf '%q ' "${BENCH_LIST[@]}")"
 CONFIG_LIST_Q="$(printf '%q ' "${CONFIG_LIST[@]}")"
@@ -123,6 +134,11 @@ set -uo pipefail
 cd $(printf '%q' "$REPO_ROOT")
 source $(printf '%q' "$CONDA_SH")
 mkdir -p $(printf '%q' "$LOG_DIR")
+# Keep the large caches off the (1 TB) home filesystem when configured.
+$( [[ -n "$TB_CACHE" ]] && echo "export BENCH_CACHE=$(printf '%q' "$TB_CACHE")" )
+$( [[ -n "$SIF_CACHE" ]] && echo "export BENCH_SIF_CACHE=$(printf '%q' "$SIF_CACHE/tb")" )
+$( [[ -n "$APPTAINER_CACHEDIR" ]] && echo "export APPTAINER_CACHEDIR=$(printf '%q' "$APPTAINER_CACHEDIR")" )
+$( [[ -n "$APPTAINER_TMPDIR" ]] && echo "export APPTAINER_TMPDIR=$(printf '%q' "$APPTAINER_TMPDIR")" )
 
 # --- vLLM server on all NUM_GPUS GPUs ------------------------------------
 conda activate $(printf '%q' "$MODEL_ENV") || exit 1
@@ -191,7 +207,7 @@ for i in "\${!BENCHMARKS[@]}"; do
             --run-id "\$run_id" \\
             --results-dir $(printf '%q' "$RESULTS_DIR") \\
             --n-concurrent ${N_CONCURRENT} \\
-            ${LIMIT_ARG} ${TIMEOUT_ARG} ${EXTRA_ARGS}
+            ${LIMIT_ARG} ${TIMEOUT_ARG} ${SCRATCH_ARG} ${EXTRA_ARGS}
         rc=\$?
         if (( rc != 0 )); then
             echo "WARNING: \$run_id exited \$rc; continuing" >&2
