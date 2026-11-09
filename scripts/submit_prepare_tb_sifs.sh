@@ -40,6 +40,7 @@ APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-$HOME/bench-build/apptainer-tmp}"
 EXPERIMENTS_DIR="${EXPERIMENTS_DIR:-experiments}"
 SUBMIT="${SUBMIT:-1}"                       # 1 = sbatch; 0 = only write
 DRY_RUN="${DRY_RUN:-0}"
+DEPENDENCY="${DEPENDENCY:-}"                # e.g. afterany:12345 (test job)
 # -------------------------------------------------------------------------
 
 die() { printf 'error: %s\n' "$*" >&2; exit 2; }
@@ -67,6 +68,7 @@ cat <<EOF > "$JOB_FILE"
 #SBATCH --cpus-per-task=${CPUS}
 #SBATCH --mem=${MEM}
 $( [[ -n "$QOS" ]] && echo "#SBATCH --qos=${QOS}" )
+$( [[ -n "$DEPENDENCY" ]] && echo "#SBATCH --dependency=${DEPENDENCY}" )
 
 set -uo pipefail
 cd $(printf '%q' "$REPO_ROOT")
