@@ -67,6 +67,11 @@ DATASETS = {
                       "swe-bench-lite",
                       {"dataset": "SWE-bench/SWE-bench_Lite",
                        "task_ids": LITE_INSTANCES}),
+    # The full 300-instance Lite split (no task_ids); for a real full run, not
+    # the five-instance smoke campaign above.
+    "swe-bench-lite-full": ("benchmarks/configs/ornith_30b.json", "swebench",
+                            "swe-bench-lite-full",
+                            {"dataset": "SWE-bench/SWE-bench_Lite"}),
     "terminalbench-2.1": ("benchmarks/configs/terminal_bench_21.json",
                           "terminal-bench", "terminalbench-2.1"),
     "terminal-bench-2.1": ("benchmarks/configs/terminal_bench_21.json",
@@ -125,6 +130,9 @@ def build_parser():
                         help="campaign name (default: <dataset>-<agent>-<mode>-<time>)")
     parser.add_argument("--results-dir", default="results",
                         help="where the campaign directory and CSV go (default: results)")
+    parser.add_argument("--config", default=None,
+                        help="use this run config instead of the dataset's default "
+                             "(e.g. one generated for another model)")
     parser.add_argument("--n-concurrent", type=int, default=None,
                         help="override concurrency")
     parser.add_argument("--agent-timeout-multiplier", type=float, default=None,
@@ -238,7 +246,8 @@ def main(argv=None):
             config, suite_name, _ = build_config(
                 args.dataset, agent, args.mode, limit=args.limit,
                 n_concurrent=args.n_concurrent,
-                agent_timeout_multiplier=args.agent_timeout_multiplier)
+                agent_timeout_multiplier=args.agent_timeout_multiplier,
+                config_path=args.config)
             problems = validate_config(config, check_env=not args.dry_run)
             if problems:
                 raise ConfigError("; ".join(problems))
