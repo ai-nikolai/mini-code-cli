@@ -47,6 +47,9 @@ SERVER_EXTRA="${SERVER_EXTRA:-}"
 SIF_CACHE="${SIF_CACHE:-}"
 TB_CACHE="${TB_CACHE:-}"
 SCRATCH_DIR="${SCRATCH_DIR:-}"
+TB_STAGED="${TB_STAGED:-experiments/tb-staged}"
+TB_USE_STAGED="${TB_USE_STAGED:-1}"
+TB_SIF_CACHE="${TB_SIF_CACHE:-${SIF_CACHE:+$SIF_CACHE/tb}}"
 APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-}"
 APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-}"
 
@@ -115,6 +118,9 @@ for model_entry in "${MODELS[@]}"; do
                 SIF_CACHE="$SIF_CACHE" \
                 TB_CACHE="$TB_CACHE" \
                 SCRATCH_DIR="$SCRATCH_DIR" \
+                TB_STAGED="$TB_STAGED" \
+                TB_USE_STAGED="$TB_USE_STAGED" \
+                TB_SIF_CACHE="$TB_SIF_CACHE" \
                 APPTAINER_CACHEDIR="$APPTAINER_CACHEDIR" \
                 APPTAINER_TMPDIR="$APPTAINER_TMPDIR" \
                 BENCHMARKS="$bench" \

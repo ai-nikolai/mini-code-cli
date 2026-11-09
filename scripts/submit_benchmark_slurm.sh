@@ -36,6 +36,9 @@ SWE_CONFIG="${SWE_CONFIG:-benchmarks/configs/ornith_30b.json}"
 SIF_CACHE="${SIF_CACHE:-}"                 # e.g. /scratch/$USER/sif  (TB + SWE)
 TB_CACHE="${TB_CACHE:-}"                   # e.g. /scratch/$USER/cache (datasets/TB)
 SCRATCH_DIR="${SCRATCH_DIR:-}"             # e.g. /scratch/$USER/tmp (apptainer unpack)
+TB_STAGED="${TB_STAGED:-experiments/tb-staged}"  # prepared Terminal-Bench staged dataset
+TB_USE_STAGED="${TB_USE_STAGED:-1}"        # 1 = run from TB_STAGED when prepared.json exists
+TB_SIF_CACHE="${TB_SIF_CACHE:-${SIF_CACHE:+$SIF_CACHE/tb}}"  # default: repo
 APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-}"
 APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-}"
 
@@ -96,10 +99,18 @@ for bench in $BENCHMARKS; do
     config="$CONFIG_DIR/${SIGNATURE}_${slug}.json"
     SIF_FLAG=""
     [[ -n "$SIF_CACHE" ]] && SIF_FLAG="--sif-cache $SIF_CACHE/swe"
+    TB_STAGED_FLAG=""
+    if [[ "$TB_USE_STAGED" == "1" && -n "$TB_STAGED" \
+            && -f "$TB_STAGED/prepared.json" ]]; then
+        TB_STAGED_FLAG="--tb-staged-dir $(printf '%q' "$TB_STAGED")"
+    fi
+    TB_SIF_FLAG=""
+    [[ -n "$TB_SIF_CACHE" ]] && TB_SIF_FLAG="--tb-sif-cache $TB_SIF_CACHE"
     # shellcheck disable=SC2086
     "$CONFIG_PYTHON" scripts/make_benchmark_config.py "$template" "$config" \
         --model "$MODEL_NAME" \
-        --base-url "http://127.0.0.1:${SERVER_PORT}" $FULL_FLAG $SIF_FLAG
+        --base-url "http://127.0.0.1:${SERVER_PORT}" $FULL_FLAG $SIF_FLAG \
+        $TB_STAGED_FLAG $TB_SIF_FLAG
     BENCH_LIST+=("$bench")
     CONFIG_LIST+=("$config")
 done
@@ -237,6 +248,7 @@ echo "job file   : $JOB_FILE"
 echo "model      : $MODEL_NAME"
 echo "vLLM       : tp=$NUM_GPUS port=$SERVER_PORT"
 echo "benchmarks : ${BENCH_LIST[*]}"
+[[ -n "$TB_STAGED" ]] && echo "TB staged  : $TB_STAGED (used=$TB_USE_STAGED)"
 echo "agents     : $AGENTS (one at a time)"
 echo "mode / full: $MODE / $FULL"
 echo "walltime   : $WALLTIME"

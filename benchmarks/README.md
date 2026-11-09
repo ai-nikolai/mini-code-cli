@@ -185,6 +185,48 @@ APPTAINER_TMPDIR=/scratch/$USER/aptmp \
 If only home is available, run one benchmark at a time, prune SIFs/testbeds
 between chunks, and expect the full Lite split to be close to the quota.
 
+### Prepare, run, prune: one benchmark at a time
+
+For a 1 TB home, prebuild one benchmark's images, run it, then free that space
+before preparing the other. The stream is:
+
+```bash
+# 1. Terminal-Bench images + staged task set; verify every SIF
+scripts/prepare_tb_sifs.sh
+#    VERIFY=test does `apptainer test` on each (slower); VERIFY=none skips.
+
+# 2. run Terminal-Bench (the launcher detects experiments/tb-staged/prepared.json)
+BENCHMARKS=terminalbench-2.1 MODE=full scripts/submit_benchmark_slurm.sh
+
+# 3. keep summaries/patches/logs, drop TB SIFs and heavy trial workspaces
+DRY_RUN=0 CONFIRM=yes MODE=partial BENCH=tb \
+    scripts/prune_benchmark_storage.sh
+
+# 4. SWE-bench instances + SIFs
+scripts/prepare_swe_sifs.sh
+#    SWE_DATASET=SWE-bench/SWE-bench_Verified for the 500-instance set.
+
+# 5. run SWE-bench
+BENCHMARKS=swe-bench-lite-full MODE=full scripts/submit_benchmark_slurm.sh
+
+# 6. after it finishes, free the SWE SIFs too
+DRY_RUN=0 CONFIRM=yes MODE=partial BENCH=swe \
+    scripts/prune_benchmark_storage.sh
+```
+
+`scripts/prune_benchmark_storage.sh` is **dry-run by default**. Degrees:
+
+| `MODE` | Removes | Keeps |
+|---|---|---|
+| `light` | testbeds, `agent-tools`, `eval`/`pulls`, `.scratch` | SIFs, all results/logs |
+| `sifs` | SIFs for `BENCH=tb\|swe\|all` | results/logs |
+| `scratch` | `SCRATCH_DIR` / `APPTAINER_CACHEDIR` contents | everything else |
+| `partial` | `light` + selected SIFs | summaries, patches, `results.jsonl`, `trial.json`, logs |
+| `full` | `partial` + `results/`, `benchmarks/runs/`, generated jobs/configs/logs, scratch | the checkout |
+
+Do not prune while a campaign is running: `light`/`partial` touch active trial
+workspaces.
+
 ### The same thing one layer down
 
 `benchmarks/run_benchmarks.py` is a thin front end over `python -m benchmarks`; the flags below are
