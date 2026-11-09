@@ -27,6 +27,10 @@ def main(argv=None):
                         help="drop the smoke limits and task_ids")
     parser.add_argument("--sif-cache", default=None,
                         help="set options.sif_cache for SWE-bench")
+    parser.add_argument("--tb-staged-dir", default=None,
+                        help="run Terminal-Bench from this staged SIF dataset")
+    parser.add_argument("--tb-sif-cache", default=None,
+                        help="set the Terminal-Bench singularity image cache")
     args = parser.parse_args(argv)
 
     with open(args.template, encoding="utf-8") as handle:
@@ -54,6 +58,10 @@ def main(argv=None):
             options.pop("limit", None)
         if args.sif_cache and suite.get("name") == "swebench":
             options["sif_cache"] = args.sif_cache
+        if args.tb_staged_dir and suite.get("name") == "terminal-bench":
+            options["dataset_dir"] = args.tb_staged_dir
+        if args.tb_sif_cache and suite.get("name") == "terminal-bench":
+            options["singularity_image_cache_dir"] = args.tb_sif_cache
 
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=False)
