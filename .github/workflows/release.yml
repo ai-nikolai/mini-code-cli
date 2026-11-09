@@ -18,10 +18,10 @@ concurrency:
 jobs:
   release:
     name: Build and publish release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out the tagged commit
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0 # full history + tags, needed for the ancestry check below
 
@@ -40,7 +40,7 @@ jobs:
           echo "Tag ${GITHUB_REF_NAME} -> ${GITHUB_SHA} is on main."
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -77,7 +77,7 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Upload the build as a workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/
