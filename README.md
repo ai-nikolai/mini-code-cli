@@ -360,6 +360,8 @@ python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all     
 scripts/run_benchmark_slurm.sh
 # Or generate/submit an sbatch job for the full matrix on 1-4 GPUs:
 scripts/submit_benchmark_slurm.sh
+# Prepare/verify the Terminal-Bench SIFs on a CPU partition:
+scripts/submit_prepare_tb_sifs.sh
 ```
 
 Both SWE-bench splits work on this cluster and need no extra repository — `swe-bench-lite`
