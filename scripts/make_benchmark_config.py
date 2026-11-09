@@ -25,6 +25,8 @@ def main(argv=None):
                         help="override the suite dataset (e.g. SWE-bench_Lite)")
     parser.add_argument("--full", action="store_true",
                         help="drop the smoke limits and task_ids")
+    parser.add_argument("--sif-cache", default=None,
+                        help="set options.sif_cache for SWE-bench")
     args = parser.parse_args(argv)
 
     with open(args.template, encoding="utf-8") as handle:
@@ -45,12 +47,13 @@ def main(argv=None):
     for suite in payload.get("suites") or []:
         if args.dataset:
             suite["dataset"] = args.dataset
+        options = suite.setdefault("options", {})
         if args.full:
             suite.pop("limit", None)
-            options = suite.get("options")
-            if isinstance(options, dict):
-                options.pop("task_ids", None)
-                options.pop("limit", None)
+            options.pop("task_ids", None)
+            options.pop("limit", None)
+        if args.sif_cache and suite.get("name") == "swebench":
+            options["sif_cache"] = args.sif_cache
 
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=False)
