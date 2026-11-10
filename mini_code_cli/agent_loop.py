@@ -197,11 +197,13 @@ def print_help(args):
         ("/history <n>", "show the full messages recorded for turn n"),
         ("/history last", "...for the most recent turn"),
         ("/plan", "show the current goal + plan (plan mode only)"),
+        ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
         ("", "a bare /reset only re-saves the current state (no data loss)"),
         ("/clear", "clear the screen (keeps the conversation history)"),
         ("/help", "show this help"),
         ("/quit, /exit", "save the session and exit"),
+        ("", "Shift+Enter (or Ctrl-J) inserts a new line; Enter sends."),
     ):
         ui.console.emit(f"  {command:16} {description}")
     if getattr(args, "enable_subagents", False) or args.verbose:
@@ -1446,12 +1448,15 @@ class AgentSession:
 
     def _emit_tip(self):
         """Point at the history/navigation commands once, at startup."""
-        tip = ("Tip: /history to browse the conversation, /history <n> to inspect a "
+        tip = ("Tip: Shift+Enter (or Ctrl-J) for a new line, Enter to send. "
+               "/history to browse the conversation, /history <n> to inspect a "
                "turn, /reset <n> to rewind. Type /help for all commands.")
         if self.plan_mode:
-            tip = ("Tip: /plan to show the current goal + plan (plan mode), "
-                   "/history to browse the conversation, /history <n> to inspect a "
-                   "turn, /reset <n> to rewind. Type /help for all commands.")
+            tip = ("Tip: Shift+Enter (or Ctrl-J) for a new line, Enter to send. "
+                   "/plan to show the current goal + plan, /skip-plan <prompt> to "
+                   "send one prompt without planning, /history to browse the "
+                   "conversation, /history <n> to inspect a turn, /reset <n> to "
+                   "rewind. Type /help for all commands.")
         self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
     def _warn_compaction_budget(self):
@@ -1471,7 +1476,7 @@ class AgentSession:
                 f"tokens (+{self.compaction_budget.reserved_output_tokens:,} reserved "
                 f"for the reply). Override with --max-context-tokens.", "warn")
 
-    def _run_turn(self, user_input):
+    def _run_turn(self, user_input, skip_plan=False):
         """Run one user turn: record it, step until the model stops, then review.
 
         A step that makes no tool calls ends the turn. In plan mode the loop then
@@ -1479,14 +1484,21 @@ class AgentSession:
         can drive further work. The extra step happens *outside* the plan-mode
         branch's result: a reply with no tool calls must always end the turn,
         otherwise non-plan sessions re-call the model forever.
+
+        ``skip_plan`` is set by ``/skip-plan PROMPT``: the turn is sent normally,
+        but no plan is authored or reviewed for it (plan mode itself stays on for
+        later turns).
         """
         self.messages.append({"role": "user", "content": user_input})
 
-        if self.plan_mode:
+        if self.plan_mode and not skip_plan:
             self.console.note("Generating plan for agent.", "info")
             self._record_goal_request(user_input)
             self._generate_plan_and_inject(user_input)
             self.console.note("Plan generated.", "info")
+        elif self.plan_mode and skip_plan:
+            self.console.note(
+                "Skipping plan generation and review for this prompt.", "warn")
 
         while True:
             should_continue = self._step()
@@ -1496,7 +1508,7 @@ class AgentSession:
                     "Continuing with LLM calls until no more tool calls.", "info")
                 continue
             self.console.note("LLM seems to have to an end of the task.", "info")
-            if not self.plan_mode:
+            if not self.plan_mode or skip_plan:
                 return
             self.console.note("Reviewing the plan, if everything is done.", "info")
             self._review_plan_completion()
@@ -1629,6 +1641,14 @@ class AgentSession:
             self.console.note(f"Could not generate a plan: {exc}", "warn")
 
         self.plan_manager.write_plan(plan_text)
+        if plan_text and plan_text.strip():
+            # Show the plan immediately; otherwise the user only sees it via
+            # /plan or the file on disk.
+            self.console.status_box(plan_text.strip().splitlines(),
+                                    title="Plan for the current goal",
+                                    fg="cyan", dim=True)
+        else:
+            self.console.note("No plan text was generated.", "warn")
         if plan_text and plan_text.strip():
             # Loop bookkeeping, not a user instruction: the leading text is one
             # of _LOOP_INJECTED_USER_PREFIXES, so the compaction tail scan skips
@@ -1775,7 +1795,8 @@ class AgentSession:
             self.console.short_divider()
 
             user_input = self.console.read_line(
-                self.console.style("You:", bold=True, fg="cyan") + " ")
+                self.console.style("You:", bold=True, fg="cyan") + " ",
+                multiline=True)
 
             # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
             # must not be dereferenced here (a piped or closed stdin would
@@ -1799,6 +1820,7 @@ class AgentSession:
                              see _do_reset)
           /plan              show the current goal + plan the loop maintains
                              (plan mode only)
+          /skip-plan <text>  send <text> without generating or reviewing a plan
           /clear             clear the screen (keeps the conversation)
           /help              show the command help
 
@@ -1830,8 +1852,25 @@ class AgentSession:
         if cmd == "plan":
             self._show_plan()
             return True
+        if cmd in ("skip-plan", "skip_plan", "skipplan"):
+            self._run_skipped_plan(arg)
+            return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
+
+    def _run_skipped_plan(self, prompt):
+        """Handle ``/skip-plan PROMPT``: run the prompt without planning it."""
+        prompt = (prompt or "").strip()
+        if not prompt:
+            self.console.note(
+                "Usage: /skip-plan <prompt> (sends the prompt without generating "
+                "or reviewing a plan).", "warn")
+            return
+        if not self.plan_mode:
+            self.console.note(
+                "Plan mode is not enabled; sending the prompt normally.", "warn")
+        self.console.turn("You", prompt, accent="cyan")
+        self._run_turn(prompt, skip_plan=True)
 
     def _do_reset(self, arg):
         """Rewind the conversation to the end of a recorded turn.

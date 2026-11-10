@@ -82,7 +82,7 @@ given a reference implementation.
 | `-s`, `--enable-shell` | off | allow shell execution (classifier always applies) |
 | `-g`, `--enable-subagents` | off | expose sub-agents as tools |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
-| `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, `/plan`) |
+| `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
 | `--tool-timeout S` | `120` | timeout for a single tool call |
 | `--max-context-tokens N` | derived | input-token budget before the history is compacted |
@@ -173,8 +173,14 @@ to the model automatically when `--enable-subagents` is set. See
 | `/reset [<n>]` | rewind to the end of turn `n` (`last` works too); drops everything after it |
 | `/clear` | clear the screen (keeps the conversation history) |
 | `/plan` | show the current goal + plan (plan mode only) |
+| `/skip-plan <prompt>` | send `<prompt>` once without generating or reviewing a plan |
 | `/help` | show this help |
 | `/quit`, `/exit` | save the session and exit |
+
+**Multi-line input:** press `Shift+Enter` (or `Ctrl-J`) to insert a newline; plain
+`Enter` sends the turn. This works in the session prompt and the startup tip
+reminds you. Terminals that report `Shift+Enter` as a CSI-u/modifyOtherKeys
+sequence are recognised; elsewhere `Ctrl-J` inserts the newline.
 
 > [!NOTE]
 > `/history` and `/reset` are driven by `summary_history.json`, a flat recorder that maps every
@@ -247,7 +253,10 @@ still refused. With no flags, an ASK-tier command prompts and an ALLOW-tier one 
 The loop keeps two human-readable tracking files in the session directory: `CURRENT_GOAL.md`
 (your latest instruction) and `CURRENT_PLAN.md` (a step-by-step plan for that goal, marked
 finished when it is done). They are authored by the *loop*, not the agent, live outside
-`--allowed-dir`, and can be inspected any time with `/plan`.
+`--allowed-dir`, and can be inspected any time with `/plan`. The generated plan is
+also printed as a box right after planning, so you can see it without asking.
+Use `/skip-plan <prompt>` to send one prompt without planning it (plan mode stays
+on for later turns).
 
 > [!NOTE]
 > Plan mode also changes **history compaction**: after the transcript is compacted to a summary,
