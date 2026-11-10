@@ -225,6 +225,29 @@ class TokenEstimateTest(unittest.TestCase):
         self.assertGreater(big, small)
         self.assertGreater(small, 0)
 
+    def test_context_breakdown_sums_to_the_transcript_estimate(self):
+        messages = [
+            {"role": "system", "content": "S" * 40},
+            {"role": "user", "content": "U" * 40},
+            {"role": "assistant", "content": "A" * 40,
+             "reasoning_content": "R" * 40,
+             "tool_calls": [{"id": "c1", "function": {
+                 "name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "T" * 400},
+        ]
+        breakdown = tokens.context_breakdown(messages)
+        self.assertEqual(sum(breakdown.values()),
+                         tokens.estimate_messages_tokens(messages))
+        self.assertGreater(breakdown["system prompt"], 0)
+        self.assertGreater(breakdown["user messages"], 0)
+        self.assertGreater(breakdown["assistant messages"], 0)
+        self.assertGreater(breakdown["tool calls"], 0)
+        self.assertGreater(breakdown["tool outputs"], 0)
+        self.assertGreater(breakdown["reasoning"], 0)
+
+    def test_context_breakdown_of_an_empty_transcript_is_empty(self):
+        self.assertEqual(sum(tokens.context_breakdown([]).values()), 0)
+
     def test_without_a_server_report_the_heuristic_is_used(self):
         messages = long_messages(3, 400)
         self.assertEqual(tokens.project_input_tokens(messages),

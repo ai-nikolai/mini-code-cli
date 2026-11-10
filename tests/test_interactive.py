@@ -236,6 +236,17 @@ class SlashCommandTest(_SessionCase):
         self.assertTrue(session._handle_command("/plan"))
         self.assertIn("Plan mode is not enabled", self.output())
 
+    def test_context_command_renders_the_token_breakdown(self):
+        session = self.build_session()
+        self.assertTrue(session._handle_command("/context"))
+        out = self.output()
+        self.assertIn("Context usage", out)
+        self.assertIn("system prompt", out)
+        self.assertIn("tool outputs", out)
+        self.assertIn("Used (estimate)", out)
+        self.assertIn("% window", out)
+        self.assertIn("% used", out)
+
     def test_unknown_command_is_swallowed(self):
         session = self.build_session()
         self.assertTrue(session._handle_command("/nonsense"))
