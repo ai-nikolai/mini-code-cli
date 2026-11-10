@@ -964,7 +964,6 @@ class RestoreSessionEndToEndTest(unittest.TestCase):
 
         self.assertEqual(restored.unique_id, original.unique_id)     # in place
         self.assertEqual(restored.session_dir, session_dir)
-        self.assertTrue(restored.restored_session)
         self.assertEqual([m.get("content") for m in restored.messages],
                          [m.get("content") for m in original.messages])
         self.assertEqual(restored.token_stats["total_tokens"],

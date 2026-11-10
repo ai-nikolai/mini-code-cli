@@ -394,9 +394,8 @@ class PromptStrategyTest(unittest.TestCase):
 
 
 class SessionIdLineTest(_AdvancedCase):
-    def _session_output(self, restored=False):
+    def _session_output(self):
         session = self.new_session()
-        session.restored_session = restored
         session._print_session_id()
         return self.output()
 
@@ -407,9 +406,11 @@ class SessionIdLineTest(_AdvancedCase):
         self.assertTrue(divider)
         self.assertEqual(set(divider), {"-"})
 
-    def test_the_context_bar_is_shown_only_for_a_restored_session(self):
-        self.assertNotIn("%", self._session_output(restored=False))
-        self.assertRegex(self._session_output(restored=True), r"\d+%")
+    def test_the_context_bar_is_shown_for_a_new_session(self):
+        # A fresh session starts from the system prompt, so the bar is already
+        # meaningful (not missing until the first reply).
+        out = self._session_output()
+        self.assertRegex(out, r"\d+%")
 
 
 class WelcomeBannerTest(_AdvancedCase):
