@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
 # Submit the benchmark matrix: one Slurm job per (model, benchmark, agent) cell.
-# Each cell calls scripts/submit_benchmark_slurm.sh with single values, so every
+# Each cell calls benchmarks/scripts/submit_benchmark_slurm.sh with single values, so every
 # job gets its own vLLM server and cannot contend with another agent.
 #
-#     scripts/submit_benchmark_matrix.sh
-#     DRY_RUN=1 SUBMIT=0 scripts/submit_benchmark_matrix.sh
+#     benchmarks/scripts/submit_benchmark_matrix.sh
+#     DRY_RUN=1 SUBMIT=0 benchmarks/scripts/submit_benchmark_matrix.sh
 #
 # Lists are plain bash arrays below. A model entry may be just a name, or
 #   "name|NUM_GPUS|MODEL_ENV|TOOL_CALL_PARSER|REASONING_PARSER"

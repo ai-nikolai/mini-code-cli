@@ -4,7 +4,7 @@
 # time. Designed for a single interactive GPU job:
 #
 #     squeue -u "$USER"                 # find the interactive job id
-#     scripts/run_benchmark_slurm.sh    # uses JOBID below
+#     benchmarks/scripts/run_benchmark_slurm.sh    # uses JOBID below
 #
 # Everything the script needs is a variable in the block below. The defaults
 # match the H200 setup used in benchmarks/README.md: one vLLM server on
@@ -19,7 +19,7 @@ set -euo pipefail
 
 # --- edit these -----------------------------------------------------------
 JOBID="${JOBID:-}"                         # empty = run on the current host
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATASET="${DATASET:-terminalbench-2.1-3}"  # swe-bench | swe-bench-lite | terminalbench-2.1-3
 AGENTS="${AGENTS:-mini-code pi claude-code}"  # space-separated; run one by one
 MODE="${MODE:-short}"                      # short | short_eval | full
