@@ -92,6 +92,72 @@ def estimate_messages_tokens(messages):
     return sum(estimate_message_tokens(m) for m in messages) + REPLY_PRIMING_TOKENS
 
 
+#: The categories ``/context`` reports, in display order. Values are token
+#: estimates; the keys stay stable so the command and its tests share one name.
+CONTEXT_CATEGORIES = (
+    "system prompt",
+    "user messages",
+    "assistant messages",
+    "tool calls",
+    "tool outputs",
+    "reasoning",
+    "request overhead",
+    "other messages",
+)
+
+
+def _tool_calls_tokens(tool_calls):
+    """Estimate the JSON argument payload of an assistant tool-call turn."""
+    if not tool_calls:
+        return 0
+    try:
+        return estimate_text_tokens(json.dumps(tool_calls, default=str))
+    except (TypeError, ValueError):
+        return estimate_text_tokens(repr(tool_calls))
+
+
+def context_breakdown(messages):
+    """Estimate how the current transcript fills the context, by category.
+
+    The values add up exactly to :func:`estimate_messages_tokens` for the same
+    list, so ``/context`` can show a split that agrees with the context bar. The
+    assistant's content, tool-call arguments and thinking-mode reasoning are
+    separated because they are very different kinds of context weight; tool
+    results and the fixed request overhead get their own rows too.
+
+    Returns an ordered ``{category: tokens}`` mapping (see
+    :data:`CONTEXT_CATEGORIES`). This is an estimate like every number in this
+    module: no tokenizer is available before the request.
+    """
+    categories = {name: 0 for name in CONTEXT_CATEGORIES}
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role == "system":
+            categories["system prompt"] += estimate_message_tokens(message)
+        elif role == "user":
+            categories["user messages"] += estimate_message_tokens(message)
+        elif role == "assistant":
+            categories["assistant messages"] += estimate_message_tokens(message)
+            categories["tool calls"] += _tool_calls_tokens(
+                message.get("tool_calls"))
+            categories["reasoning"] += estimate_text_tokens(
+                message.get("reasoning_content"))
+        elif role == "tool":
+            categories["tool outputs"] += estimate_message_tokens(message)
+        else:
+            categories["other messages"] += estimate_message_tokens(message)
+
+    # The assistant row above includes the tool-call JSON and reasoning; move
+    # those into their own rows so the assistant row is its visible content.
+    categories["assistant messages"] -= (
+        categories["tool calls"] + categories["reasoning"])
+    if messages:
+        categories["request overhead"] += REPLY_PRIMING_TOKENS
+    return categories
+
+
 def project_input_tokens(messages, reported_prompt_tokens=0, reported_message_count=0):
     """Estimate the input size of the *next* request for ``messages``.
 

@@ -77,13 +77,21 @@ MODEL_CONTEXT_WINDOWS = {
     "llama-2": 4_096,
     "codellama": 16_384,
     # -- DeepSeek ---------------------------------------------------------
-    "deepseek-v3": 65_536,
-    "deepseek-r1": 65_536,
-    "deepseek-coder": 65_536,
-    "deepseek": 32_768,
-    "deepseek-flash": 250_000,
-    "deepseek-pro": 250_000,
-    "deepseek-v4": 250_000,
+    # V4 and its Flash/Pro variants advertise (and ship a HF config with) a
+    # 1,048,576-token window. The V2/V3/R1 generation uses 163,840.
+    "deepseek-v4.1": 1_048_576,
+    "deepseek-v4": 1_048_576,
+    "deepseek-flash": 1_048_576,
+    "deepseek-pro": 1_048_576,
+    "deepseek-v3.2": 163_840,
+    "deepseek-v3": 163_840,
+    "deepseek-r1": 163_840,
+    "deepseek-coder-v2": 163_840,
+    "deepseek-coder": 16_384,
+    "deepseek-v2": 163_840,
+    # Unknown/legacy DeepSeek ids: the previous generation is the conservative
+    # default (V4-specific keys above still win by specificity).
+    "deepseek": 163_840,
     # -- Mistral ----------------------------------------------------------
     "mixtral": 32_768,
     "mistral": 32_768,
