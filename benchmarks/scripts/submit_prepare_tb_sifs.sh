@@ -82,7 +82,7 @@ echo "host: \$(hostname)  date: \$(date)"
 echo "TB tasks: ${TB_TASKS_DIR}"
 echo "SIF cache: ${SIF_CACHE:-<repo default>}"
 echo "staged: ${TB_STAGED}"
-echo "jobs: ${JOBS}  verify: ${VERIFY}"
+echo "jobs: ${JOBS}  verify: ${VERIFY}  build timeout: ${BUILD_TIMEOUT}s"
 
 export BENCH_ENV=$(printf '%q' "$BENCH_ENV")
 export CONDA_SH=$(printf '%q' "$CONDA_SH")
@@ -94,6 +94,7 @@ export TB_TASK_IDS=$(printf '%q' "$TB_TASK_IDS")
 export JOBS=$(printf '%q' "$JOBS")
 export FORCE=$(printf '%q' "$FORCE")
 export VERIFY=$(printf '%q' "$VERIFY")
+export BUILD_TIMEOUT=$(printf '%q' "$BUILD_TIMEOUT")
 
 benchmarks/scripts/prepare_tb_sifs.sh
 rc=\$?
@@ -107,7 +108,7 @@ echo "=== Terminal-Bench SIF preparation ==="
 echo "job file : $JOB_FILE"
 echo "partition: $PARTITION  cpus=$CPUS mem=$MEM time=$WALLTIME"
 echo "tasks    : ${TB_LIMIT:-all} ${TB_TASK_IDS}"
-echo "jobs     : $JOBS  verify=$VERIFY"
+echo "jobs     : $JOBS  verify=$VERIFY  timeout=${BUILD_TIMEOUT}s"
 echo "SIFs     : ${SIF_CACHE:-<repo default>}"
 echo "staged   : $TB_STAGED"
 echo "cache    : $APPTAINER_CACHEDIR"

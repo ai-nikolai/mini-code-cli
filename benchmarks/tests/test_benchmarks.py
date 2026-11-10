@@ -1108,6 +1108,9 @@ class TbSifDefinitionTests(unittest.TestCase):
         self.assertIn("Acquire::ForceIPv4=true", text)
         self.assertIn("python3-venv", text)
         self.assertIn("/opt/harbor-server", text)
+        self.assertIn("archive.debian.org", text)
+        self.assertIn("Acquire::Check-Valid-Until=false", text)
+        self.assertIn("ensurepip", text)
 
     def test_alpine_gets_a_virtualenv_fallback(self):
         from benchmarks.suites.tb_apptainer import render_def

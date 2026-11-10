@@ -30,6 +30,7 @@ TB_TASK_IDS="${TB_TASK_IDS:-}"             # space-separated subset, e.g. "bn-fi
 JOBS="${JOBS:-2}"                          # parallel apptainer builds
 FORCE="${FORCE:-0}"                        # 1 = rebuild existing SIFs
 VERIFY="${VERIFY:-inspect}"                # inspect | test | none
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-10800}"    # seconds per apptainer build (default 3 h)
 APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-}"
 APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-}"
 # -------------------------------------------------------------------------
@@ -53,14 +54,15 @@ mkdir -p "$TB_SIF_CACHE" "$TB_STAGED" "$(dirname "$TB_STAGED")"
 say "TB task source : $TB_TASKS_DIR"
 say "TB SIF cache   : $TB_SIF_CACHE"
 say "TB staged set  : $TB_STAGED"
-say "build jobs     : $JOBS   verify: $VERIFY"
+say "build jobs     : $JOBS   verify: $VERIFY   timeout: ${BUILD_TIMEOUT}s"
 
 CMD=("$PYTHON" -m benchmarks.suites.tb_apptainer prepare
      --tasks-dir "$TB_TASKS_DIR"
      --out "$TB_STAGED"
      --sif-cache "$TB_SIF_CACHE"
      --mini-code "$REPO_ROOT/mini_code_cli"
-     --jobs "$JOBS")
+     --jobs "$JOBS"
+     --build-timeout "$BUILD_TIMEOUT")
 [[ -n "$TB_LIMIT" ]] && CMD+=(--limit "$TB_LIMIT")
 for task in $TB_TASK_IDS; do
     CMD+=(--task-id "$task")

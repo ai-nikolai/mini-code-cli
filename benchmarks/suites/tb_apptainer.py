@@ -76,9 +76,20 @@ def render_def(image, mini_code_dir=None):
         "-o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "
         "-o Acquire::Retries=3'",
         "        apt-get $APT_OPTS update -qq || true",
-        f"        apt-get $APT_OPTS install -y -qq {' '.join(POST_INSTALL)} || true",
+        f"        apt-get $APT_OPTS install -y -qq {' '.join(POST_INSTALL)} || {{",
+        "            # Old Debian releases (bullseye/buster) were moved to the",
+        "            # archive; the live mirror 404s every pinned package.",
+        "            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do",
+        "                [ -f \"$f\" ] || continue",
+        "                sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g; s|deb.debian.org/debian|archive.debian.org/debian|g' \"$f\"",
+        "            done",
+        "            APT_OPTS=\"$APT_OPTS -o Acquire::Check-Valid-Until=false\"",
+        "            apt-get $APT_OPTS update -qq || true",
+        f"            apt-get $APT_OPTS install -y -qq {' '.join(POST_INSTALL)} || true",
+        "        }",
         "    elif command -v apk >/dev/null 2>&1; then",
         "        apk add --no-cache python3 py3-pip py3-virtualenv bash curl git tmux || true",
+        "        /usr/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || true",
         "    fi",
         "    # harbor's singularity backend wants a ready server venv here; the SIF",
         "    # is read-only, and its --writable-tmpfs layer does not survive the",
@@ -86,12 +97,18 @@ def render_def(image, mini_code_dir=None):
         "    if [ -x /usr/bin/python3 ]; then",
         # agent runtime deps into the *system* interpreter (the bridge starts
         # `python3 -m mini_code_cli`); --break-system-packages for PEP 668 images.
+        "        /usr/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || true",
         f"        /usr/bin/python3 -m pip install -q --break-system-packages "
         f"{' '.join(PIP_FOR_AGENT)} 2>/dev/null || "
         f"/usr/bin/python3 -m pip install -q {' '.join(PIP_FOR_AGENT)} || true",
-        "        /usr/bin/python3 -m venv /opt/harbor-server || "
+        "        if [ ! -x /opt/harbor-server/bin/pip ]; then",
+        "            rm -rf /opt/harbor-server",
+        "            /usr/bin/python3 -m venv /opt/harbor-server || "
         "(command -v virtualenv >/dev/null && "
         "virtualenv -p /usr/bin/python3 /opt/harbor-server) || true",
+        "            /opt/harbor-server/bin/python -m ensurepip --upgrade "
+        ">/dev/null 2>&1 || true",
+        "        fi",
         "        /opt/harbor-server/bin/pip install -q --upgrade pip || true",
         "        /opt/harbor-server/bin/pip install -q uvicorn fastapi || true",
         "    fi",
@@ -208,7 +225,8 @@ def build_sif(apptainer, definition, sif_path, log_path, env=None, force=False,
 
 
 def prepare(dataset_dir, out_dir, sif_cache, limit=None, task_ids=(),
-            mini_code_dir=None, jobs=1, force=False, log_dir=None, env=None):
+            mini_code_dir=None, jobs=1, force=False, log_dir=None, env=None,
+            build_timeout=10_800):
     """Derive one SIF per task and stage a local dataset harbor can run.
 
     Returns ``{"tasks": [...], "failed": [...], "out_dir": ...}``. Every task
@@ -255,11 +273,11 @@ def prepare(dataset_dir, out_dir, sif_cache, limit=None, task_ids=(),
                     "dir": target, "image": image}
         with open(definition, "w", encoding="utf-8") as handle:
             handle.write(rendered)
-        ok, message = build_sif(apptainer, definition, sif,
-                                os.path.join(log_dir, f"{name}.build.log"),
-                                env=env,
-                                force=force or (os.path.isfile(sif)
-                                                and cached_key != key))
+        ok, message = build_sif(
+            apptainer, definition, sif,
+            os.path.join(log_dir, f"{name}.build.log"), env=env,
+            force=force or (os.path.isfile(sif) and cached_key != key),
+            timeout=build_timeout)
         if not ok:
             return {"task": name, "status": "failed", "reason": message,
                     "image": image}
@@ -319,7 +337,8 @@ def main(argv=None):
             dataset_dir=tasks_dir, out_dir=args.out,
             sif_cache=args.sif_cache, limit=args.limit,
             task_ids=args.task_id or (), mini_code_dir=args.mini_code,
-            jobs=args.jobs, force=args.force, env=dict(os.environ))
+            jobs=args.jobs, force=args.force, env=dict(os.environ),
+            build_timeout=args.build_timeout)
         for task in manifest["tasks"]:
             detail = task.get("reason") or task.get("sif") or ""
             print(f"{task['task']:<40} {task['status']:<8} {detail}")
@@ -362,6 +381,9 @@ def build_parser():
     prep.add_argument("--task-id", action="append", default=None)
     prep.add_argument("--jobs", type=int, default=1)
     prep.add_argument("--force", action="store_true")
+    prep.add_argument("--build-timeout", type=int, default=10_800,
+                      help="seconds before one apptainer build is killed "
+                           "(default: 10800 = 3 h)")
     prep.add_argument("--mini-code", default=None,
                       help="path to the mini_code_cli package to bake in")
     status = sub.add_parser("status", help="what has been prepared so far")
