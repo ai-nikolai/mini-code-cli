@@ -407,11 +407,12 @@ class SubAgentToolAllowlistTest(SubAgentTestCase):
         child_args = subagent._build_child_args(session, "do it")
         child = AgentSession(child_args, console=silent_console(),
                              background_mode=True)
-        # The parent's own dict also carries the sub-agent sentinel tools (which
-        # a child must never inherit); compare the real tool functions only.
+        # The parent's dict also carries the sub-agent sentinel tools and the
+        # background-task tool. A child never inherits either: it must not
+        # recursively spawn sub-agents or own a nested background task list.
         parent_tools = sorted(
             name for name, entry in session.tools_dict.items()
-            if not entry.get("subagent"))
+            if not entry.get("subagent") and name != "background")
         self.assertEqual(sorted(child.tools_dict), parent_tools)
 
     def test_per_call_parameters_reach_the_sub_agent(self):

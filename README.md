@@ -112,6 +112,7 @@ parameter a model does not need is defaulted, so omitting it keeps the previous 
 | `web_search` | best-effort lookup: related queries + a short Wikipedia extract. Never raises |
 | `read_website` | fetch raw text/HTML of a URL (bounded by `--tool-timeout`), `max_chars` caps size |
 | `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported |
+| `background` | start/list/output/wait/cancel background **shell** tasks (needs `--enable-shell`) or **sub-agent** tasks (needs `--enable-subagents`); output is captured in a per-task log |
 
 ## Sub-agents
 
@@ -166,6 +167,24 @@ to the model automatically when `--enable-subagents` is set. See
 
 </details>
 
+## Background tasks
+
+When shell execution or sub-agents are enabled, the agent also gets a `background` tool:
+
+- `background(action="start", command="pytest -q")` starts a long command in its own process group;
+- `background(action="start", kind="subagent", subagent="software_engineer", task="...")` starts
+  a nested agent task;
+- `list`, `output`, `wait` and `cancel` inspect or control the tasks.
+
+Each task has an id (`bg-1`), a status, a log under the session folder
+(`background/bg-1.log`), an output tail, and a cancellation path. Shell tasks are killed as a
+process group; sub-agent tasks receive a cancellation event between steps. Background tasks are
+session-local and do not survive a restart (the logs do).
+
+Use `/background` to see the foreground activity and all tasks, or `/background bg-1` for one
+task's output. Note that the main loop is synchronous, so `/background` can be typed between
+steps; it shows the last/current blocking activity rather than live-during the call.
+
 ## In-session commands
 
 | Command | What it does |
@@ -177,6 +196,7 @@ to the model automatically when `--enable-subagents` is set. See
 | `/clear` | clear the screen (keeps the conversation history) |
 | `/plan` | show the current goal + plan (plan mode only) |
 | `/context` | show how the context window is used: tokens and percentages by category (system prompt, user/assistant messages, tool calls/outputs, reasoning, overhead) |
+| `/background [id]` | show foreground activity + background tasks, or one task's output tail |
 | `/skip-plan <prompt>` | send `<prompt>` once without generating or reviewing a plan |
 | `/help` | show this help |
 | `/quit`, `/exit` | save the session and exit |
