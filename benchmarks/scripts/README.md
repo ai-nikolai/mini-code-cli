@@ -1,8 +1,9 @@
 # Benchmark scripts
 
-Everything here drives the benchmark harness in `benchmarks/`. The only scripts
-left in the repository-root `scripts/` are mini-code-cli tooling
-(`lint.py`, `push_version_tag.py`).
+Everything here drives the benchmark harness in `benchmarks/`. The local-model
+helper `scripts/run_model.sh` lives in the repository-root `scripts/` together
+with the mini-code-cli tooling (`lint.py`, `push_version_tag.py`), because it is
+also useful when running mini-code against a local model.
 
 Run every command from the repository root. Generated jobs, configs and logs
 live under `experiments/`, which is git-ignored.
@@ -14,7 +15,6 @@ live under `experiments/`, which is git-ignored.
 | `setup_external_repos.sh` | Clone/update the fork checkouts (`harbor`, `terminal-bench-2-1`). |
 | `push_all_repos.sh` | Push the fork branches (not used by a benchmark run). |
 | `rebuild_tb_sifs.py` | Low-level rebuild of the derived TB SIFs; normally use `prepare_tb_sifs.sh`. |
-| `run_model.sh` | Start the small vLLM model on port 30000 and wait for `/health`. |
 | `run_benchmark_slurm.sh` | Run on an **existing interactive allocation** (`srun --overlap --jobid=…`): starts vLLM, waits, runs one agent at a time. |
 | `submit_prepare_tb_sifs.sh` | Submit a CPU `sbatch` job that runs `prepare_tb_sifs.sh`. |
 | `prepare_tb_sifs.sh` | Build all TB 2.1 SIFs with the baked `mini_code_cli`, stage the task set, verify each image. |

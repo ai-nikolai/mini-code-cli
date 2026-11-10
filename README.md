@@ -392,7 +392,10 @@ local TB 2.1 checkout), and what a run produces.
 
 ## Serving a model locally
 
-Tested with vLLM v0.30 (tool calling enabled):
+For a one-GPU quick start, `scripts/run_model.sh` starts the small
+`ornith-ai/Ornith-1.5-35B-A3B` checkpoint on port 30000 and waits for `/health`.
+Edit its model/tensor-parallel line for a larger checkpoint. Tested with vLLM
+v0.30 (tool calling enabled):
 
 ```bash
 vllm serve ornith-ai/Ornith-1.5-397B-FP8 \
