@@ -300,6 +300,7 @@ compaction or planning choice on top of it:
 | `swe` | baseline: `summarise` compaction, no plan mode |
 | `swe-compaction-predict-files` | `--compaction-strategy predict-files` |
 | `swe-compaction-predict-messages` | `--compaction-strategy predict-messages` |
+| `swe-plan` | `--plan` (default `plan-verify-step`) |
 | `swe-plan-verify` | `--plan --plan-strategy plan-verify` |
 | `swe-open-plan` | `--plan --plan-strategy open-plan` |
 
