@@ -211,6 +211,7 @@ def print_help(args):
         ("/history <n>", "show the full messages recorded for turn n"),
         ("/history last", "...for the most recent turn"),
         ("/plan", "show the current goal + plan (plan mode only)"),
+        ("/context", "show how the context window is used (tokens + percentages)"),
         ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
         ("", "a bare /reset only re-saves the current state (no data loss)"),
@@ -2092,6 +2093,8 @@ class AgentSession:
                              see _do_reset)
           /plan              show the current goal + plan the loop maintains
                              (plan mode only)
+          /context           show how the context window is used, by category
+                             (tokens and percentages)
           /skip-plan <text>  send <text> without generating or reviewing a plan
           /clear             clear the screen (keeps the conversation)
           /help              show the command help
@@ -2123,6 +2126,9 @@ class AgentSession:
             return True
         if cmd == "plan":
             self._show_plan()
+            return True
+        if cmd == "context":
+            self._show_context()
             return True
         if cmd in ("skip-plan", "skip_plan", "skipplan"):
             self._run_skipped_plan(arg)
@@ -2213,6 +2219,58 @@ class AgentSession:
             fg="green",
             dim=True,
         )
+
+    def _show_context(self):
+        """Show how the context window is currently used (``/context``).
+
+        The transcript is split into the categories that explain most of the
+        weight -- system prompt, user / assistant messages, tool-call arguments,
+        tool outputs, thinking-mode reasoning -- with the fixed request overhead
+        as its own row. Each row reports estimated tokens and two percentages:
+        of the whole context window, and of the current transcript (so the rows
+        add up to 100%). The total is reconciled with the same projection the
+        context bar uses; any extra the server-side request adds (tool schemas)
+        lands in the overhead row.
+        """
+        breakdown = tokens_mod.context_breakdown(self.messages)
+        estimated = sum(breakdown.values())
+        try:
+            projected = self._projected_input_tokens()
+        except Exception:
+            projected = estimated
+        total = max(estimated, projected, 0)
+        if total > estimated:
+            breakdown["request overhead"] += total - estimated
+
+        window = self.compaction_budget.context_window
+        limit = self.compaction_budget.token_limit
+
+        def percent(value, base):
+            return (100.0 * value / base) if base else 0.0
+
+        used_pct = percent(total, window)
+        limit_pct = percent(limit, window)
+        lines = [
+            f"Context window : {window:>12,} tokens",
+            f"Used (estimate): {total:>12,} tokens  ({used_pct:>5.1f}% of window)",
+            f"Compaction at  : {limit:>12,} tokens  ({limit_pct:>5.1f}% of window)",
+            "",
+        ]
+        rows = [(label, value) for label, value in breakdown.items() if value > 0]
+        if rows:
+            lines.append(f"{'category':<22} {'tokens':>10}  {'% window':>8}  {'% used':>8}")
+            lines.append("-" * 22 + " " + "-" * 10 + "  " + "-" * 8 + "  " + "-" * 8)
+            for label, value in rows:
+                lines.append(
+                    f"{label:<22} {value:>10,}  "
+                    f"{percent(value, window):>8.1f}%  "
+                    f"{percent(value, total):>8.1f}%")
+        else:
+            lines.append("The transcript is empty.")
+
+        self.console.rule(title="Context", char="═", fg="cyan")
+        self.console.status_box(lines, title="Context usage",
+                                fg="green", dim=True)
 
     def _clear_and_show_last(self):
         """Handle /clear: wipe the screen and re-print the last turn.

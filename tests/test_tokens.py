@@ -78,8 +78,10 @@ class ContextWindowLookupTest(unittest.TestCase):
             "Qwen/Qwen2.5-Coder-32B-Instruct": 131_072,
             "qwen2.5-7b-instruct-awq": 131_072,
             "meta-llama/Llama-3.1-8B-Instruct": 131_072,
-            "deepseek-r1:70b": 65_536,
-            "deepseek-ai/DeepSeek-V3": 65_536,
+            "deepseek-r1:70b": 163_840,
+            "deepseek-ai/DeepSeek-V3": 163_840,
+            "deepseek-ai/DeepSeek-V4-Pro": 1_048_576,
+            "deepseek-v4.1-flash-1017": 1_048_576,
             "mistralai/Mistral-7B-Instruct-v0.2": 32_768,
             "gemini-1.5-pro": 1_048_576,
         }
@@ -94,6 +96,8 @@ class ContextWindowLookupTest(unittest.TestCase):
                            config.context_window_for("gpt-4"))
         self.assertGreater(config.context_window_for("qwen2.5"),
                            config.context_window_for("qwen2"))
+        self.assertGreater(config.context_window_for("deepseek-v4"),
+                           config.context_window_for("deepseek"))
 
     def test_lookup_is_case_insensitive(self):
         self.assertEqual(config.context_window_for("GPT-4O-MINI"), 128_000)
@@ -224,6 +228,29 @@ class TokenEstimateTest(unittest.TestCase):
         big = tokens.estimate_messages_tokens([{"role": "user", "content": "hi" * 400}])
         self.assertGreater(big, small)
         self.assertGreater(small, 0)
+
+    def test_context_breakdown_sums_to_the_transcript_estimate(self):
+        messages = [
+            {"role": "system", "content": "S" * 40},
+            {"role": "user", "content": "U" * 40},
+            {"role": "assistant", "content": "A" * 40,
+             "reasoning_content": "R" * 40,
+             "tool_calls": [{"id": "c1", "function": {
+                 "name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "T" * 400},
+        ]
+        breakdown = tokens.context_breakdown(messages)
+        self.assertEqual(sum(breakdown.values()),
+                         tokens.estimate_messages_tokens(messages))
+        self.assertGreater(breakdown["system prompt"], 0)
+        self.assertGreater(breakdown["user messages"], 0)
+        self.assertGreater(breakdown["assistant messages"], 0)
+        self.assertGreater(breakdown["tool calls"], 0)
+        self.assertGreater(breakdown["tool outputs"], 0)
+        self.assertGreater(breakdown["reasoning"], 0)
+
+    def test_context_breakdown_of_an_empty_transcript_is_empty(self):
+        self.assertEqual(sum(tokens.context_breakdown([]).values()), 0)
 
     def test_without_a_server_report_the_heuristic_is_used(self):
         messages = long_messages(3, 400)

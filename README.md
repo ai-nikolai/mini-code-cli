@@ -176,6 +176,7 @@ to the model automatically when `--enable-subagents` is set. See
 | `/reset [<n>]` | rewind to the end of turn `n` (`last` works too); drops everything after it |
 | `/clear` | clear the screen (keeps the conversation history) |
 | `/plan` | show the current goal + plan (plan mode only) |
+| `/context` | show how the context window is used: tokens and percentages by category (system prompt, user/assistant messages, tool calls/outputs, reasoning, overhead) |
 | `/skip-plan <prompt>` | send `<prompt>` once without generating or reviewing a plan |
 | `/help` | show this help |
 | `/quit`, `/exit` | save the session and exit |
