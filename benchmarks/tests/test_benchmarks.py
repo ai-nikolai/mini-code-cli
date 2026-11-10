@@ -1074,3 +1074,20 @@ class ReportingKeyTests(unittest.TestCase):
                             "base_url": "http://x:1"}],
                 "agents": [{"name": "mini-code"}],
             })
+
+
+class TbSifDefinitionTests(unittest.TestCase):
+    def test_apt_is_forced_to_ipv4(self):
+        from benchmarks.suites.tb_apptainer import render_def
+
+        text = render_def("example/image:tag", "/tmp/mini_code_cli")
+        self.assertIn("Acquire::ForceIPv4=true", text)
+        self.assertIn("python3-venv", text)
+        self.assertIn("/opt/harbor-server", text)
+
+    def test_alpine_gets_a_virtualenv_fallback(self):
+        from benchmarks.suites.tb_apptainer import render_def
+
+        text = render_def("example/image:tag")
+        self.assertIn("py3-virtualenv", text)
+        self.assertIn("command -v virtualenv", text)

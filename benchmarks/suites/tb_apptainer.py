@@ -70,11 +70,15 @@ def render_def(image, mini_code_dir=None):
         # APT::Sandbox::User=root matters under --fakeroot: apt otherwise drops
         # to the _apt user, which fakeroot cannot switch to, and the build hangs
         # on the first `apt-get update` (observed: a 35-minute stall).
-        "        APT_OPTS='-o APT::Sandbox::User=root -o Acquire::http::Timeout=20 -o Acquire::Retries=1'",
+        # ForceIPv4: the CPU nodes resolve archive.ubuntu.com to IPv6 first, the
+        # route is unavailable, and apt then cannot install python3 at all.
+        "        APT_OPTS='-o APT::Sandbox::User=root -o Acquire::ForceIPv4=true "
+        "-o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "
+        "-o Acquire::Retries=3'",
         "        apt-get $APT_OPTS update -qq || true",
         f"        apt-get $APT_OPTS install -y -qq {' '.join(POST_INSTALL)} || true",
         "    elif command -v apk >/dev/null 2>&1; then",
-        "        apk add --no-cache python3 py3-pip bash curl git tmux || true",
+        "        apk add --no-cache python3 py3-pip py3-virtualenv bash curl git tmux || true",
         "    fi",
         "    # harbor's singularity backend wants a ready server venv here; the SIF",
         "    # is read-only, and its --writable-tmpfs layer does not survive the",
@@ -85,7 +89,9 @@ def render_def(image, mini_code_dir=None):
         f"        /usr/bin/python3 -m pip install -q --break-system-packages "
         f"{' '.join(PIP_FOR_AGENT)} 2>/dev/null || "
         f"/usr/bin/python3 -m pip install -q {' '.join(PIP_FOR_AGENT)} || true",
-        "        /usr/bin/python3 -m venv /opt/harbor-server || true",
+        "        /usr/bin/python3 -m venv /opt/harbor-server || "
+        "(command -v virtualenv >/dev/null && "
+        "virtualenv -p /usr/bin/python3 /opt/harbor-server) || true",
         "        /opt/harbor-server/bin/pip install -q --upgrade pip || true",
         "        /opt/harbor-server/bin/pip install -q uvicorn fastapi || true",
         "    fi",
@@ -152,26 +158,52 @@ def cache_key(image, definition_text, mini_code_dir=None):
 
 
 def build_sif(apptainer, definition, sif_path, log_path, env=None, force=False,
-              timeout=3_600):
-    """``apptainer build --fakeroot`` one definition; returns ``(ok, message)``."""
+              timeout=10_800):
+    """``apptainer build --fakeroot`` one definition; returns ``(ok, message)``.
+
+    ``timeout`` is deliberately generous: a few Terminal-Bench images spend over
+    an hour in apt/build. If the failure is Apptainer's own fakeroot command
+    (common with Alpine/musl images), retry once with
+    ``--ignore-fakeroot-command``; that uses only the root-mapped namespace.
+    """
     if os.path.isfile(sif_path) and not force:
         return True, "cached"
     os.makedirs(os.path.dirname(os.path.abspath(sif_path)) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(log_path)) or ".", exist_ok=True)
+
+    def run(argv, mode):
+        with open(log_path, mode, encoding="utf-8") as handle:
+            handle.write(f"$ {' '.join(argv)}\n")
+            handle.flush()
+            try:
+                return subprocess.run(argv, stdout=handle,
+                                      stderr=subprocess.STDOUT, env=env,
+                                      timeout=timeout)
+            except (OSError, subprocess.SubprocessError) as e:
+                return e
+
     argv = [apptainer, "build", "--fakeroot"]
     if force:
         argv.append("--force")            # apptainer refuses to clobber otherwise
     argv += [sif_path, definition]
-    os.makedirs(os.path.dirname(os.path.abspath(log_path)) or ".", exist_ok=True)
-    with open(log_path, "w", encoding="utf-8") as handle:
-        handle.write(f"$ {' '.join(argv)}\n")
-        handle.flush()
-        try:
-            result = subprocess.run(argv, stdout=handle, stderr=subprocess.STDOUT,
-                                    env=env, timeout=timeout)
-        except (OSError, subprocess.SubprocessError) as e:
-            return False, f"apptainer build failed: {e}"
+    result = run(argv, "w")
+    if isinstance(result, Exception):
+        return False, f"apptainer build failed: {result}"
+
     if result.returncode != 0:
-        return False, f"apptainer build exited {result.returncode} (see {log_path})"
+        try:
+            with open(log_path, encoding="utf-8") as handle:
+                text = handle.read().lower()
+        except OSError:
+            text = ""
+        if "fakeroot failed" in text or "ignore-fakeroot-command" in text:
+            retry = [apptainer, "build", "--fakeroot",
+                     "--ignore-fakeroot-command", "--force", sif_path, definition]
+            result = run(retry, "a")
+            if isinstance(result, Exception):
+                return False, f"apptainer build failed: {result}"
+        if result.returncode != 0:
+            return False, f"apptainer build exited {result.returncode} (see {log_path})"
     return True, "built"
 
 
@@ -218,15 +250,7 @@ def prepare(dataset_dir, out_dir, sif_cache, limit=None, task_ids=(),
         except OSError:
             cached_key = None
         if os.path.isdir(os.path.join(target, "task.toml")) and \
-                os.path.isfile(sif) and (cached_key in (None, key)) and not force:
-            # A cache from before key sidecars existed is accepted once and then
-            # labelled, so the next definition/package change is detected.
-            if cached_key != key:
-                try:
-                    with open(key_path, "w", encoding="utf-8") as handle:
-                        handle.write(key + "\n")
-                except OSError:
-                    pass
+                os.path.isfile(sif) and cached_key == key and not force:
             return {"task": name, "status": "cached", "sif": sif,
                     "dir": target, "image": image}
         with open(definition, "w", encoding="utf-8") as handle:
