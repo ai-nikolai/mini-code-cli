@@ -105,6 +105,10 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   transcript; a failing summariser call never corrupts the segment).
 - **`test_subagents.py`** — sub-agent delegation, isolation of the child session, the
   `report.md` channel and the intersection of child permissions with the parent's.
+- **`test_advanced_features.py`** — the scratchpad (`SCRATCHPAD.md` + prompt), the
+  compaction-strategy registry and message shapes (`summarise` / `predict-files` /
+  `predict-messages`), and the planning strategies (`plan-verify-step` / `plan-verify` /
+  `open-plan`).
 
 This keeps the tool honest as it grows, and makes it safe to experiment with riskier features
 (like `--enable-shell`) without regressions.

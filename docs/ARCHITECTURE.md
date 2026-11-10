@@ -23,7 +23,7 @@ suite.
 | --- | --- |
 | `agent_loop.py` | CLI entry point (`main`, `parse_args`), the `AgentSession` loop, history compaction, plan-mode hooks, sub-agent delegation wiring. Re-exports a few helpers through `__all__` for the test suite. |
 | `config.py` | Process-wide defaults (cache location, model URL, timeouts) plus the model context-window table and the token-based compaction budget (`compaction_budget`). History compaction is triggered by tokens only -- there is no message-count limit. Shared by every module to avoid import cycles. |
-| `prompts.py` | Builds the system prompt (tool list, allowed-dir note, plan-mode instructions) and the compaction/summary prompt. |
+| `prompts.py` | Builds the system prompt (tool list, allowed-dir note, plan-mode / open-plan / scratchpad instructions) and the compaction / plan / strategy prompts. |
 | `tools.py` | The tool *functions* the model can call (`read_file`, `write_file`, `edit`, `grep`, `glob`, `web_search`, `read_website`, `run_shell_command`) plus `util_get_tools` / `util_get_tools_dict` which introspect their signatures into an OpenAI-style tool schema. Every tool returns a string and never raises; optional parameters (a line range for `read_file`, `recursive`/`include` for `grep`, `root` for `glob`, `replace_all` for `edit`, `cwd` for the shell, ...) all have safe defaults, and the schema type is inferred from a parameter's annotation *or* its default so integer/boolean knobs are not advertised as strings. |
 | `persistence.py` | Everything about session histories on disk: `history_{n}.json` segments, the flat `summary_history.json` recorder, per-segment `usage_{n}.json` + `total_usage.json`, atomic JSON writes, segment listing/cleanup (`history_segment_indices`, `delete_segments_above`) and the restore/`find_last_session` helpers. The loaders never raise (they report `None`/zeros), and a restore accepts *only* the layout described below. |
 | `sandbox.py` | The `--allowed-dir` filesystem sandbox (`is_within_allowed_dir`, `tool_paths_are_allowed`), using `os.path.realpath` to defeat symlinks / `..`. |
@@ -31,6 +31,9 @@ suite.
 | `runner.py` | `call_function_with_timeout` -- runs a tool with a hard wall-clock limit via `SIGALRM`. |
 | `shell_safety_utils.py` | Heuristic classifier that sorts shell commands into DENY / ASK / ALLOW tiers. |
 | `plan.py` | Plan-mode bookkeeping: reads/writes `CURRENT_GOAL.md` and `CURRENT_PLAN.md`. Every method is a no-op when disabled. |
+| `planning.py` | The planning-strategy names (`plan-verify-step`, `plan-verify`, `open-plan`) shared by the CLI and the loop. |
+| `compaction.py` | The compaction-strategy registry (`summarise`, `predict-files`, `predict-messages`), the index parser/selector used by `predict-messages`, and the char cap that stops a strategy refilling the context. |
+| `agent_files.py` | Agent-owned files under `--allowed-dir/.mini`: the optional scratch-pad (`SCRATCHPAD.md`) and the `open-plan` document (`PLAN.md`). Created best-effort; the normal file tools reach them through the sandbox. |
 | `ui.py` | The whole terminal renderer (banner, turns, notes, permission box, the "… thinking" spinner, transient/non-scrolling tool-call region, history views). Stdlib only; degrades gracefully to ASCII / no-colour. |
 | `tokens.py` | Token accounting: `estimate_messages_tokens`, `project_input_tokens` (the projection that drives compaction) and `accumulate_usage`. Stdlib only, no I/O, so the budget maths is unit-testable. |
 | `skills.py` | The optional skills feature (`--skills`): the `.mini` directory of `skill.md` files, the `SKILLS.md` summary, and the `list_skills` / `read_skill` / `create_skill` / `run_skill` tools. Script execution stays inside the skill directory and is never run through a shell. |
@@ -257,10 +260,14 @@ small:
   tokens plus the reply reserve against `config.compaction_budget`; the message count is
   deliberately not consulted. The replacement transcript is the system prompt, any
   **standing messages** that must not be summarised (the `--agent-md` preamble, passed as
-  `preserve`), the summary, any plan-mode goal/plan, and then the **turn still in flight**
+  `preserve`), the summary, any strategy extras (`--compaction-strategy`), any plan-mode
+  goal/plan, and then the **turn still in flight**
   (`_in_flight_tail`): the user message being answered, or the tool exchange the model is
   waiting on. The tail scan skips user turns the loop injected itself (plan authoring and
   plan review), so a plan generated just before a rollover is never mistaken for the request.
+  `predict-files` inserts a read-only `assistant(tool_calls)` + `tool` exchange after the
+  summary; `predict-messages` inserts original messages selected by 0-based index. Both are
+  capped and degrade to the plain summary on any failure.
   Summarising the in-flight turn away would make the model answer the summary instead of the
   request -- and the typed line would never reach the new segment, the recorder or a restore.
   The console is the only record a user gets of the rollover, so every compaction note is

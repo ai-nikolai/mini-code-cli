@@ -35,6 +35,9 @@ from .utils import oneline, plural
 from . import ui
 from . import subagents
 from . import skills
+from . import agent_files
+from . import compaction as compaction_mod
+from . import planning
 from . import plan as plan_utils
 from . import tokens as tokens_mod
 from .config import (
@@ -154,7 +157,13 @@ def parse_args():
     parser.add_argument("--llm-timeout", type=int, default=DEFAULT_HTTP_TIMEOUT, help=f"HTTP timeout in seconds for LLM requests (reasoning models can be slow). default={DEFAULT_HTTP_TIMEOUT}")
     parser.add_argument("--tool-timeout", type=int, default=DEFAULT_TOOL_TIMEOUT, help=f"Timeout in seconds for a single tool call. default={DEFAULT_TOOL_TIMEOUT}")
     parser.add_argument("--max-context-tokens", type=int, default=None, help="Input-token budget before the conversation is compacted into a summary. This is the primary compaction trigger: it is compared against the projected size of the next request (the server-reported prompt tokens, plus an estimate for whatever was appended since) plus the output reserve (--max-tokens, or a default). Unset (default): derived from the model's context window minus the output reserve and a safety margin, falling back to a conservative window for unknown models. Lower it to compact sooner.")
+    parser.add_argument("--compaction-strategy", choices=compaction_mod.strategy_choices(),
+                        default=compaction_mod.DEFAULT_COMPACTION_STRATEGY,
+                        help="How to compact history. summarise: summary only (default). predict-files: summary + re-read the files the model predicts it needs. predict-messages: summary + the original messages the model predicts are worth keeping.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
+    parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
+                        help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+    parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo")
     parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --load-last-session")
@@ -174,6 +183,11 @@ def parse_args():
 
     if args.all_last:
         args.load_last_session = True
+
+    # A planning strategy is only meaningful in plan mode, so asking for one
+    # implies the flag (the banner and help then agree with the session).
+    if getattr(args, "plan_strategy", None):
+        args.plan = True
 
     return args
 
@@ -333,7 +347,9 @@ def _in_flight_tail(messages):
 
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
-                  current_tokens=None, plan_hook=None, console=None, preserve=()):
+                  current_tokens=None, plan_hook=None, console=None, preserve=(),
+                  strategy=compaction_mod.DEFAULT_COMPACTION_STRATEGY,
+                  prediction_hook=None):
     """Compact the conversation history once it no longer fits the context window.
 
     Long (especially auto-mode) sessions can overflow the model's context window.
@@ -367,6 +383,14 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
     ``--agent-md`` preamble, which is a user turn rather than part of the system
     prompt). Without it a compaction could summarise away the file's standing
     instructions.
+
+    ``strategy`` selects what else survives besides the summary (see
+    :mod:`mini_code_cli.compaction`). ``prediction_hook`` is the owning
+    session's ``(strategy, context) -> messages`` callback: it performs the
+    strategy's LLM call / tool execution and returns the messages to insert
+    after the summary, before the plan hook and the in-flight tail. A strategy
+    failure (network, bad prediction) is reported and degrades to a plain
+    summary; it never breaks the rollover.
     """
     # ``console`` defaults to None so callers may omit it, but every branch below
     # reports through a console. Falling back to the shared one keeps the
@@ -456,6 +480,24 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
             "role": "user",
             "content": f"Here is a summary of our earlier conversation so far:\n{summary}",
         })
+
+        # Strategy-specific context goes right after the summary and before the
+        # plan and the in-flight turn: system, summary, predicted tools/messages,
+        # plan, current instruction.
+        if strategy and strategy != compaction_mod.SUMMARISE and prediction_hook is not None:
+            context = compaction_mod.CompactionContext(
+                summary=summary, messages=messages, tail=tail,
+                predict_files=lambda ctx: prediction_hook(strategy, ctx),
+                predict_messages=lambda ctx: prediction_hook(strategy, ctx),
+            )
+            try:
+                extra = compaction_mod.build_extra_messages(strategy, context)
+            except Exception as exc:  # noqa: BLE001 - never break a rollover
+                console.note(
+                    f"Could not apply compaction strategy {strategy!r}: {exc}. "
+                    f"Keeping the summary alone.", "warn")
+                extra = []
+            compacted.extend(dict(message) for message in extra)
 
         # The turn in flight has to survive the rollover. Compaction runs at the
         # *start* of a step, so ``messages`` normally ends with the user message
@@ -559,7 +601,28 @@ class AgentSession:
         # turn). maybe_compact re-inserts them after the system prompt.
         self._persistent_messages = []
 
-        self.plan_mode = bool(getattr(self.args, "plan", False))
+        # Feature strategies. A --plan-strategy implies plan mode (asking for a
+        # planning strategy without planning would otherwise silently do
+        # nothing), while the plain --plan flag keeps the original strategy.
+        requested_plan_strategy = getattr(self.args, "plan_strategy", None)
+        self.plan_strategy = requested_plan_strategy or planning.DEFAULT_PLAN_STRATEGY
+        if self.plan_strategy not in planning.PLAN_STRATEGIES:
+            self.console.note(
+                f"Unknown plan strategy {self.plan_strategy!r}; using "
+                f"{planning.DEFAULT_PLAN_STRATEGY}.", "warn")
+            self.plan_strategy = planning.DEFAULT_PLAN_STRATEGY
+        self.plan_mode = (bool(getattr(self.args, "plan", False))
+                          or requested_plan_strategy is not None)
+
+        self.scratchpad = bool(getattr(self.args, "scratchpad", False))
+        self.compaction_strategy = getattr(
+            self.args, "compaction_strategy",
+            compaction_mod.DEFAULT_COMPACTION_STRATEGY)
+        if not compaction_mod.is_strategy(self.compaction_strategy):
+            self.console.note(
+                f"Unknown compaction strategy {self.compaction_strategy!r}; using "
+                f"{compaction_mod.DEFAULT_COMPACTION_STRATEGY}.", "warn")
+            self.compaction_strategy = compaction_mod.DEFAULT_COMPACTION_STRATEGY
 
         # The good-bye box is printed once, from shutdown(). Several exits
         # funnel through there (quit, exit, EOF, a /quit command) and a repeated
@@ -695,6 +758,7 @@ class AgentSession:
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
+        self._prepare_agent_files()
 
         self.history_index = 0
         self.summary = []
@@ -775,6 +839,7 @@ class AgentSession:
             self.session_dir = restore_directory
             self.plan_manager = plan_utils.PlanManager(
                 self.session_dir, enabled=self.plan_mode)
+            self._prepare_agent_files()
             self.messages = restored
             self.summary = records
             self.history_index = int(loaded_index)
@@ -898,16 +963,40 @@ class AgentSession:
             self.llm_tools.extend(skills.get_skills_file_tools(self.allowed_dir))
 
 
+    def _prepare_agent_files(self):
+        """Create the opt-in agent-owned files under ``--allowed-dir/.mini``.
+
+        Called for a fresh *and* a restored session so the promise in the
+        system prompt is true from the first turn: the agent can read/write the
+        scratch-pad and the open-plan document with ordinary file tools.
+        Best-effort -- a read-only allowed dir must not stop the CLI.
+        """
+        if self.scratchpad:
+            path = agent_files.ensure_scratchpad(self.allowed_dir)
+            self.console.note(f"Scratch-pad: {path}", "info")
+        if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
+            path = agent_files.ensure_open_plan(self.allowed_dir)
+            self.console.note(f"Open-plan document: {path}", "info")
+
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
         if self.args.system_prompt:
             system_prompt = self.args.system_prompt
         else:
+            scratch_path = (agent_files.scratchpad_path(self.allowed_dir)
+                            if self.scratchpad else None)
+            open_plan_path = None
+            if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
+                open_plan_path = agent_files.open_plan_path(self.allowed_dir)
             system_prompt = prompts.system_prompt(
                 tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
                 plan_mode=self.plan_mode,
                 skills_dir=self.allowed_dir if self.enable_skills else None,
                 session_dir=self.session_dir,
+                scratchpad_path=scratch_path,
+                scratchpad_dir=(agent_files.mini_dir(self.allowed_dir)
+                                if self.scratchpad else None),
+                open_plan_path=open_plan_path,
             )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -1488,14 +1577,30 @@ class AgentSession:
         ``skip_plan`` is set by ``/skip-plan PROMPT``: the turn is sent normally,
         but no plan is authored or reviewed for it (plan mode itself stays on for
         later turns).
+
+        The planning *strategy* changes the plan/review wiring only:
+
+          * ``plan-verify-step`` (default) -- current behaviour: author a plan,
+            review it when the work settles, then run one extra step and keep
+            whatever that step says.
+          * ``plan-verify`` -- same plan and review, but the post-review step is
+            kept only when it calls a tool. A no-tool response is shown to the
+            user and ends the turn without being appended.
+          * ``open-plan`` -- the agent owns a plan document and maintains it
+            itself; the loop neither authors nor reviews a plan.
         """
         self.messages.append({"role": "user", "content": user_input})
 
         if self.plan_mode and not skip_plan:
-            self.console.note("Generating plan for agent.", "info")
             self._record_goal_request(user_input)
-            self._generate_plan_and_inject(user_input)
-            self.console.note("Plan generated.", "info")
+            if self.plan_strategy == planning.OPEN_PLAN:
+                self.console.note(
+                    "Open-plan mode: the agent maintains its own plan document.",
+                    "info")
+            else:
+                self.console.note("Generating plan for agent.", "info")
+                self._generate_plan_and_inject(user_input)
+                self.console.note("Plan generated.", "info")
         elif self.plan_mode and skip_plan:
             self.console.note(
                 "Skipping plan generation and review for this prompt.", "warn")
@@ -1508,15 +1613,19 @@ class AgentSession:
                     "Continuing with LLM calls until no more tool calls.", "info")
                 continue
             self.console.note("LLM seems to have to an end of the task.", "info")
-            if not self.plan_mode or skip_plan:
+            if (not self.plan_mode or skip_plan
+                    or self.plan_strategy == planning.OPEN_PLAN):
                 return
             self.console.note("Reviewing the plan, if everything is done.", "info")
             self._review_plan_completion()
             self._persist()
-            # One more step so the review can drive further work. Persist before
-            # deciding so the review step's messages are recorded even when it
-            # ends the turn (a no-tool-call reply must never be left unsaved).
-            should_continue = self._step()
+            # One more step so the review can drive further work. plan-verify
+            # deliberately does not append a no-tool final step: it is shown to
+            # the user and ends the turn, while a tool-calling step is kept and
+            # the loop continues normally. Persist before deciding so the
+            # review step's messages are recorded even when it ends the turn.
+            keep_final = self.plan_strategy != planning.PLAN_VERIFY
+            should_continue = self._step(keep_final_response=keep_final)
             self._persist()
             if not should_continue:
                 return
@@ -1728,18 +1837,21 @@ class AgentSession:
         should act on -- ``maybe_compact`` then appends the in-flight turn, which
         is the same instruction verbatim.
         """
-        plan_text = self.plan_manager.read_plan()
+        if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
+            plan_text = agent_files.read_text(
+                agent_files.open_plan_path(self.allowed_dir), limit=8000)
+            plan_label = ("Your open-plan document (from .mini/PLAN.md):\n")
+        else:
+            plan_text = self.plan_manager.read_plan()
+            plan_label = ("Here is the current plan for the active goal "
+                          "(from CURRENT_PLAN.md):\n")
         goal_text = self.plan_manager.read_goal()
 
         # Recover the user's latest instruction from the *in-flight turn* -- not
         # from ``messages``, which by now holds the summary -- so a session that
         # compacts before its goal was recorded still restates the real
         # instruction instead of the summary text.
-        current_input = None
-        for m in reversed(list(tail or ())):
-            if m.get("role") == "user" and not _is_loop_injected(m):
-                current_input = m.get("content")
-                break
+        current_input = self._tail_instruction(tail)
         if current_input and not goal_text:
             self.plan_manager.write_goal(current_input)
             goal_text = self.plan_manager.read_goal()
@@ -1747,13 +1859,149 @@ class AgentSession:
         rebuilt = list(messages)
         if plan_text and plan_text.strip():
             rebuilt.append({"role": "user",
-                            "content": f"Here is the current plan for the active goal (from CURRENT_PLAN.md):\n{plan_text}"})
+                            "content": plan_label + plan_text})
         if goal_text and goal_text.strip():
             rebuilt.append({"role": "user",
                             "content": f"The current goal / latest user instruction (from CURRENT_GOAL.md):\n{goal_text}"})
         elif current_input:
             rebuilt.append({"role": "user", "content": current_input})
         return rebuilt
+
+    @staticmethod
+    def _tail_instruction(tail):
+        """The real user instruction in the in-flight tail (not loop text)."""
+        for message in reversed(list(tail or ())):
+            if (isinstance(message, dict) and message.get("role") == "user"
+                    and not _is_loop_injected(message)):
+                return message.get("content") or ""
+        return ""
+
+    # -- compaction strategies --------------------------------------------
+
+    def _compaction_prediction_hook(self, strategy, context):
+        """Session callback used by ``maybe_compact`` for a strategy's extras."""
+        if strategy == compaction_mod.PREDICT_FILES:
+            return self._predict_compaction_files(context)
+        if strategy == compaction_mod.PREDICT_MESSAGES:
+            return self._predict_compaction_messages(context)
+        return []
+
+    def _predict_compaction_files(self, context):
+        """Run the ``predict-files`` strategy: summary + predicted reads.
+
+        The prediction is a tool-enabled LLM call, but only read-only tools are
+        advertised (and filtered) so a compaction can never modify the
+        workspace. The predicted calls are executed against a local message
+        list, giving a valid ``assistant(tool_calls)`` + ``tool`` exchange that
+        is inserted after the summary.
+        """
+        read_only = set(compaction_mod.READ_ONLY_TOOLS)
+        read_tools = [tool for tool in self.llm_tools
+                      if (tool.get("function") or {}).get("name") in read_only]
+        if not read_tools:
+            self.console.note(
+                "Compaction: no read-only tools available for predict-files.",
+                "warn")
+            return []
+        instruction = self._tail_instruction(context.tail)
+        prompt = prompts.compaction_predict_files_prompt(
+            context.summary, instruction)
+        self.console.note("Compaction: predicting files to re-read...", "info")
+        self.console.start_thinking("predicting files")
+        try:
+            response, tool_calls, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=1024,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    tools=read_tools,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                ))
+        except Exception as exc:
+            self.console.note(
+                f"Could not predict files after compaction: {exc}", "warn")
+            return []
+        finally:
+            self.console.stop_thinking()
+
+        # Bill the prediction to the segment being closed; _bill_compaction
+        # folds the delta into the session total before the rollover zeroes it.
+        accumulate_usage(self.token_stats, usage)
+        calls = []
+        for call in tool_calls or ():
+            if not isinstance(call, dict):
+                continue
+            name = (call.get("function") or {}).get("name")
+            if name in read_only:
+                calls.append(call)
+        calls = calls[:compaction_mod.MAX_PREDICTED_FILE_CALLS]
+        if not calls:
+            self.console.note(
+                "Compaction: the model did not request any files to re-read.",
+                "info")
+            return []
+
+        self.token_stats["tool_calls"] += len(calls)
+        assistant = {"role": "assistant", "content": response or "",
+                     "tool_calls": calls}
+        predicted = [assistant]
+        saved_messages = self.messages
+        try:
+            self.messages = predicted
+            self._run_tool_calls(calls)
+        except Exception as exc:  # noqa: BLE001 - fall back to the summary
+            self.console.note(
+                f"Could not run predicted file reads: {exc}", "warn")
+            return []
+        finally:
+            self.messages = saved_messages
+        self.console.note(
+            f"Compaction: re-read {len(calls)} predicted file call(s).", "info")
+        return compaction_mod.cap_messages(predicted)
+
+    def _predict_compaction_messages(self, context):
+        """Run ``predict-messages``: summary + the messages worth keeping."""
+        prompt = prompts.compaction_keep_prompt(context.messages, context.summary)
+        self.console.note("Compaction: predicting messages to keep...", "info")
+        self.console.start_thinking("predicting messages")
+        try:
+            response, _, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=256,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                ))
+        except Exception as exc:
+            self.console.note(
+                f"Could not predict messages after compaction: {exc}", "warn")
+            return []
+        finally:
+            self.console.stop_thinking()
+
+        accumulate_usage(self.token_stats, usage)
+        indexes = compaction_mod.parse_keep_indexes(response)
+        preserved = {id(message) for message in self._persistent_messages}
+        exclude = {index for index, message in enumerate(context.messages)
+                   if (not isinstance(message, dict)
+                       or message.get("role") == "system"
+                       or _is_loop_injected(message)
+                       or id(message) in preserved)}
+        kept = compaction_mod.select_messages(
+            context.messages, indexes, tail=context.tail, exclude=exclude)
+        if not kept:
+            self.console.note(
+                "Compaction: no original messages were kept.", "info")
+            return []
+        self.console.note(
+            f"Compaction: kept {plural(len(kept), 'original message')}.", "info")
+        return compaction_mod.cap_messages(kept)
 
     def _is_report_file(self, name, tool_params):
         """Whether a write targets this session's own sub-agent report.md.
@@ -1923,7 +2171,14 @@ class AgentSession:
         if not self.plan_mode:
             self.console.note("Plan mode is not enabled (--plan).", "warn")
             return
-        status = self.plan_manager.read_current_status()
+        if self.plan_strategy == planning.OPEN_PLAN:
+            path = agent_files.open_plan_path(self.allowed_dir)
+            content = agent_files.read_text(path) or "(the plan document is empty)"
+            status = (f"# Agent plan ({path})\n\n{content.strip()}\n\n"
+                      f"# Current goal\n\n"
+                      f"{(self.plan_manager.goal or '(no goal set)').strip()}")
+        else:
+            status = self.plan_manager.read_current_status()
         if status is None:
             self.console.note("No plan information available for this session.", "warn")
             return
@@ -2236,10 +2491,16 @@ class AgentSession:
 
     # -- single LLM turn ---------------------------------------------------
 
-    def _step(self):
+    def _step(self, keep_final_response=True):
         """Run a single LLM turn: call the model, render its text, run its tool
         calls. Returns True if the LLM made tool calls and we're in auto-mode,
-        signalling the loop to continue without asking the user."""
+        signalling the loop to continue without asking the user.
+
+        ``keep_final_response=False`` is the ``plan-verify`` strategy's final
+        check: a step that makes no tool calls is still shown to the user, but
+        is not appended to the transcript (and not recorded). A step that does
+        call tools is kept normally.
+        """
         # Keep long sessions within the model's context window. Compaction
         # rolls the session over to a fresh history segment (history_index + 1)
         # and returns that bump so the recorder can stay flat across it.
@@ -2257,6 +2518,8 @@ class AgentSession:
             plan_hook=self._handle_compaction if self.plan_mode else None,
             console=self.console,
             preserve=self._persistent_messages,
+            strategy=self.compaction_strategy,
+            prediction_hook=self._compaction_prediction_hook,
         )
         # The compaction call itself was billed to the segment that is being
         # closed, so fold its delta into the session total here (the rollover
@@ -2361,10 +2624,16 @@ class AgentSession:
             assistant_message["tool_calls"] = tool_calls
         if reasoning_content is not None:
             assistant_message["reasoning_content"] = reasoning_content
+        dropped_final = not keep_final_response and not tool_calls
         self.messages.append(assistant_message)
 
         if tool_calls:
             self._run_tool_calls(tool_calls)
+        elif dropped_final:
+            # plan-verify: the final no-tool answer is a verification check, not
+            # a transcript turn. It has already been printed for the user; do
+            # not store it (or record it) as part of the conversation.
+            self.messages.pop()
 
         if not response_text and not made_tool_calls:
             self.console.note("Warning: no response was given by the LLM.", "error")
@@ -2386,7 +2655,11 @@ class AgentSession:
         # recorder was already seeded for the new segment above, so this becomes
         # that segment's next turn (assistant / tool call), pointing at the
         # freshly appended message -- the end-of-turn snapshot /reset targets.
-        if tool_calls:
+        if dropped_final:
+            # The response was deliberately not appended; there is no message
+            # for a recorder turn to point at.
+            pass
+        elif tool_calls:
             self._record_turn(
                 f"tool call(s): {', '.join(tc.get('function', {}).get('name', '?') for tc in tool_calls)}",
                 self.messages)
