@@ -623,6 +623,11 @@ class AgentSession:
         self.plan_mode = (bool(getattr(self.args, "plan", False))
                           or requested_plan_strategy is not None)
 
+        # Whether this process continued a previous session. The session-id
+        # line uses it to show the context bar (there is already history to
+        # account for), and only then.
+        self.restored_session = False
+
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.compaction_strategy = getattr(
             self.args, "compaction_strategy",
@@ -871,6 +876,7 @@ class AgentSession:
             self.last_prompt_tokens = 0
             self.last_prompt_message_count = 0
             self._restore_usage_if_available(restore_directory)
+            self.restored_session = True
 
             # Continuing a session in place makes it the latest one again: keep
             # the pointer aimed at it so a later --load-last-session finds the
@@ -900,6 +906,7 @@ class AgentSession:
         self.last_prompt_tokens = 0
         self.last_prompt_message_count = 0
         self._persistent_messages = []
+        self.restored_session = False
         return False
 
     def _resolve_model(self, args):
@@ -1457,8 +1464,16 @@ class AgentSession:
         The id is rendered as an assistant-styled (green) turn carrying *only*
         the id in brackets, so the user can see / copy the id this conversation
         is being saved under without adding another line to the banner.
+
+        A divider line precedes it -- it is the first assistant-style line the
+        user sees. When a previous session was restored, the context bar rides
+        on this header too, so the occupancy of the history already loaded is
+        visible before the first reply.
         """
-        self.console.turn("Assistant", f"[{self.unique_id}]", accent="green")
+        self.console.divider()
+        badge = self._context_badge() if self.restored_session else None
+        self.console.turn("Assistant", f"[{self.unique_id}]", accent="green",
+                          badge=badge)
 
     def show_resume_choice(self):
         """Prompt for the resume choice and return its label.

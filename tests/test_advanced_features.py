@@ -393,6 +393,25 @@ class PromptStrategyTest(unittest.TestCase):
         self.assertIn("JSON array", keep)
 
 
+class SessionIdLineTest(_AdvancedCase):
+    def _session_output(self, restored=False):
+        session = self.new_session()
+        session.restored_session = restored
+        session._print_session_id()
+        return self.output()
+
+    def test_a_divider_precedes_the_first_assistant_style_line(self):
+        lines = self._session_output().splitlines()
+        assistant = next(i for i, line in enumerate(lines) if "Assistant" in line)
+        divider = lines[assistant - 1].strip()
+        self.assertTrue(divider)
+        self.assertEqual(set(divider), {"-"})
+
+    def test_the_context_bar_is_shown_only_for_a_restored_session(self):
+        self.assertNotIn("%", self._session_output(restored=False))
+        self.assertRegex(self._session_output(restored=True), r"\d+%")
+
+
 class WelcomeBannerTest(_AdvancedCase):
     def _welcome(self, **overrides):
         args = make_args(self.workdir, self.cache_dir,
