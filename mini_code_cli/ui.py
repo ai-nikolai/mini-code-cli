@@ -100,6 +100,10 @@ class Console:
         # actually owns the terminal -- the human-facing one. It is None for a
         # normal console, in which case input is read directly below.
         self.parent_console = parent_console
+        # Bytes read by the multi-line editor but not consumed (the LF of a
+        # CRLF, or a key that arrived right after Enter). It lives on the
+        # console so it survives into the next read_line call.
+        self._input_pending = []
         self._color = color
         self._unicode = unicode
         self._width = width
@@ -717,8 +721,12 @@ class Console:
         self.emit(self.style("Type /reset %s to rewind here." % turn, dim=True, fg="cyan"))
 
     def welcome(self, version, session_id, cache_dir, allowed_dir,
-                server_url, model, permission_mode, agent_mode, shell_mode):
+                server_url, model, permission_mode, agent_mode, shell_mode,
+                compaction_strategy=None, plan_strategy=None, plan_mode=False):
         """Render the startup info banner."""
+        planning = plan_strategy or "plan-verify-step"
+        if not plan_mode:
+            planning += " (plan mode off)"
         lines = [
             f"version     : v{version}",
             f"session id  : {session_id}",
@@ -730,6 +738,8 @@ class Console:
             f"permissions : {permission_mode}",
             f"agent mode  : {agent_mode}",
             f"shell       : {shell_mode}",
+            f"compaction  : {compaction_strategy or 'summarise'}",
+            f"planning    : {planning}",
         ]
         self.banner(f"MiniCodeCLI v{version}", lines, fg="cyan")
 
@@ -777,12 +787,18 @@ class Console:
                   "warn")
 
     # -- interactive input --------------------------------------------------
-    def read_line(self, prompt_text=""):
-        """Print an (already-styled) prompt and read one line from stdin.
+    def read_line(self, prompt_text="", multiline=False):
+        """Print an (already-styled) prompt and read input from stdin.
 
         Returns the typed text, or ``None`` on EOF / Ctrl-C. Routing every
         interactive prompt (the "You:" line, permission answers, ...) through
         the console keeps all input handling in one place.
+
+        ``multiline=True`` uses a small TTY line editor: Enter sends, while
+        Shift+Enter (and Ctrl-J / LF) inserts a newline. Terminals that encode
+        Shift+Enter as the CSI-u sequence ``\x1b[13;2u`` (or the xterm
+        modifyOtherKeys variant) are recognised; on a non-TTY stdin it falls
+        back to a normal ``input()`` line.
         """
         if self.parent_console is not None:
             # A swallowed console (e.g. a sub-agent's) has its output redirected
@@ -790,11 +806,136 @@ class Console:
             # through the console that actually owns the screen. The prompt
             # string carries its own styling, so it renders identically here or
             # there.
-            return self.parent_console.read_line(prompt_text)
+            return self.parent_console.read_line(prompt_text, multiline=multiline)
+        if multiline:
+            try:
+                return self._read_multiline(prompt_text)
+            except (EOFError, KeyboardInterrupt):
+                return None
         try:
             return input(prompt_text)
         except (EOFError, KeyboardInterrupt):
             return None
+
+    def _read_multiline(self, prompt_text=""):
+        """Read one (possibly multi-line) turn from a TTY.
+
+        Uses termios only for the duration of the prompt. Enter (CR) submits;
+        LF / Ctrl-J / the Shift+Enter CSI-u sequence insert a newline. Ctrl-C
+        still raises KeyboardInterrupt (ISIG stays enabled), and the original
+        terminal settings are restored in ``finally``. Anything that is not a
+        TTY (tests, pipes, Windows without termios) falls back to ``input()``.
+        """
+        import codecs
+        import select
+
+        try:
+            import termios
+        except ImportError:  # pragma: no cover - Windows
+            return input(prompt_text)
+        try:
+            if not sys.stdin.isatty():
+                return input(prompt_text)
+            fd = sys.stdin.fileno()
+            previous = termios.tcgetattr(fd)
+        except (AttributeError, OSError, ValueError, termios.error):
+            return input(prompt_text)
+
+        attrs = termios.tcgetattr(fd)
+        # Keep ISIG (so Ctrl-C still interrupts) and OPOST (normal newlines),
+        # but read key-by-key without canonical line buffering or echo. ICRNL
+        # and IXON are *input* flags: clear them there, so Enter stays CR (the
+        # submit key) and Ctrl-S/Ctrl-Q do not freeze the prompt.
+        attrs[0] &= ~(getattr(termios, "ICRNL", 0)
+                      | getattr(termios, "IXON", 0))
+        attrs[3] &= ~(termios.ICANON | termios.ECHO)
+        attrs[6][termios.VMIN] = 1
+        attrs[6][termios.VTIME] = 0
+
+        buffer = []
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+        def write(text):
+            self.stream.write(text)
+            self.stream.flush()
+
+        # Bytes read while peeking past a CR (to swallow a CRLF) but not
+        # consumed belong here, so the next key is never silently dropped --
+        # even when it arrives after this call has already returned.
+        pending = self._input_pending
+
+        def read_one():
+            if pending:
+                return pending.pop(0)
+            return os.read(fd, 1)
+
+        def read_escape():
+            """Read the rest of an escape sequence without waiting for lone Esc."""
+            sequence = b""
+            while len(sequence) < 12:
+                if not pending:
+                    ready, _w, _x = select.select([fd], [], [], 0.01)
+                    if not ready:
+                        break
+                sequence += read_one()
+                if sequence[-1:] in (b"u", b"~"):
+                    break
+            return sequence
+
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            write(prompt_text)
+            while True:
+                raw = read_one()
+                if not raw:  # EOF
+                    return None if not buffer else "".join(buffer)
+                if raw == b"\r":
+                    # Some terminals send CRLF; consume the LF so it does not
+                    # appear as a spurious empty line on the next prompt, but
+                    # push any other following byte back for the next read.
+                    if pending:
+                        nxt = read_one()
+                    else:
+                        ready = select.select([fd], [], [], 0.01)[0]
+                        nxt = os.read(fd, 1) if ready else b""
+                    if nxt not in (b"", b"\n"):
+                        pending.insert(0, nxt)
+                    write("\n")
+                    return "".join(buffer)
+                if raw == b"\n":       # Ctrl-J / terminals that send LF
+                    buffer.append("\n")
+                    write("\n... ")
+                    continue
+                if raw == b"\x1b":      # CSI-u / modifyOtherKeys Shift+Enter
+                    seq = read_escape()
+                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~")
+                            or b"13;2" in seq or b";2;13" in seq):
+                        buffer.append("\n")
+                        write("\n... ")
+                    continue
+                if raw in (b"\x7f", b"\b"):  # backspace
+                    if buffer and buffer[-1] != "\n":
+                        buffer.pop()
+                        write("\b \b")
+                    continue
+                if raw == b"\x03":      # Ctrl-C (if ISIG were disabled)
+                    raise KeyboardInterrupt
+                if raw == b"\x04":      # Ctrl-D
+                    if not buffer:
+                        return None
+                    continue
+                for char in decoder.decode(raw):
+                    if char == "\n":
+                        buffer.append(char)
+                        write("\n... ")
+                    elif char == "\t" or char.isprintable():
+                        buffer.append(char)
+                        write(char)
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+            except (OSError, ValueError, termios.error):
+                pass
 
     def _permission_prompt_and_answer(self, name, params_str, shell_cmd, tier, reason):
         """Draw the permission box and read the answer on the right console.

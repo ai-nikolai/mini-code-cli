@@ -6,9 +6,13 @@ model:
   * :func:`system_prompt` -- the top-of-session system prompt (tools, sandbox,
     plan/skills mode).
   * :func:`plan_instructions` -- the extra ``--plan`` mode block.
+  * :func:`open_plan_instructions` -- the ``--plan-strategy open-plan`` block
+    (the agent owns a plan document instead).
+  * :func:`scratchpad_instructions` -- the ``--scratchpad`` block.
   * :func:`skills_instructions` -- the ``--skills`` mode block.
   * :func:`compaction_prompt` -- the summarisation request used on history
-    compaction.
+    compaction, plus the ``predict-files`` / ``predict-messages`` strategy
+    prompts.
   * :func:`plan_prompt` -- the generation request used to *author* a plan for
     the current user instruction (see :func:`plan_instructions`).
   * :func:`plan_review_prompt` -- the completion-review request used once the
@@ -16,11 +20,15 @@ model:
     emit a summary (see :func:`plan_instructions`).
 """
 
+import os
+
 # ---------------------------------------------------------------------------
 # the system prompt
 # ---------------------------------------------------------------------------
 
-def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir=None, session_dir=None):
+def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir=None,
+                  session_dir=None, scratchpad_path=None, scratchpad_dir=None,
+                  open_plan_path=None):
     """
     Takes a list of tool names and returns a system prompt string.
 
@@ -28,6 +36,10 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
     running goal (CURRENT_GOAL.md) and plan (CURRENT_PLAN.md) in the session
     directory (see plan.py) for the human to inspect; the model does not author
     those files itself.
+
+    ``scratchpad_path`` enables the scratchpad block. ``open_plan_path`` selects
+    the open-plan strategy: the agent owns that document and maintains it with
+    the normal file tools instead of the loop authoring CURRENT_PLAN.md.
     """
 
     if tools_dict:
@@ -35,12 +47,17 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
         base_prompt = "You are a helpful AI assistant with access to the following tools (only):\n"
         end_prompt = (
         "Choose the most appropriate tool for the task at hand. "
+        "When you are not calling a tool, give a short, direct answer or status "
+        "update (a few sentences at most) instead of replying with a tool call "
+        "alone; the user should regularly see what you found or what you are "
+        "about to do. "
         "If a tool fails or you hit a limit, analyze the error and try a different approach. "
         "Be concise and efficient in your tool usage."
         )
     else:
         tool_descriptions = ""
-        base_prompt = "You are a helpful AI assistant without any tools."
+        base_prompt = ("You are a helpful AI assistant without any tools. "
+                       "Answer briefly and directly.")
         end_prompt = ""
 
 
@@ -53,14 +70,29 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
         skills_prompt = "\n" + skills_instructions(skills_dir)
 
     plan_mode_prompt = ""
-    if plan_mode:
+    if open_plan_path:
+        plan_mode_prompt = "\n" + open_plan_instructions(open_plan_path)
+    elif plan_mode:
         plan_mode_prompt = "\n" + plan_instructions(session_dir)
+
+    scratchpad_prompt = ""
+    if scratchpad_path:
+        scratchpad_prompt = "\n" + scratchpad_instructions(scratchpad_path,
+                                                            scratchpad_dir)
+
+    # The closing "do not create extra .md files" rule has an explicit
+    # exception for the agent-owned files this run advertises.
+    extra_files_note = ""
+    if scratchpad_path or open_plan_path:
+        extra_files_note = (" The scratch-pad and plan document files described "
+                            "above are explicit exceptions: create and update "
+                            "them as needed.")
 
 
     prompt = f"""
 {base_prompt}
-{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{skills_prompt}
-Important: Follow the user instruction. Do not create additional .md files (unless asked to do so). Do not create unit tests (unless asked to do so), etc.
+{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{scratchpad_prompt}{skills_prompt}
+Important: Follow the user instruction. Do not create additional .md files (unless asked to do so).{extra_files_note} Do not create unit tests (unless asked to do so), etc.
 """
     return prompt.strip()
 
@@ -103,6 +135,48 @@ def plan_instructions(session_dir=None):
         "out the plan. When asked to produce the plan, output concrete, ordered "
         "steps (markdown numbered list) that accomplish ONLY the current goal."
     )
+
+def open_plan_instructions(plan_path):
+    """The extra system-prompt block for the ``open-plan`` strategy.
+
+    Unlike the default plan mode, the loop does not author or review a plan
+    here: the agent owns the document at ``plan_path`` (inside ``--allowed-dir``)
+    and maintains it with the ordinary file tools. The loop still records the
+    goal and re-injects the document after a compaction, but it never runs a
+    planning or review request of its own.
+    """
+    return (
+        "OPEN PLAN MODE: You own the plan document at:\n"
+        f"{plan_path}\n"
+        "Read it before you start working, then keep it up to date as you go: "
+        "write a short numbered plan, mark steps DONE / TODO / IN-PROGRESS, and "
+        "add new steps when you discover work. Use read_file / write_file / edit "
+        "on that path (it is inside the directory you are allowed to operate in). "
+        "The loop will not generate or review a plan for you, and after a history "
+        "compaction it re-injects the document so you can keep working from it. "
+        "Keep the document focused on the current goal."
+    )
+
+
+def scratchpad_instructions(scratchpad_path, scratchpad_dir=None):
+    """The extra system-prompt block for ``--scratchpad``.
+
+    The agent may use the scratch-pad freely. It is an ordinary file inside
+    ``--allowed-dir``, so the normal file tools work; no special tool is needed.
+    """
+    directory = scratchpad_dir or os.path.dirname(scratchpad_path) or "."
+    return (
+        "SCRATCHPAD MODE: You have a scratch-pad directory at:\n"
+        f"{directory}\n"
+        f"The main scratch-pad file is: {scratchpad_path}\n"
+        "You may read and write it freely, and you may create additional "
+        "scratch-pad files in that directory (for example SCRATCH-NOTES.md, "
+        "SCRATCH-IDEAS.md). Use them for your own thoughts, plans, learnings, "
+        "open questions and notes that should survive a history compaction. "
+        "Keep them concise and useful; this is working state, not a deliverable "
+        "unless the user asks for one."
+    )
+
 
 def skills_instructions(skills_dir):
     """The extra system-prompt block when the skills feature is enabled.
@@ -261,6 +335,70 @@ Conversation so far:
 {conversation}
 """
     return prompt.strip()
+
+
+def compaction_predict_files_prompt(summary, current_instruction=""):
+    """Ask the model which files it needs to re-read after a compaction.
+
+    Used by the ``predict-files`` compaction strategy. The reply is expected to
+    be read-only tool calls (``read_file`` / ``grep`` / ``glob``), which the
+    loop executes and inserts after the summary.
+    """
+    return f"""
+The conversation was just compacted. This is the summary of what happened:
+
+{summary}
+
+The instruction you are working on is:
+{current_instruction or "(the current instruction is in the conversation tail)"}
+
+Before continuing, decide which files you need to read to work accurately.
+Call ONLY read-only tools (read_file, grep, glob) to fetch them. Do not modify
+anything, do not run shell commands, and do not call any other tool. If you do
+not need to read anything, return no tool calls and a one-line acknowledgement.
+""".strip()
+
+
+def compaction_keep_prompt(messages, summary):
+    """Ask the model which original messages to keep after a compaction.
+
+    Used by the ``predict-messages`` strategy. Each message is shown with its
+    0-based index; the model replies with a JSON array of the indexes it wants
+    kept verbatim after the summary.
+    """
+    lines = []
+    for index, message in enumerate(messages):
+        role = message.get("role", "?") if isinstance(message, dict) else "?"
+        content = (message.get("content") if isinstance(message, dict) else "") or ""
+        content = " ".join(str(content).split())
+        if len(content) > 400:
+            content = content[:400] + "..."
+        calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if calls:
+            names = ", ".join(
+                call.get("function", {}).get("name", "?") for call in calls
+                if isinstance(call, dict))
+            content = (content + f" [tool calls: {names}]").strip()
+        lines.append(f"[{index}] {role}: {content}")
+    listing = "\n".join(lines)
+    return f"""
+The conversation was compacted to this summary:
+
+{summary}
+
+Below is the original message list. Choose which messages must be kept verbatim
+in the compacted conversation. Prefer messages with decisions, constraints,
+important observations or tool results that the summary does not capture.
+
+Return ONLY a JSON array of 0-based integer indexes, for example:
+[2, 5, 9]
+
+Do not include the system prompt or the final in-flight turn. If nothing needs
+to be kept, return [].
+
+Messages:
+{listing}
+""".strip()
 
 
 if __name__=="__main__":
