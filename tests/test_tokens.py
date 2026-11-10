@@ -78,8 +78,10 @@ class ContextWindowLookupTest(unittest.TestCase):
             "Qwen/Qwen2.5-Coder-32B-Instruct": 131_072,
             "qwen2.5-7b-instruct-awq": 131_072,
             "meta-llama/Llama-3.1-8B-Instruct": 131_072,
-            "deepseek-r1:70b": 65_536,
-            "deepseek-ai/DeepSeek-V3": 65_536,
+            "deepseek-r1:70b": 163_840,
+            "deepseek-ai/DeepSeek-V3": 163_840,
+            "deepseek-ai/DeepSeek-V4-Pro": 1_048_576,
+            "deepseek-v4.1-flash-1017": 1_048_576,
             "mistralai/Mistral-7B-Instruct-v0.2": 32_768,
             "gemini-1.5-pro": 1_048_576,
         }
@@ -94,6 +96,8 @@ class ContextWindowLookupTest(unittest.TestCase):
                            config.context_window_for("gpt-4"))
         self.assertGreater(config.context_window_for("qwen2.5"),
                            config.context_window_for("qwen2"))
+        self.assertGreater(config.context_window_for("deepseek-v4"),
+                           config.context_window_for("deepseek"))
 
     def test_lookup_is_case_insensitive(self):
         self.assertEqual(config.context_window_for("GPT-4O-MINI"), 128_000)
