@@ -59,6 +59,7 @@ MODE="${MODE:-full}"
 FULL="${FULL:-1}"
 LIMIT="${LIMIT:-}"
 N_CONCURRENT="${N_CONCURRENT:-1}"
+MINI_CODE_SETTINGS="${MINI_CODE_SETTINGS:-swe}"  # space-separated; "all" = every configured setting
 AGENT_TIMEOUT_MULTIPLIER="${AGENT_TIMEOUT_MULTIPLIER:-}"
 RESULTS_DIR="${RESULTS_DIR:-results}"
 EXPERIMENTS_DIR="${EXPERIMENTS_DIR:-experiments}"
@@ -125,6 +126,7 @@ for model_entry in "${MODELS[@]}"; do
                 APPTAINER_TMPDIR="$APPTAINER_TMPDIR" \
                 BENCHMARKS="$bench" \
                 AGENTS="$agent" \
+                MINI_CODE_SETTINGS="$MINI_CODE_SETTINGS" \
                 EXTRA_ARGS="$agent_extra" \
                 MODE="$MODE" \
                 FULL="$FULL" \

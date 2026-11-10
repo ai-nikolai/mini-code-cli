@@ -150,6 +150,26 @@ class MiniCodeAdapterTests(unittest.TestCase):
         argv = self.adapter("short-tool-timeout").argv("p", local_model())
         self.assertEqual(argv[argv.index("--tool-timeout") + 1], "30")
 
+    def test_strategy_presets_change_exactly_one_choice(self):
+        argv = self.adapter("swe").argv("p", local_model())
+        self.assertNotIn("--compaction-strategy", argv)
+        self.assertNotIn("--plan-strategy", argv)
+
+        cases = (
+            ("swe-compaction-predict-files",
+             "--compaction-strategy", "predict-files"),
+            ("swe-compaction-predict-messages",
+             "--compaction-strategy", "predict-messages"),
+            ("swe-plan-verify", "--plan-strategy", "plan-verify"),
+            ("swe-open-plan", "--plan-strategy", "open-plan"),
+        )
+        for setting, flag, value in cases:
+            with self.subTest(setting=setting):
+                argv = self.adapter(setting).argv("p", local_model())
+                self.assertEqual(argv[argv.index(flag) + 1], value)
+                for baseline in ("--auto-mode", "--enable-shell", "--sudo"):
+                    self.assertIn(baseline, argv)
+
     def test_container_argv_uses_the_images_interpreter(self):
         argv = self.adapter().argv("p", local_model(), container=True)
         self.assertEqual(argv[0], "python3")

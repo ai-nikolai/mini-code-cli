@@ -289,6 +289,39 @@ Config layout (all keys are validated; a typo is an error, not a silent default)
 | `env` | variables exported to every harness/agent command |
 | `output_dir`, `concurrency` | where runs land, how many trials in parallel |
 
+### mini-code strategy presets
+
+The benchmark configs list several mini-code settings. The `swe` setting is the
+baseline used for real runs; the four strategy presets change exactly one
+compaction or planning choice on top of it:
+
+| Setting | Extra choice |
+| --- | --- |
+| `swe` | baseline: `summarise` compaction, no plan mode |
+| `swe-compaction-predict-files` | `--compaction-strategy predict-files` |
+| `swe-compaction-predict-messages` | `--compaction-strategy predict-messages` |
+| `swe-plan-verify` | `--plan --plan-strategy plan-verify` |
+| `swe-open-plan` | `--plan --plan-strategy open-plan` |
+
+All five are present in `terminal_bench_21.json`, `ornith_30b.json` and
+`mini_code_settings.json`. The Slurm launchers default to the `swe` baseline only;
+select more with a space-separated `MINI_CODE_SETTINGS`:
+
+```bash
+MINI_CODE_SETTINGS="swe swe-compaction-predict-files swe-compaction-predict-messages" \
+    benchmarks/scripts/submit_benchmark_slurm.sh
+
+MINI_CODE_SETTINGS=all BENCHMARKS=terminalbench-2.1-3 \
+    benchmarks/scripts/run_benchmark_slurm.sh
+```
+
+`run_benchmarks.py` exposes the same selection as repeatable `--setting` flags:
+
+```bash
+python benchmarks/run_benchmarks.py --dataset swe-bench --agent mini-code \
+    --setting swe-open-plan --mode short_eval
+```
+
 ---
 
 ## 3. Docker or Apptainer
