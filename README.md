@@ -83,6 +83,9 @@ given a reference implementation.
 | `-g`, `--enable-subagents` | off | expose sub-agents as tools |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
+| `--plan-strategy NAME` | `plan-verify-step` | `plan-verify-step`, `plan-verify` or `open-plan` (implies `--plan`) |
+| `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
+| `--compaction-strategy NAME` | `summarise` | `summarise`, `predict-files` or `predict-messages` |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
 | `--tool-timeout S` | `120` | timeout for a single tool call |
 | `--max-context-tokens N` | derived | input-token budget before the history is compacted |
@@ -258,11 +261,29 @@ also printed as a box right after planning, so you can see it without asking.
 Use `/skip-plan <prompt>` to send one prompt without planning it (plan mode stays
 on for later turns).
 
+`--plan-strategy` selects how planning is wired:
+
+| Strategy | What happens |
+| --- | --- |
+| `plan-verify-step` (default) | Current behaviour: author a plan, review it once the work settles, then run one extra step and keep whatever that step says. |
+| `plan-verify` | Same plan + review, but the post-review step is kept only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
+| `open-plan` | The agent owns a plan document at `.mini/PLAN.md` inside `--allowed-dir`, reads and updates it with the normal file tools, and the loop neither authors nor reviews a plan. |
+
 > [!NOTE]
 > Plan mode also changes **history compaction**: after the transcript is compacted to a summary,
 > `CURRENT_PLAN.md` and `CURRENT_GOAL.md` are re-injected, so the agent keeps working against the
-> same goal. When the work looks done the plan is reviewed and any outstanding task is re-queued
-> before the agent returns to you.
+> same goal. With `open-plan`, the agent's `.mini/PLAN.md` is re-injected instead. When the work
+> looks done the plan is reviewed and any outstanding task is re-queued before the agent returns
+> to you (except with `open-plan`).
+
+### Scratchpad — `--scratchpad`
+
+With `--scratchpad`, the loop creates `.mini/SCRATCHPAD.md` inside `--allowed-dir` and tells the
+agent that it may read and write that file freely, and may create additional scratch files in the
+same directory (for example `SCRATCH-NOTES.md`, `SCRATCH-IDEAS.md`). The scratchpad is ordinary
+state inside the sandbox, so the normal `read_file` / `write_file` / `edit` tools work; no special
+tool is registered. It is meant for the agent's own thoughts, plans, learnings and open questions,
+and survives a history compaction because it lives on disk.
 
 ### Sessions — resume, or start fresh
 
@@ -309,6 +330,20 @@ across the rollover: the message you just typed (or, mid-turn, the tool call the
 waiting on) is kept verbatim after the summary. So a compaction that fires just as you send an
 instruction cannot swallow it — the model still answers what you asked, and the turn stays in
 the session file, in `/history` and in a later restore.
+
+`--compaction-strategy` chooses what else survives besides the summary:
+
+| Strategy | Messages after compaction |
+| --- | --- |
+| `summarise` (default) | `system`, `summary`, `plan`, `current turn` |
+| `predict-files` | `system`, `summary`, predicted read-only tool calls + results, `plan`, `current turn` |
+| `predict-messages` | `system`, `summary`, original messages the model names by index, `plan`, `current turn` |
+
+`predict-files` asks the model which files it needs to re-read and executes only the read-only
+tools (`read_file`, `grep`, `glob`) it predicts; `predict-messages` asks for a JSON array of
+0-based message indexes to keep verbatim. Both predictions are one extra tool-free (or
+read-only-tool) LLM call, are billed normally, and are capped so they cannot refill the context
+they just freed. A failed prediction degrades to the plain summary.
 
 Because a rollover leaves no trace in the transcript (the old turns really are gone), the
 console says in plain terms what happened — all of it without `--verbose`:

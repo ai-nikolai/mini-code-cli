@@ -721,8 +721,12 @@ class Console:
         self.emit(self.style("Type /reset %s to rewind here." % turn, dim=True, fg="cyan"))
 
     def welcome(self, version, session_id, cache_dir, allowed_dir,
-                server_url, model, permission_mode, agent_mode, shell_mode):
+                server_url, model, permission_mode, agent_mode, shell_mode,
+                compaction_strategy=None, plan_strategy=None, plan_mode=False):
         """Render the startup info banner."""
+        planning = plan_strategy or "plan-verify-step"
+        if not plan_mode:
+            planning += " (plan mode off)"
         lines = [
             f"version     : v{version}",
             f"session id  : {session_id}",
@@ -734,6 +738,8 @@ class Console:
             f"permissions : {permission_mode}",
             f"agent mode  : {agent_mode}",
             f"shell       : {shell_mode}",
+            f"compaction  : {compaction_strategy or 'summarise'}",
+            f"planning    : {planning}",
         ]
         self.banner(f"MiniCodeCLI v{version}", lines, fg="cyan")
 

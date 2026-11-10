@@ -40,6 +40,7 @@ import io
 import os
 import types
 
+from .. import compaction as compaction_module
 from .. import ui
 from ..utils import oneline
 
@@ -335,8 +336,12 @@ class SubAgent:
         # child to write to self._report_path(parent), which is exactly
         # <this dir>/report.md, so the parent reads back what the child wrote.
         child.cache_dir = self._child_cache_dir(parent)
-        # Plan mode for the child.
+        # Plan mode for the child (and the parent's strategy/feature choices).
         child.plan = self.wants_plan_mode(parent)
+        child.plan_strategy = getattr(parent.args, "plan_strategy", None)
+        child.compaction_strategy = getattr(
+            parent.args, "compaction_strategy", compaction_module.DEFAULT_COMPACTION_STRATEGY)
+        child.scratchpad = getattr(parent.args, "scratchpad", False)
         child.verbose = False
         child.restore_session = None
         child.load_last_session = False
