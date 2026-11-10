@@ -52,7 +52,12 @@
         "skills",
         "long-context",
         "short-tool-timeout",
-        "all"
+        "all",
+        "swe",
+        "swe-compaction-predict-files",
+        "swe-compaction-predict-messages",
+        "swe-plan-verify",
+        "swe-open-plan"
       ]
     }
   ]

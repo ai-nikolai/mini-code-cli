@@ -22,6 +22,7 @@ JOBID="${JOBID:-}"                         # empty = run on the current host
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATASET="${DATASET:-terminalbench-2.1-3}"  # swe-bench | swe-bench-lite | terminalbench-2.1-3
 AGENTS="${AGENTS:-mini-code pi claude-code}"  # space-separated; run one by one
+MINI_CODE_SETTINGS="${MINI_CODE_SETTINGS:-swe}"  # space-separated; "all" = every configured setting
 MODE="${MODE:-short}"                      # short | short_eval | full
 LIMIT="${LIMIT:-}"                         # empty = mode default
 N_CONCURRENT="${N_CONCURRENT:-1}"          # inside one campaign (tasks), not across agents
@@ -138,6 +139,13 @@ run_agent() {
     [[ -n "$LIMIT" ]] && args+=(--limit "$LIMIT")
     [[ -n "$AGENT_TIMEOUT_MULTIPLIER" ]] && \
         args+=(--agent-timeout-multiplier "$AGENT_TIMEOUT_MULTIPLIER")
+    # The mini-code strategy presets live in the config; pick which ones this
+    # campaign runs. Other agents keep their config settings.
+    if [[ "$agent" == "mini-code" && "$MINI_CODE_SETTINGS" != "all" ]]; then
+        for setting in $MINI_CODE_SETTINGS; do
+            args+=(--setting "$setting")
+        done
+    fi
     # EXTRA_ARGS is intentionally word-split: it is a convenience for flags such
     # as "--run-id ..." and must not be used to pass quoted task text.
     # shellcheck disable=SC2206
@@ -164,6 +172,7 @@ main() {
         say "allocation $JOBID on $(squeue -h -j "$JOBID" -o '%N')"
     fi
     say "dataset=$DATASET mode=$MODE agents=$AGENTS dry_run=$DRY_RUN"
+    say "mini-code settings=$MINI_CODE_SETTINGS"
     if [[ "$DRY_RUN" == "1" ]]; then
         say "dry run: not starting or waiting for the model server"
     else

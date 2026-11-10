@@ -119,6 +119,7 @@ workspaces.
 | `BENCH_ENV` / `CONDA_SH` | conda env with harbor+swebench, and its profile script |
 | `MODEL_NAME`, `NUM_GPUS`, `MODEL_ENV`, `TOOL_CALL_PARSER`, `REASONING_PARSER` | model/server selection |
 | `BENCHMARKS`, `AGENTS`, `MODE`, `FULL`, `LIMIT` | matrix/selection |
+| `MINI_CODE_SETTINGS` | space-separated mini-code settings for launchers (`swe` default; `all` runs every configured setting, including the compaction/planning presets) |
 | `SUBMIT`, `DRY_RUN`, `CONFIRM` | write-only vs submit, dry-run, deletion confirmation |
 
 ## Sizes and expectations

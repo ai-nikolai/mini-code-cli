@@ -138,6 +138,11 @@ def build_parser():
                         help="override concurrency")
     parser.add_argument("--agent-timeout-multiplier", type=float, default=None,
                         help="scale the task's own agent budget (e.g. 1 = 900 s)")
+    parser.add_argument("--setting", action="append", default=None,
+                        metavar="NAME",
+                        help="only these agent settings (repeatable; default: "
+                             "every setting the config lists for the agent). "
+                             "Use 'all' to run every setting.")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the commands and the summary path, run nothing")
     parser.add_argument("--scratch-dir", default=None,
@@ -171,7 +176,8 @@ def _timestamp():
 
 
 def build_config(dataset, agent, mode, limit=None, n_concurrent=None,
-                 config_path=None, agent_timeout_multiplier=None):
+                 config_path=None, agent_timeout_multiplier=None,
+                 settings=None):
     """The config for one agent's run, with the mode applied on top.
 
     The config file stays the source of truth for models and endpoints; this only
@@ -193,6 +199,33 @@ def build_config(dataset, agent, mode, limit=None, n_concurrent=None,
         if not agents:
             raise ConfigError(
                 f"agent {agent!r} is not configured in {config_path or path}")
+
+    if settings and not any(str(name).lower() == "all" for name in settings):
+        wanted = [str(name) for name in settings]
+        available = []
+        selected = []
+        for entry in agents:
+            names = entry.get("settings") or [
+                entry.get("setting") or "default"]
+            available.extend(names)
+            chosen = [name for name in names if name in wanted]
+            if not chosen:
+                continue
+            entry = dict(entry)
+            entry.pop("setting", None)
+            entry["settings"] = chosen
+            selected.append(entry)
+        missing = [name for name in wanted if name not in available]
+        if missing:
+            raise ConfigError(
+                f"setting(s) {', '.join(missing)} are not configured for "
+                f"agent {agent!r} in {config_path or path} (available: "
+                f"{', '.join(dict.fromkeys(available))})")
+        agents = selected
+        if not agents:
+            raise ConfigError(
+                f"the settings filter selected no {agent!r} trials")
+
     documented["agents"] = agents
 
     suites = []
@@ -248,7 +281,7 @@ def main(argv=None):
                 args.dataset, agent, args.mode, limit=args.limit,
                 n_concurrent=args.n_concurrent,
                 agent_timeout_multiplier=args.agent_timeout_multiplier,
-                config_path=args.config)
+                config_path=args.config, settings=args.setting)
             problems = validate_config(config, check_env=not args.dry_run)
             if problems:
                 raise ConfigError("; ".join(problems))

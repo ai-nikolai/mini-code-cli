@@ -21,6 +21,14 @@ and nothing else, so a difference in success rate can be attributed to it:
                         separate "ran out of context" from "could not solve"
 ``short-tool-timeout``  ``--tool-timeout 30``: fail fast on hung commands
 ``all``                 the kitchen sink (plan + subagents + shell + sudo)
+``swe``                 the benchmark setting: unattended shell + sudo, a
+                        131k context and long tool/LLM timeouts
+``swe-compaction-predict-files``
+                        ``swe`` + ``--compaction-strategy predict-files``
+``swe-compaction-predict-messages``
+                        ``swe`` + ``--compaction-strategy predict-messages``
+``swe-plan-verify``     ``swe`` + ``--plan --plan-strategy plan-verify``
+``swe-open-plan``       ``swe`` + ``--plan --plan-strategy open-plan``
 ======================  ====================================================
 
 Every preset is also recorded in the run manifest, so a report can say which
@@ -33,6 +41,22 @@ from .base import AgentAdapter, which, python_interpreter
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
+
+
+#: The benchmark setting. The strategy presets below are this exact configuration
+#: plus one compaction/planning choice, so a comparison changes one variable.
+_SWE = {
+    "flags": ["--auto-mode", "--enable-shell", "--sudo"],
+    "max_context_tokens": 131072,
+    "tool_timeout": 600,
+    "llm_timeout": 600,
+    # Bounded, reproducible responses: see MiniCodeAgent.argv.
+    # 4096 was too tight -- a thinking model spent the whole budget on
+    # reasoning and returned no tool call (empty patch, 0 resolved),
+    # even with the loop's truncation nudge.
+    "max_tokens": 8192,
+    "temperature": 0.6,
+}
 
 
 class MiniCodeAgent(AgentAdapter):
@@ -57,16 +81,19 @@ class MiniCodeAgent(AgentAdapter):
         # occasional install, a context big enough to hold the file it is editing
         # plus the test output, and tool/LLM timeouts long enough that a slow
         # `pytest` is not recorded as a model failure.
-        "swe": {"flags": ["--auto-mode", "--enable-shell", "--sudo"],
-                "max_context_tokens": 131072,
-                "tool_timeout": 600,
-                "llm_timeout": 600,
-                # Bounded, reproducible responses: see MiniCodeAgent.argv.
-                # 4096 was too tight -- a thinking model spent the whole budget on
-                # reasoning and returned no tool call (empty patch, 0 resolved),
-                # even with the loop's truncation nudge.
-                "max_tokens": 8192,
-                "temperature": 0.6},
+        "swe": dict(_SWE),
+        # Two compaction strategies and two planning strategies, each changing
+        # exactly one variable relative to `swe`.
+        "swe-compaction-predict-files": dict(
+            _SWE, compaction_strategy="predict-files"),
+        "swe-compaction-predict-messages": dict(
+            _SWE, compaction_strategy="predict-messages"),
+        "swe-plan-verify": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan"],
+            plan_strategy="plan-verify"),
+        "swe-open-plan": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan"],
+            plan_strategy="open-plan"),
     }
 
     def argv(self, prompt, model, workspace=None, container=False):
@@ -87,6 +114,11 @@ class MiniCodeAgent(AgentAdapter):
             argv += ["--allowed-dir", str(workspace)]
         if options.get("max_context_tokens"):
             argv += ["--max-context-tokens", str(options["max_context_tokens"])]
+        if options.get("compaction_strategy"):
+            argv += ["--compaction-strategy",
+                     str(options["compaction_strategy"])]
+        if options.get("plan_strategy"):
+            argv += ["--plan-strategy", str(options["plan_strategy"])]
         if options.get("tool_timeout"):
             argv += ["--tool-timeout", str(options["tool_timeout"])]
         if options.get("llm_timeout"):

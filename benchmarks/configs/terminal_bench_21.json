@@ -58,7 +58,11 @@
     {
       "name": "mini-code",
       "settings": [
-        "swe"
+        "swe",
+        "swe-compaction-predict-files",
+        "swe-compaction-predict-messages",
+        "swe-plan-verify",
+        "swe-open-plan"
       ],
       "models": [
         "ornith-35b-a3b"

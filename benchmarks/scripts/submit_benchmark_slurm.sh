@@ -46,6 +46,7 @@ APPTAINER_TMPDIR="${APPTAINER_TMPDIR:-}"
 # instances). Use terminalbench-2.1-3 or swe-bench-lite for the smoke sets.
 BENCHMARKS="${BENCHMARKS:-terminalbench-2.1 swe-bench-lite-full}"
 AGENTS="${AGENTS:-mini-code pi claude-code}"
+MINI_CODE_SETTINGS="${MINI_CODE_SETTINGS:-swe}"  # space-separated; "all" = every configured setting
 MODE="${MODE:-full}"                       # full | short_eval | short
 LIMIT="${LIMIT:-}"                         # empty = full; e.g. 5 for smoke
 AGENT_TIMEOUT_MULTIPLIER="${AGENT_TIMEOUT_MULTIPLIER:-}"  # e.g. 1 (900 s/task)
@@ -125,6 +126,12 @@ TIMEOUT_ARG=""
 SCRATCH_ARG=""
 [[ -n "$SCRATCH_DIR" ]] && SCRATCH_ARG="--scratch-dir $SCRATCH_DIR"
 AGENT_LIST="$(printf '%q ' $AGENTS)"
+MINI_SETTING_ARGS=""
+if [[ "$MINI_CODE_SETTINGS" != "all" ]]; then
+    for setting in $MINI_CODE_SETTINGS; do
+        MINI_SETTING_ARGS+="--setting $(printf '%q' "$setting") "
+    done
+fi
 BENCH_LIST_Q="$(printf '%q ' "${BENCH_LIST[@]}")"
 CONFIG_LIST_Q="$(printf '%q ' "${CONFIG_LIST[@]}")"
 
@@ -204,6 +211,7 @@ export CUDA_VISIBLE_DEVICES=""   # the runner and its containers are CPU-side
 BENCHMARKS=(${BENCH_LIST_Q})
 CONFIGS=(${CONFIG_LIST_Q})
 AGENTS=(${AGENT_LIST})
+SETTING_ARGS="${MINI_SETTING_ARGS}"
 FAILED=0
 
 for i in "\${!BENCHMARKS[@]}"; do
@@ -211,6 +219,8 @@ for i in "\${!BENCHMARKS[@]}"; do
         run_id="${RUN_PREFIX}_\${BENCHMARKS[\$i]}_\${agent}"
         echo
         echo "=== \$run_id ==="
+        run_settings=""
+        [[ "\$agent" == "mini-code" ]] && run_settings="\$SETTING_ARGS"
         python benchmarks/run_benchmarks.py \\
             --dataset "\${BENCHMARKS[\$i]}" \\
             --agent "\$agent" \\
@@ -219,7 +229,8 @@ for i in "\${!BENCHMARKS[@]}"; do
             --run-id "\$run_id" \\
             --results-dir $(printf '%q' "$RESULTS_DIR") \\
             --n-concurrent ${N_CONCURRENT} \\
-            ${LIMIT_ARG} ${TIMEOUT_ARG} ${SCRATCH_ARG} ${EXTRA_ARGS}
+            ${LIMIT_ARG} ${TIMEOUT_ARG} ${SCRATCH_ARG} ${EXTRA_ARGS} \
+            \${run_settings}
         rc=\$?
         if (( rc != 0 )); then
             echo "WARNING: \$run_id exited \$rc; continuing" >&2
@@ -251,6 +262,7 @@ echo "vLLM       : tp=$NUM_GPUS port=$SERVER_PORT"
 echo "benchmarks : ${BENCH_LIST[*]}"
 [[ -n "$TB_STAGED" ]] && echo "TB staged  : $TB_STAGED (used=$TB_USE_STAGED)"
 echo "agents     : $AGENTS (one at a time)"
+echo "mini-code settings: $MINI_CODE_SETTINGS"
 echo "mode / full: $MODE / $FULL"
 echo "walltime   : $WALLTIME"
 echo "configs    :"

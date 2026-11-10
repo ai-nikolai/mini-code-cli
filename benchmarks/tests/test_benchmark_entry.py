@@ -14,7 +14,7 @@ import unittest
 from benchmarks import campaign
 from benchmarks import summary as summary_module
 from benchmarks.agents import AGENT_MD, load_agent_preamble
-from benchmarks.config import load_config
+from benchmarks.config import ConfigError, load_config
 from benchmarks.agents import get_adapter
 
 
@@ -72,10 +72,26 @@ class CampaignTests(unittest.TestCase):
             "swe-bench", "mini-code", "short_eval")
         self.assertEqual(suite_name, "swebench")
         self.assertEqual(label, "swe-bench")
-        self.assertEqual([a.name for a in config.agents], ["mini-code"])
+        self.assertEqual({a.name for a in config.agents}, {"mini-code"})
+        baseline = [a for a in config.agents if a.setting == "swe"]
+        self.assertEqual(len(baseline), 1)
         self.assertEqual([s.name for s in config.suites], ["swebench"])
         self.assertEqual(config.suites[0].limit, 3)
         self.assertFalse(config.suites[0].options["skip_evaluation"])
+
+    def test_setting_filter_selects_strategy_presets(self):
+        config, _, _ = campaign.build_config(
+            "swe-bench", "mini-code", "short_eval",
+            settings=["swe-open-plan", "swe-compaction-predict-files"])
+        self.assertEqual([a.setting for a in config.agents],
+                         ["swe-compaction-predict-files", "swe-open-plan"])
+
+    def test_unknown_setting_is_reported(self):
+        with self.assertRaises(ConfigError) as caught:
+            campaign.build_config(
+                "swe-bench", "mini-code", "short_eval",
+                settings=["swe-not-a-setting"])
+        self.assertIn("swe-not-a-setting", str(caught.exception))
 
     def test_smoke_mode_leaves_the_graders_off(self):
         config, _, _ = campaign.build_config("swe-bench", "pi", "short")
