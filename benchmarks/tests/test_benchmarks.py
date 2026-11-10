@@ -155,6 +155,10 @@ class MiniCodeAdapterTests(unittest.TestCase):
         self.assertNotIn("--compaction-strategy", argv)
         self.assertNotIn("--plan-strategy", argv)
 
+        argv = self.adapter("swe-plan").argv("p", local_model())
+        self.assertIn("--plan", argv)
+        self.assertNotIn("--plan-strategy", argv)
+
         cases = (
             ("swe-compaction-predict-files",
              "--compaction-strategy", "predict-files"),

@@ -89,6 +89,7 @@
         "swe",
         "swe-compaction-predict-files",
         "swe-compaction-predict-messages",
+        "swe-plan",
         "swe-plan-verify",
         "swe-open-plan"
       ],
