@@ -27,6 +27,7 @@ import datetime
 import os
 import sys
 
+from . import metrics as metrics_module
 from . import summary as summary_module
 from .cli import _cmd_prepare, _reuse_prepared_inputs
 from .config import ConfigError, load_config, parse_config, validate_config
@@ -263,6 +264,7 @@ def main(argv=None):
     print(f"summary:  {summary_path}")
 
     rows = []
+    metric_paths = []
     for agent, config, suite_name in prepared:
         agent_dir = os.path.join(directory, agent)
         trials = config.trials(suites=[suite_name])
@@ -292,6 +294,7 @@ def main(argv=None):
         outcomes = summary_module.read_run_outcomes(runner.run_dir(agent))
         rows.append(summary_module.row_for(
             label, agent, args.mode, f"{run_id}/{agent}", outcomes))
+        metric_paths.append(os.path.join(runner.run_dir(agent), "metrics.csv"))
 
     if args.dry_run:
         dry_dir = os.path.join(args.results_dir, "_dry_run", run_id)
@@ -299,6 +302,9 @@ def main(argv=None):
         print(f"(dry run) would write {summary_path}")
         return EXIT_OK
 
+    metrics_path = metrics_module.merge_metrics(
+        metric_paths, os.path.join(directory, "metrics.csv"))
+    print(f"metrics: {metrics_path}")
     path = summary_module.write_summary(directory, rows)
     with open(path, encoding="utf-8") as handle:
         print()

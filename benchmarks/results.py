@@ -137,6 +137,15 @@ def _row(trial, outcomes):
     timeouts = sum(1 for o in outcomes if o.outcome == "timeout")
     durations = [o.duration_seconds for o in outcomes
                  if o.duration_seconds is not None]
+    from .metrics import outcome_metrics
+
+    def mean_metric(key):
+        values = [outcome_metrics(o).get(key) for o in outcomes]
+        values = [v for v in values if isinstance(v, (int, float))]
+        return round(sum(values) / len(values), 4) if values else None
+
+    tool_names = sorted({name for o in outcomes
+                         for name in (outcome_metrics(o).get("tool_names") or [])})
     return {
         "dataset": trial.get("dataset"),
         "suite": trial.get("suite"),
@@ -157,6 +166,13 @@ def _row(trial, outcomes):
                  if (total - errors - timeouts) else None),
         "mean_seconds": (round(sum(durations) / len(durations), 2)
                          if durations else None),
+        "mean_prompt_tokens": mean_metric("prompt_tokens"),
+        "mean_completion_tokens": mean_metric("completion_tokens"),
+        "mean_llm_calls": mean_metric("llm_calls"),
+        "mean_tool_calls": mean_metric("tool_calls"),
+        "mean_turns": mean_metric("turns"),
+        "mean_cost_usd": mean_metric("cost_usd"),
+        "tool_names": ";".join(tool_names),
     }
 
 
@@ -165,7 +181,9 @@ def _row(trial, outcomes):
 CSV_COLUMNS = (
     "suite", "agent", "setting", "model", "run_id",
     "n", "resolved", "unresolved", "errors", "timeouts", "command_errors",
-    "rate", "mean_seconds", "dataset",
+    "rate", "mean_seconds", "dataset", "mean_prompt_tokens",
+    "mean_completion_tokens", "mean_llm_calls", "mean_tool_calls",
+    "mean_turns", "mean_cost_usd", "tool_names",
 )
 
 #: Where a CSV goes when the caller does not name one. Untracked (``.gitignore``):

@@ -519,6 +519,34 @@ per outcome that reported one (pooled, not a mean of means; `-` when none did). 
 
 ---
 
+## 8.2 Per-instance metrics (`metrics.csv`)
+
+Every run writes `<run>/metrics.csv` (one row per task/instance) and the
+campaign merges the agent runs into `results/<campaign>/metrics.csv`. The
+columns are stable:
+
+```
+dataset, suite, agent, setting, model, run_id, instance_id, outcome, resolved,
+duration_seconds, prompt_tokens, completion_tokens, total_tokens, llm_calls,
+tool_calls, turns, tool_names, cost_usd, detail
+```
+
+* `duration_seconds` — the agent execution time (harness timestamps or the
+  command's `[exit … in Xs]` log line).
+* `prompt_tokens` / `completion_tokens` / `total_tokens` — from the agent's own
+  usage report. Empty when the agent/server does not report it; never 0 as a
+  stand-in.
+* `llm_calls` / `turns` — model turns (mini-code reports LLM calls; Claude Code
+  reports `num_turns`; Pi may leave these empty).
+* `tool_calls` / `tool_names` — number/names of tool invocations where the agent
+  logs them (mini-code, Claude Code tool-use events).
+* `cost_usd` — when the agent reports it (Claude Code).
+* `outcome`/`resolved`/`detail` — the same verdict and reason as `results.jsonl`.
+
+The aggregate `summary_results.csv` appends the corresponding means:
+`mean_prompt_tokens`, `mean_completion_tokens`, `mean_llm_calls`,
+`mean_tool_calls`, `mean_turns`, `mean_cost_usd`, and a `tool_names` column.
+
 ## 8.5 What the harness guarantees now
 
 * **One outcome per task.** Harbor's per-attempt suffix (`task__AbC123`) is

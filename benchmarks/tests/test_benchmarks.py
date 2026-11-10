@@ -1091,3 +1091,81 @@ class TbSifDefinitionTests(unittest.TestCase):
         text = render_def("example/image:tag")
         self.assertIn("py3-virtualenv", text)
         self.assertIn("command -v virtualenv", text)
+
+
+class AgentMetricsTests(unittest.TestCase):
+    def test_parses_mini_code_usage_and_goodbye(self):
+        from benchmarks.metrics import parse_text
+
+        text = (
+            "\x1b[2;36mtokens\x1b[0m: input=48827 output=8192 "
+            "toolcalls=78 total=57019 | 82 LLM calls\n"
+            "tool\n    write_file: {'file_path': 'x'}\n"
+            "tool\n    run_shell_command: {'command': 'ls'}\n"
+            "tokens : 2,400,601 in / 155,396 out (2,555,997 total)\n"
+            "calls : 82 LLM, 78 tool\n"
+            "[exit 0 in 728.7s]\n")
+        metrics = parse_text(text)
+        self.assertEqual(metrics["prompt_tokens"], 2400601)
+        self.assertEqual(metrics["completion_tokens"], 155396)
+        self.assertEqual(metrics["total_tokens"], 2555997)
+        self.assertEqual(metrics["llm_calls"], 82)
+        self.assertEqual(metrics["tool_calls"], 78)
+        self.assertEqual(metrics["turns"], 82)
+        self.assertAlmostEqual(metrics["duration_seconds"], 728.7)
+        self.assertEqual(metrics["tool_names"],
+                         ["run_shell_command", "write_file"])
+
+    def test_parses_claude_json_result(self):
+        from benchmarks.metrics import parse_text
+
+        text = ('{"type":"result","num_turns":12,"duration_ms":17733,'
+                '"total_cost_usd":0.5,"usage":{"input_tokens":1000,'
+                '"output_tokens":200}}\n')
+        metrics = parse_text(text)
+        self.assertEqual(metrics["prompt_tokens"], 1000)
+        self.assertEqual(metrics["completion_tokens"], 200)
+        self.assertEqual(metrics["total_tokens"], 1200)
+        self.assertEqual(metrics["turns"], 12)
+        self.assertAlmostEqual(metrics["duration_seconds"], 17.733)
+        self.assertEqual(metrics["cost_usd"], 0.5)
+
+    def test_metrics_csv_has_the_analysis_columns(self):
+        from benchmarks.metrics import METRICS_CSV_COLUMNS
+
+        for key in ("duration_seconds", "prompt_tokens", "completion_tokens",
+                    "total_tokens", "llm_calls", "tool_calls", "turns",
+                    "tool_names"):
+            self.assertIn(key, METRICS_CSV_COLUMNS)
+
+    def test_metrics_csv_row_and_campaign_merge(self):
+        import csv
+        from benchmarks.metrics import metric_row, merge_metrics, write_metrics
+        from benchmarks.suites.base import Trial
+
+        trial = Trial(
+            suite=SuiteSpec(name="terminal-bench", dataset="tb", version="2.1"),
+            agent=AgentSpec(name="mini-code", setting="swe"),
+            model=ModelSpec(name="m", model="m", base_url="http://x:1"),
+            limit=1)
+        outcome = TrialOutcome(
+            suite="terminal-bench", instance_id="task",
+            outcome=TrialOutcome.RESOLVED, duration_seconds=12.5,
+            extra={"metrics": {"prompt_tokens": 100, "completion_tokens": 20,
+                               "total_tokens": 120, "llm_calls": 4,
+                               "tool_calls": 3, "turns": 4,
+                               "tool_names": ["read_file", "edit"]}})
+        row = metric_row(trial, None, outcome)
+        self.assertEqual(row["instance_id"], "task")
+        self.assertEqual(row["total_tokens"], 120)
+        self.assertEqual(row["tool_names"], "read_file;edit")
+        with tempfile.TemporaryDirectory() as tmp:
+            one = os.path.join(tmp, "metrics.csv")
+            write_metrics(one, [row])
+            combined = os.path.join(tmp, "combined.csv")
+            merge_metrics([one], combined)
+            with open(combined, newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["llm_calls"], "4")
+        self.assertEqual(rows[0]["tool_calls"], "3")
