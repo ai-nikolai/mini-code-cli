@@ -251,10 +251,19 @@ def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_nam
     auto_mode = bool(getattr(args, "auto_mode", False))
     agent_mode = "Agent is in auto-mode." if auto_mode else "Agent is in manual-mode."
     shell_mode = "Shell disabled." if not getattr(args, "enable_shell", False) else "Shell enabled."
+    compaction_strategy = getattr(
+        args, "compaction_strategy", compaction_mod.DEFAULT_COMPACTION_STRATEGY)
+    plan_strategy = (getattr(args, "plan_strategy", None)
+                     or planning.DEFAULT_PLAN_STRATEGY)
+    plan_mode = (bool(getattr(args, "plan", False))
+                 or bool(getattr(args, "plan_strategy", None)))
 
     (console or ui.console).welcome(version, unique_id, cache_dir, allowed_dir,
                                     server_url, model_name, permission_mode,
-                                    agent_mode, shell_mode)
+                                    agent_mode, shell_mode,
+                                    compaction_strategy=compaction_strategy,
+                                    plan_strategy=plan_strategy,
+                                    plan_mode=plan_mode)
 
 
 # ---------------------------------------------------------------------------

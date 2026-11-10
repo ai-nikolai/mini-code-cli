@@ -393,6 +393,31 @@ class PromptStrategyTest(unittest.TestCase):
         self.assertIn("JSON array", keep)
 
 
+class WelcomeBannerTest(_AdvancedCase):
+    def _welcome(self, **overrides):
+        args = make_args(self.workdir, self.cache_dir,
+                         plan=overrides.pop("plan", False))
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        console = self.console()
+        agent_loop.print_welcome(self.workdir, "http://localhost:1", args,
+                                 "session-id", self.cache_dir, "test-model",
+                                 console=console)
+        return self.output()
+
+    def test_banner_shows_the_compaction_and_planning_strategies(self):
+        out = self._welcome(plan=True, compaction_strategy="predict-files",
+                            plan_strategy="open-plan")
+        self.assertIn("compaction  : predict-files", out)
+        self.assertIn("planning    : open-plan", out)
+        self.assertNotIn("plan mode off", out)
+
+    def test_banner_marks_planning_off_when_plan_mode_is_disabled(self):
+        out = self._welcome(compaction_strategy="summarise")
+        self.assertIn("compaction  : summarise", out)
+        self.assertIn("planning    : plan-verify-step (plan mode off)", out)
+
+
 class ParseArgsTest(unittest.TestCase):
     def test_new_flags_have_the_expected_defaults(self):
         with mock.patch.object(sys, "argv", ["mini-code"]):
