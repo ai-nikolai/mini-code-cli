@@ -35,12 +35,17 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
         base_prompt = "You are a helpful AI assistant with access to the following tools (only):\n"
         end_prompt = (
         "Choose the most appropriate tool for the task at hand. "
+        "When you are not calling a tool, give a short, direct answer or status "
+        "update (a few sentences at most) instead of replying with a tool call "
+        "alone; the user should regularly see what you found or what you are "
+        "about to do. "
         "If a tool fails or you hit a limit, analyze the error and try a different approach. "
         "Be concise and efficient in your tool usage."
         )
     else:
         tool_descriptions = ""
-        base_prompt = "You are a helpful AI assistant without any tools."
+        base_prompt = ("You are a helpful AI assistant without any tools. "
+                       "Answer briefly and directly.")
         end_prompt = ""
 
 
