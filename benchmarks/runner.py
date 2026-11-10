@@ -40,6 +40,7 @@ import uuid
 from . import config as config_module
 from . import docker as docker_module
 from . import forks as forks_module
+from . import metrics as metrics_module
 from . import runtime as runtime_module
 from .agents import get_adapter
 from .results import read_results, summarise, write_results, write_summary
@@ -170,6 +171,7 @@ class Runner:
 
         outcomes_by_trial = {}
         failures_by_trial = {}
+        metric_rows = []
         for index, trial in enumerate(trials, 1):
             self.say(f"[{index}/{len(trials)}] {trial.run_id}")
             trial_dir = os.path.join(run_dir, "trials", trial.run_id)
@@ -179,6 +181,14 @@ class Runner:
                 shutil.rmtree(trial_dir, ignore_errors=True)
             self._reuse_prepared_inputs(trial, trial_dir)
             outcomes, failures = self._run_trial(trial, trial_dir)
+            if not self.dry_run:
+                try:
+                    metrics_module.enrich_outcomes(trial_dir, outcomes)
+                except Exception as e:  # noqa: BLE001 - metrics are best effort
+                    self.say(f"   ! could not extract metrics: {e}")
+                adapter = get_adapter(trial.agent)
+                metric_rows.extend(metrics_module.metric_row(trial, adapter, o)
+                                   for o in outcomes)
             outcomes_by_trial[trial.run_id] = outcomes
             failures_by_trial[trial.run_id] = failures
             if not self.dry_run:
@@ -192,6 +202,10 @@ class Runner:
                           git_sha_value=manifest["git_sha"])
             for t in trials]
         self._write_manifest(run_dir, manifest)
+        if not self.dry_run:
+            metrics_path = metrics_module.write_metrics(
+                os.path.join(run_dir, "metrics.csv"), metric_rows)
+            self.say(f"metrics: {metrics_path}")
         rows = summarise(manifest["trials"], outcomes_by_trial)
         json_path, md_path = write_summary(run_dir, rows, manifest,
                                           csv_path=csv_path)

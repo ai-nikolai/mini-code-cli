@@ -22,7 +22,9 @@ import os
 SUMMARY_COLUMNS = (
     "dataset", "agent", "mode", "trials", "resolved", "pass_rate",
     "mean_reward", "mean_seconds", "mean_tokens", "run_id", "status",
-    "errors", "timeouts",
+    "errors", "timeouts", "mean_prompt_tokens", "mean_completion_tokens",
+    "mean_llm_calls", "mean_tool_calls", "mean_turns", "mean_cost_usd",
+    "tool_names",
 )
 
 #: Filename written into the campaign directory.
@@ -62,18 +64,33 @@ def _rewards(outcomes):
 
 def _tokens(outcomes):
     """Per-trial token totals, when the agent reported them."""
+    from .metrics import outcome_metrics
+
     values = []
     for outcome in outcomes:
-        extra = getattr(outcome, "extra", None) or {}
-        if not isinstance(extra, dict):
-            continue
-        tokens = extra.get("tokens") or extra.get("total_tokens")
-        if tokens is None and ("input_tokens" in extra or "output_tokens" in extra):
-            tokens = (int(extra.get("input_tokens") or 0)
-                      + int(extra.get("output_tokens") or 0))
+        tokens = outcome_metrics(outcome).get("total_tokens")
+        if tokens is None:
+            extra = getattr(outcome, "extra", None) or {}
+            if isinstance(extra, dict):
+                tokens = extra.get("tokens") or extra.get("total_tokens")
+                if tokens is None and ("input_tokens" in extra
+                                       or "output_tokens" in extra):
+                    tokens = (int(extra.get("input_tokens") or 0)
+                              + int(extra.get("output_tokens") or 0))
         if isinstance(tokens, (int, float)):
             values.append(tokens)
     return values
+
+
+def _metric_mean(outcomes, key):
+    from .metrics import outcome_metrics
+
+    values = []
+    for outcome in outcomes:
+        value = outcome_metrics(outcome).get(key)
+        if isinstance(value, (int, float)):
+            values.append(value)
+    return _mean(values)
 
 
 def row_for(dataset, agent, mode, run_id, outcomes, status="ok"):
@@ -84,6 +101,8 @@ def row_for(dataset, agent, mode, run_id, outcomes, status="ok"):
     ``status`` still reflects the raw outcome mix, so a cell with errors can
     never look as clean as one without.
     """
+    from .metrics import outcome_metrics
+
     trials = len(outcomes)
     resolved = sum(1 for o in outcomes if o.resolved)
     errors = sum(1 for o in outcomes if o.outcome == "error")
@@ -110,6 +129,15 @@ def row_for(dataset, agent, mode, run_id, outcomes, status="ok"):
         "status": status,
         "errors": errors,
         "timeouts": timeouts,
+        "mean_prompt_tokens": _metric_mean(outcomes, "prompt_tokens"),
+        "mean_completion_tokens": _metric_mean(outcomes, "completion_tokens"),
+        "mean_llm_calls": _metric_mean(outcomes, "llm_calls"),
+        "mean_tool_calls": _metric_mean(outcomes, "tool_calls"),
+        "mean_turns": _metric_mean(outcomes, "turns"),
+        "mean_cost_usd": _metric_mean(outcomes, "cost_usd"),
+        "tool_names": ";".join(sorted({
+            name for outcome in outcomes
+            for name in (outcome_metrics(outcome).get("tool_names") or [])})),
     }
 
 
