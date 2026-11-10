@@ -3,27 +3,52 @@
 # Prune benchmark storage by degree. Dry-run by default; set
 # DRY_RUN=0 CONFIRM=yes to actually delete.
 #
-#   MODE=light    remove heavy per-trial intermediates (testbeds, agent-tools,
-#                 eval/pull workdirs, .scratch). Keeps SIFs and all results.
-#   MODE=partial  light + delete the SIFs for BENCH (keep summaries/patches/logs)
-#   MODE=sifs     delete only the SIFs for BENCH
-#   MODE=scratch  delete only Apptainer scratch/cache contents
-#   MODE=full     partial + remove results/, benchmarks/runs/, generated job
-#                 configs/logs and scratch contents
+# STAGES AND WHAT THEY HOLD
+#   prepare:  source tasks/images -> SIFs; instance list -> SWE SIFs;
+#             TB staged task dirs; generated configs/jobs. Small except SIFs.
+#   run:      results/<campaign>/ (summaries, patches, predictions, reports)
+#             plus heavy trial workspaces: testbed/, agent-tools/, eval/, pulls/,
+#             bench logs, and Apptainer scratch/cache.
+#   after:    summaries + patches + manifests are the reusable output;
+#             SIFs / testbeds / eval / pulls / scratch are reproducible.
 #
-# Examples for a 1 TB home:
-#   scripts/prune_benchmark_storage.sh                       # show light plan
-#   MODE=partial BENCH=tb DRY_RUN=0 CONFIRM=yes \
-#       scripts/prune_benchmark_storage.sh                   # free TB SIFs
-#   MODE=full BENCH=all DRY_RUN=0 CONFIRM=yes \
-#       scripts/prune_benchmark_storage.sh                   # nuke caches/results
+# USE CASES
+#   # show what a light cleanup would remove (default: no deletion)
+#   benchmarks/scripts/prune_benchmark_storage.sh
+#
+#   # keep scores/patches/SIFs, free the copied testbeds and eval workdirs
+#   MODE=keep-results DRY_RUN=0 CONFIRM=yes \
+#       benchmarks/scripts/prune_benchmark_storage.sh
+#
+#   # after a TB run, before a SWE run: free TB SIFs + TB trial workspaces
+#   MODE=after-tb DRY_RUN=0 CONFIRM=yes \
+#       benchmarks/scripts/prune_benchmark_storage.sh
+#
+#   # after a SWE run: free SWE SIFs, keep summaries/patches
+#   MODE=after-swe DRY_RUN=0 CONFIRM=yes \
+#       benchmarks/scripts/prune_benchmark_storage.sh
+#
+#   # remove only the SIFs for one benchmark (keep all results)
+#   MODE=sifs BENCH=swe DRY_RUN=0 CONFIRM=yes \
+#       benchmarks/scripts/prune_benchmark_storage.sh
+#
+#   # clear Apptainer cache/tmp only
+#   MODE=scratch DRY_RUN=0 CONFIRM=yes \
+#       benchmarks/scripts/prune_benchmark_storage.sh
+#
+#   # full reset: results/, runs/, generated jobs/configs/logs, SIFs, scratch
+#   MODE=nuke DRY_RUN=0 CONFIRM=yes \
+#       benchmarks/scripts/prune_benchmark_storage.sh
+#
+# MODES: keep-results (=light) | light | sifs | scratch | partial |
+#        after-tb | after-swe | full | nuke
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-MODE="${MODE:-light}"                      # light | partial | sifs | scratch | full
+MODE="${MODE:-light}"                      # see the use cases above
 BENCH="${BENCH:-all}"                      # all | tb | swe (SIF selection)
 DRY_RUN="${DRY_RUN:-1}"                    # 1 = print only
 CONFIRM="${CONFIRM:-no}"                   # yes = allow DRY_RUN=0
@@ -42,8 +67,15 @@ APPTAINER_CACHEDIR="${APPTAINER_CACHEDIR:-}"
 die() { printf 'error: %s\n' "$*" >&2; exit 2; }
 say() { printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
+# Friendly aliases for the two ends of the usual workflow.
+case "$MODE" in
+    keep-results) MODE=light ;;
+    after-tb)     MODE=partial; BENCH=tb ;;
+    after-swe)    MODE=partial; BENCH=swe ;;
+    nuke)         MODE=full; BENCH=all ;;
+esac
 case "$MODE" in light|partial|sifs|scratch|full) ;; *)
-    die "MODE must be light|partial|sifs|scratch|full" ;;
+    die "MODE must be keep-results|light|sifs|scratch|partial|after-tb|after-swe|full|nuke" ;;
 esac
 case "$BENCH" in all|tb|swe) ;; *)
     die "BENCH must be all|tb|swe" ;;
@@ -157,6 +189,11 @@ case "$MODE" in
         ;;
 esac
 
+say "sizes after plan (before deletion they are the current sizes):"
+for d in "$RESULTS_DIR" "$RUNS_DIR" "$TB_SIF_CACHE" "$SWE_SIF_CACHE" \
+         "$SCRATCH_DIR" "$APPTAINER_CACHEDIR"; do
+    [[ -n "$d" && -d "$d" ]] && du -sh "$d" 2>/dev/null || true
+done
 say "done (dry_run=$DRY_RUN)"
 if [[ "$DRY_RUN" == "1" ]]; then
     echo "Nothing was deleted. Re-run with DRY_RUN=0 CONFIRM=yes."

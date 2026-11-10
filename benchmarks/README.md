@@ -110,7 +110,7 @@ the wrapper — it starts vLLM on the allocation (with the vLLM env's `bin` on
 campaign per agent:
 
 ```bash
-scripts/run_benchmark_slurm.sh
+benchmarks/scripts/run_benchmark_slurm.sh
 ```
 
 Every knob is a variable at the top of the script (`JOBID`, `DATASET`,
@@ -122,7 +122,7 @@ checkout and never pushes.
 
 ### Full matrix with `sbatch` (1–4 GPUs, different models)
 
-`scripts/submit_benchmark_slurm.sh` generates a batch script under
+`benchmarks/scripts/submit_benchmark_slurm.sh` generates a batch script under
 `experiments/slurm/` (git-ignored), regenerates the model configs under
 `experiments/configs/`, and submits it. Every knob is at the top of the file:
 
@@ -144,7 +144,7 @@ SUBMIT=1                   # 1 = sbatch; 0 = only write the file
 starts the server on the first `NUM_GPUS - BENCH_GPUS` GPUs, waits for
 `/health`, then runs every benchmark × agent **sequentially** (one agent at a
 time) and writes `results/<RUN_PREFIX>_<benchmark>_<agent>/summary_results.csv`.
-The model config is rewritten by `scripts/make_benchmark_config.py`, so changing
+The model config is rewritten by `benchmarks/scripts/make_benchmark_config.py`, so changing
 `MODEL_NAME` is enough.
 
 The two "full" sets are large: the local Terminal-Bench 2.1 checkout has **90
@@ -179,7 +179,7 @@ weights. Point the launcher at real scratch storage, not a 1 TB home:
 SIF_CACHE=/scratch/$USER/sif TB_CACHE=/scratch/$USER/cache \
 SCRATCH_DIR=/scratch/$USER/tmp APPTAINER_CACHEDIR=/scratch/$USER/apcache \
 APPTAINER_TMPDIR=/scratch/$USER/aptmp \
-  scripts/submit_benchmark_matrix.sh
+  benchmarks/scripts/submit_benchmark_matrix.sh
 ```
 
 If only home is available, run one benchmark at a time, prune SIFs/testbeds
@@ -192,29 +192,29 @@ before preparing the other. The stream is:
 
 ```bash
 # 1. Terminal-Bench images + staged task set; verify every SIF
-scripts/prepare_tb_sifs.sh
+benchmarks/scripts/prepare_tb_sifs.sh
 #    VERIFY=test does `apptainer test` on each (slower); VERIFY=none skips.
 
 # 2. run Terminal-Bench (the launcher detects experiments/tb-staged/prepared.json)
-BENCHMARKS=terminalbench-2.1 MODE=full scripts/submit_benchmark_slurm.sh
+BENCHMARKS=terminalbench-2.1 MODE=full benchmarks/scripts/submit_benchmark_slurm.sh
 
 # 3. keep summaries/patches/logs, drop TB SIFs and heavy trial workspaces
 DRY_RUN=0 CONFIRM=yes MODE=partial BENCH=tb \
-    scripts/prune_benchmark_storage.sh
+    benchmarks/scripts/prune_benchmark_storage.sh
 
 # 4. SWE-bench instances + SIFs
-scripts/prepare_swe_sifs.sh
+benchmarks/scripts/prepare_swe_sifs.sh
 #    SWE_DATASET=SWE-bench/SWE-bench_Verified for the 500-instance set.
 
 # 5. run SWE-bench
-BENCHMARKS=swe-bench-lite-full MODE=full scripts/submit_benchmark_slurm.sh
+BENCHMARKS=swe-bench-lite-full MODE=full benchmarks/scripts/submit_benchmark_slurm.sh
 
 # 6. after it finishes, free the SWE SIFs too
 DRY_RUN=0 CONFIRM=yes MODE=partial BENCH=swe \
-    scripts/prune_benchmark_storage.sh
+    benchmarks/scripts/prune_benchmark_storage.sh
 ```
 
-`scripts/prune_benchmark_storage.sh` is **dry-run by default**. Degrees:
+`benchmarks/scripts/prune_benchmark_storage.sh` is **dry-run by default**. Degrees:
 
 | `MODE` | Removes | Keeps |
 |---|---|---|

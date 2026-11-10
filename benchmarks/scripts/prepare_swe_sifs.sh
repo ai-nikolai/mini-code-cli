@@ -3,16 +3,16 @@
 # Prepare every SWE-bench SIF for one split, verify the images, and keep the
 # instance list the grader needs.
 #
-#     scripts/prepare_swe_sifs.sh
-#     SWE_DATASET=SWE-bench/SWE-bench_Verified scripts/prepare_swe_sifs.sh
-#     SWE_LIMIT=5 VERIFY=exec scripts/prepare_swe_sifs.sh
+#     benchmarks/scripts/prepare_swe_sifs.sh
+#     SWE_DATASET=SWE-bench/SWE-bench_Verified benchmarks/scripts/prepare_swe_sifs.sh
+#     SWE_LIMIT=5 VERIFY=exec benchmarks/scripts/prepare_swe_sifs.sh
 #
 # Pulling is serial (one `apptainer pull` per instance) and a full Lite split is
 # ~385 GB at the measured mean; point SIF_CACHE at scratch storage.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # --- edit these -----------------------------------------------------------

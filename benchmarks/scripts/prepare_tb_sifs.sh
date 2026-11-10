@@ -3,8 +3,8 @@
 # Prepare every Terminal-Bench 2.1 SIF, verify it, and write the staged dataset
 # the launcher can run from (task.toml points at the SIF).
 #
-#     scripts/prepare_tb_sifs.sh
-#     LIMIT=3 VERIFY=test scripts/prepare_tb_sifs.sh
+#     benchmarks/scripts/prepare_tb_sifs.sh
+#     LIMIT=3 VERIFY=test benchmarks/scripts/prepare_tb_sifs.sh
 #
 # The derived SIFs include the harbor server + python and the baked
 # mini_code_cli package; the staged copy is what `TB_STAGED` in
@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 # --- edit these -----------------------------------------------------------

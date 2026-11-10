@@ -357,11 +357,11 @@ python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all     
 
 # On an existing Slurm GPU allocation: start vLLM, wait for /health, then run
 # one agent at a time (variables at the top of the script):
-scripts/run_benchmark_slurm.sh
+benchmarks/scripts/run_benchmark_slurm.sh
 # Or generate/submit an sbatch job for the full matrix on 1-4 GPUs:
-scripts/submit_benchmark_slurm.sh
+benchmarks/scripts/submit_benchmark_slurm.sh
 # Prepare/verify the Terminal-Bench SIFs on a CPU partition:
-scripts/submit_prepare_tb_sifs.sh
+benchmarks/scripts/submit_prepare_tb_sifs.sh
 ```
 
 Both SWE-bench splits work on this cluster and need no extra repository — `swe-bench-lite`
