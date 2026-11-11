@@ -1,7 +1,7 @@
 [project]
 name = "mini-code-cli"
 # version = { file = "mini_code_cli/__init__.py", attr = "__version__" }
-version = "0.1.1.4"
+version = "0.2.0.0"
 description = "Mini Coding Agent. Allows you to easily experiment with a small coding agent."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,8 +31,13 @@ classifiers = [
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-include = ["mini_code_cli*"]
+# List packages explicitly. The benchmark checkout contains large trees
+# (external_repos/, benchmarks/.cache/, results/, ...) and modern setuptools'
+# namespace discovery walks all of them: `find_namespace_packages` found
+# ~207k "packages" and took ~90s here, then tried to ship them. Naming the
+# two real packages keeps the sdist to the CLI itself and the metadata small.
+[tool.setuptools]
+packages = ["mini_code_cli", "mini_code_cli.subagents"]
 
 [project.scripts]
 mini-code = "mini_code_cli.agent_loop:main"
