@@ -187,7 +187,7 @@ class TuiConsoleTest(unittest.TestCase):
         matches = re.findall(r"\x1b\[(\d+);(\d+)H\x1b\[\?25h", output)
         return tuple(map(int, matches[-1]))
 
-    def test_clear_screen_empties_the_core_view(self):
+    def test_clear_screen_keeps_the_conversation_and_clears_notices(self):
         console = self.console()
         with mock.patch.object(
                 tui.shutil, "get_terminal_size",
@@ -196,15 +196,25 @@ class TuiConsoleTest(unittest.TestCase):
             console.start_tui()
             console.turn("You", "hello")
             console.turn("Assistant", "hi there")
+            console.note("watch out", "warn")
+            console.status_box(["old command output"], title="help")
+            console.scroll_body(2)
 
             console.clear_screen()
 
-            self.assertEqual(list(console._turns), [])
-            self.assertIsNone(console._current_assistant)
-            self.assertEqual(console._turn_id, 0)
+            content = "\n".join(console._content_lines(50))
+            self.assertIn("hello", content)
+            self.assertIn("hi there", content)
+            self.assertEqual(list(console._turns), [
+                {"role": "You", "content": "hello", "turn_id": 1,
+                 "tools": [], "background": []},
+                {"role": "Assistant", "content": "hi there", "turn_id": 1,
+                 "tools": [], "background": []},
+            ])
+            self.assertEqual(console._notices, [])
+            self.assertEqual(console._notice_line, "")
+            self.assertEqual(console._overlay_lines, [])
             self.assertEqual(console._scroll_offset, 0)
-            self.assertIn("No conversation yet",
-                          "\n".join(console._content_lines(50)))
             console.stop_tui()
 
     def test_eof_with_a_non_empty_buffer_returns_the_text(self):

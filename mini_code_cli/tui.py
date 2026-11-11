@@ -399,19 +399,14 @@ class TuiConsole(Console):
     def clear_screen(self):
         if not self._active:
             return super().clear_screen()
-        # /clear empties the middle pane while the conversation itself stays in
-        # the session. The core view is built from _turns, so reset that state
-        # (and the cursor into it) rather than only the last printed lines.
-        self._turns.clear()
-        self._turn_id = 0
-        self._current_assistant = None
-        self._current_tool_entry = None
-        self._last_user = ""
-        self._last_assistant = ""
+        # In the fixed TUI, /clear behaves like Escape in command mode: close
+        # any command output/overlay, return a scrolled view to the bottom, and
+        # drop transient info/warning notices. The core conversation stays
+        # visible -- only the scrolling console clears the terminal itself.
         self._overlay_lines = []
+        self._scroll_offset = 0
         self._notice_line = ""
         self._notices = []
-        self._scroll_offset = 0
         self.render()
 
     # -- rendering ---------------------------------------------------------

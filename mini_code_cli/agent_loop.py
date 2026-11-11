@@ -226,7 +226,7 @@ def print_help(args, console=None):
         ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
         ("", "a bare /reset only re-saves the current state (no data loss)"),
-        ("/clear", "clear the screen (keeps the conversation history)"),
+        ("/clear", "dismiss command output/notices (keeps the conversation)"),
         ("/help", "show this help"),
         ("/quit, /exit", "save the session and exit"),
         ("", "Shift+Enter (or Ctrl-J) inserts a new line; Enter sends."),
@@ -2556,16 +2556,17 @@ class AgentSession:
                                 fg="cyan", dim=True)
 
     def _clear_and_show_last(self):
-        """Handle /clear: wipe the screen and re-print the last turn.
+        """Handle /clear: dismiss transient output and re-orient the view.
 
-        The conversation itself is unchanged; we just redraw the most recent
-        exchange so the user re-orients after clearing the view. If there is no
-        assistant reply yet, the last user turn is shown instead.
+        The conversation itself is unchanged. In the fixed TUI this behaves
+        like Escape in command mode: it closes command output, returns a
+        scrolled view to the bottom, and drops info/warning notices, while the
+        core conversation stays on screen. The scrolling console clears the
+        terminal and re-prints the last turn instead.
         """
         self.console.clear_screen()
         if self.tui_active:
-            # The fixed TUI's /clear means "empty the middle pane"; the input
-            # box and dashboard remain. Do not re-print the last turn.
+            # The TUI keeps the conversation visible; do not re-print it.
             return
         last_role = last_text = None
         for m in reversed(self.messages):
