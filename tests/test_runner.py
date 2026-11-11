@@ -40,6 +40,19 @@ class CallFunctionWithTimeoutTest(unittest.TestCase):
         self.assertLess(elapsed, 5, "the wall-clock guard did not fire promptly")
         self.assertIn("timed out", stream.getvalue())
 
+    def test_a_broad_except_exception_cannot_swallow_the_timeout(self):
+        console, _stream = make_console()
+
+        def swallows_exceptions():
+            try:
+                time.sleep(10)
+            except Exception:  # noqa: BLE001 - the bug being pinned
+                return "Error: "
+
+        result = runner.call_function_with_timeout(
+            swallows_exceptions, {}, "shell", 1, console=console)
+        self.assertIn("timed out after 1 seconds", result)
+
     def test_a_raising_tool_does_not_propagate(self):
         console, stream = make_console()
         result = runner.call_function_with_timeout(
