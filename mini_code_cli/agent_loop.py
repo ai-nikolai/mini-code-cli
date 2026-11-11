@@ -166,9 +166,10 @@ def parse_args():
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
                         help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
+    parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
 
-    parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo")
-    parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --load-last-session")
+    parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
+    parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
 
     # Output verbosity
     parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
@@ -182,6 +183,7 @@ def parse_args():
         args.sudo = True
         args.auto_mode = True
         args.enable_skills = True
+        args.background = True
 
     if args.all_last:
         args.load_last_session = True
@@ -991,10 +993,12 @@ class AgentSession:
             self.tools_dict.update(skills.get_skills_file_tools_dict(self.allowed_dir))
             self.llm_tools.extend(skills.get_skills_file_tools(self.allowed_dir))
 
-        # Background tasks are useful with shell execution or sub-agents; a
-        # background session (a sub-agent child) never gets its own task list.
+        # Background tasks are opt-in: --background (or --all) plus shell
+        # execution or sub-agents. A background session (a sub-agent child)
+        # never gets its own task list.
         self.enable_background = (
-            not getattr(self, "background_mode", False)
+            bool(getattr(args, "background", False))
+            and not getattr(self, "background_mode", False)
             and (shell_execution_enabled(args) or self.enable_subagents))
         if self.enable_background:
             self.tools_dict.update(background_mod.background_tools_dict(

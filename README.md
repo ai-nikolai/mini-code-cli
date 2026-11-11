@@ -48,7 +48,7 @@ mini-code --url "https://api.deepseek.com" --model "deepseek-v4-flash"
 **3 — The shortcuts** (plan mode, sub-agents, shell, auto-mode, no permission prompts):
 
 ```bash
-mini-code --all                    # = --plan --enable-subagents --enable-shell --skills --auto-mode --sudo
+mini-code --all                    # = --plan --enable-subagents --enable-shell --skills --auto-mode --sudo --background
 mini-code --all-last               # ...and continue your last session
 ```
 
@@ -81,6 +81,7 @@ given a reference implementation.
 | `--allowed-dir DIR` | `./` | sandbox for **file** tools (does not restrict the shell) |
 | `-s`, `--enable-shell` | off | allow shell execution (classifier always applies) |
 | `-g`, `--enable-subagents` | off | expose sub-agents as tools |
+| `--background` | off | enable background shell/sub-agent tasks and the `background` tool; needs `--enable-shell` or `--enable-subagents` |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
 | `--plan-strategy NAME` | `plan-verify-step` | `plan-verify-step`, `plan-verify` or `open-plan` (implies `--plan`) |
@@ -92,7 +93,7 @@ given a reference implementation.
 | `--cache-dir DIR` | `~/.cache/mini/sessions/` | where session histories are stored |
 | `--restore-session PATH` | — | continue a specific previous session |
 | `-l`, `--load-last-session` | off | continue the session recorded in the `.mini` pointer |
-| `--all` | off | `--plan --enable-subagents --enable-shell --skills --auto-mode --sudo` |
+| `--all` | off | `--plan --enable-subagents --enable-shell --skills --auto-mode --sudo --background` |
 | `--all-last` | off | `--all` + `--load-last-session` |
 | `--verbose` | off | print full detail (default: user/assistant turns, token usage, tool calls only) |
 | `-h`, `--help` | — | show the built-in help |
@@ -112,7 +113,7 @@ parameter a model does not need is defaulted, so omitting it keeps the previous 
 | `web_search` | best-effort lookup: related queries + a short Wikipedia extract. Never raises |
 | `read_website` | fetch raw text/HTML of a URL (bounded by `--tool-timeout`), `max_chars` caps size |
 | `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported |
-| `background` | start/list/output/wait/cancel background **shell** tasks (needs `--enable-shell`) or **sub-agent** tasks (needs `--enable-subagents`); output is captured in a per-task log |
+| `background` | start/list/output/wait/cancel background **shell** tasks (needs `--background --enable-shell`) or **sub-agent** tasks (needs `--background --enable-subagents`); output is captured in a per-task log |
 
 ## Sub-agents
 
@@ -169,7 +170,7 @@ to the model automatically when `--enable-subagents` is set. See
 
 ## Background tasks
 
-When shell execution or sub-agents are enabled, the agent also gets a `background` tool:
+When `--background` is enabled together with shell execution or sub-agents, the agent also gets a `background` tool:
 
 - `background(action="start", command="pytest -q")` starts a long command in its own process group;
 - `background(action="start", kind="subagent", subagent="software_engineer", task="...")` starts

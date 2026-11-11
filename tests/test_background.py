@@ -3,11 +3,13 @@
 import io
 import os
 import shutil
+import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
-from mini_code_cli import background, ui
+from mini_code_cli import agent_loop, background, ui
 from mini_code_cli.agent_loop import AgentSession
 from mini_code_cli.subagents import SubAgent, clear_registry, register
 
@@ -104,10 +106,12 @@ class BackgroundManagerTest(_Base):
 
 
 class BackgroundSessionTest(_Base):
-    def session(self, enable_shell=False, enable_subagents=False):
+    def session(self, enable_shell=False, enable_subagents=False,
+                background=True):
         args = make_args(self.workdir, self.cache_dir,
                          enable_subagents=enable_subagents)
         args.enable_shell = enable_shell
+        args.background = background
         console = ui.Console(stream=io.StringIO(), color=False, unicode=False,
                              verbose=False)
         session = AgentSession(args, console=console)
@@ -117,12 +121,20 @@ class BackgroundSessionTest(_Base):
     def output(self, session):
         return session.console.stream.getvalue()
 
-    def test_background_tool_is_only_registered_with_shell_or_subagents(self):
-        self.assertNotIn("background", self.session().tools_dict)
+    def test_background_tool_requires_the_flag_and_a_task_kind(self):
+        # Off by default even when shell/sub-agents are available.
+        self.assertNotIn("background",
+                         self.session(enable_shell=True,
+                                      background=False).tools_dict)
+        self.assertNotIn("background",
+                         self.session(enable_subagents=True,
+                                      background=False).tools_dict)
+        # The flag alone is not enough: it needs a task kind it can start.
+        self.assertNotIn("background", self.session(background=True).tools_dict)
         self.assertIn("background",
-                      self.session(enable_shell=True).tools_dict)
+                      self.session(enable_shell=True, background=True).tools_dict)
         self.assertIn("background",
-                      self.session(enable_subagents=True).tools_dict)
+                      self.session(enable_subagents=True, background=True).tools_dict)
 
     def test_background_shell_task_flows_through_the_tool_and_command(self):
         session = self.session(enable_shell=True)
@@ -195,3 +207,15 @@ class BackgroundSessionTest(_Base):
         self.assertEqual(
             session.background_tasks.wait(task.id, timeout=5)["status"],
             "cancelled")
+
+
+class BackgroundCliTest(unittest.TestCase):
+    def test_background_is_off_by_default_and_in_all(self):
+        with mock.patch.object(sys, "argv", ["mini-code"]):
+            self.assertFalse(agent_loop.parse_args().background)
+        with mock.patch.object(sys, "argv", ["mini-code", "--background"]):
+            self.assertTrue(agent_loop.parse_args().background)
+        with mock.patch.object(sys, "argv", ["mini-code", "--all"]):
+            self.assertTrue(agent_loop.parse_args().background)
+        with mock.patch.object(sys, "argv", ["mini-code", "--all-last"]):
+            self.assertTrue(agent_loop.parse_args().background)
