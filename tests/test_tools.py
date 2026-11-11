@@ -79,6 +79,13 @@ class ReadFileRangeTest(ToolTestCase):
         self.assertIn("truncated", result)
         self.assertIn("offset/limit", result)
 
+    def test_large_paged_read_does_not_scan_for_the_total(self):
+        path = self.write(("line\n") * 100)
+        with mock.patch.object(tools, "MAX_LINE_COUNT_SCAN_BYTES", 10):
+            result = tools.read_file(path, offset=1, limit=1)
+        self.assertTrue(result.startswith("[lines 1-1]"))
+        self.assertIn("total line count not read", result)
+
     def test_paged_read_is_bounded(self):
         path = self.write(("x" * 1_000 + "\n") * 200)
         result = tools.read_file(path, offset=1)
@@ -134,6 +141,14 @@ class AtomicWriteTest(ToolTestCase):
 
 
 class ToolOutputBoundsTest(ToolTestCase):
+    def test_grep_streams_long_lines(self):
+        path = self.path("long.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("x" * (tools.MAX_GREP_LINE_CHARS * 3) + "\nmatch\n")
+        result = tools.grep("x+", path)
+        self.assertIn("[line truncated]", result)
+        self.assertIn("match", tools.grep("match", path))
+
     def test_grep_output_is_bounded_even_with_unlimited_results(self):
         path = self.path("many.txt")
         with open(path, "w", encoding="utf-8") as handle:

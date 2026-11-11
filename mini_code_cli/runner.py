@@ -14,8 +14,16 @@ from .config import DEFAULT_TOOL_TIMEOUT
 # mistaken for our wall-clock timeout. The old implementation redefined a local
 # ``TimeoutError`` class, which shadowed the stdlib one and meant any tool that
 # legitimately raised ``TimeoutError`` was silently reported as "timed out".
-class _TimedOut(Exception):
-    pass
+class _TimedOut(BaseException):
+    """Sentinel raised by SIGALRM.
+
+    It deliberately subclasses ``BaseException``, not ``Exception``: tools
+    often wrap their work in a broad ``except Exception`` (``run_shell_command``
+    does), and an ``Exception`` sentinel was swallowed there, returning a bare
+    ``"Error: "`` instead of the proper timeout message. ``call_function_with_timeout``
+    catches this type explicitly before anything else.
+    """
+
 
 
 def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_TOOL_TIMEOUT,
