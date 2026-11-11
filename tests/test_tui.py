@@ -430,6 +430,61 @@ with mock.patch.object(utils, "call_openai_server", new=fake), \
             proc.wait(timeout=5)
             os.close(master)
 
+    def test_kitty_shift_enter_and_ctrl_c_sequences(self):
+        child = r"""
+import sys
+from mini_code_cli.ui import TuiConsole
+c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
+c.start_tui()
+sys.stderr.write("READY\n")
+sys.stderr.flush()
+first = c.read_line("")
+second = c.read_line("")
+c.stop_tui()
+sys.stdout.write("\nRESULT:%r|%r\n" % (first, second))
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            time.sleep(0.3)
+            os.write(master, b"a\x1b[13;2ub\r")
+            time.sleep(0.25)
+            os.write(master, b"\x1b[99;5u")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"RESULT:'a\\nb'|None", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
     def test_question_box_disappears_after_the_answer(self):
         child = r"""
 import sys

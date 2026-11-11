@@ -1317,7 +1317,8 @@ class TuiConsole(Console):
                 self._old_winch = None
         # Ask xterm-compatible terminals to distinguish modified Enter keys.
         # Shift+Enter then arrives as CSI 27;2;13~ instead of a plain CR.
-        self._write("\x1b[>4;2m\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
+        self._write("\x1b[?1049h\x1b[2J\x1b[H"
+                    "\x1b[>4;2m\x1b[>1u\x1b[?25l")
         self.render()
         return True
 
@@ -1338,7 +1339,7 @@ class TuiConsole(Console):
             except (ValueError, OSError):
                 pass
             self._old_winch = None
-        self._write("\x1b[>4;0m\x1b[?25h\x1b[r\x1b[?1049l")
+        self._write("\x1b[<u\x1b[>4;0m\x1b[?25h\x1b[r\x1b[?1049l")
 
     def _write(self, text):
         self.stream.write(text)
@@ -1887,8 +1888,33 @@ class TuiConsole(Console):
             found = "".join(buffer).find("\n", cursor)
             return len(buffer) if found < 0 else found
 
+        def submit_current():
+            nonlocal cursor
+            text = "".join(buffer)
+            if text.strip() and (not self._input_history
+                                 or self._input_history[-1] != text):
+                self._input_history.append(text)
+                if len(self._input_history) > 100:
+                    del self._input_history[0]
+            buffer[:] = []
+            cursor = 0
+            self._input_active = False
+            self._input_buffer = []
+            self._input_cursor = 0
+            self._notice_line = ""
+            self.render()
+            return text
+
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            # Discard keys typed while the agent was busy; otherwise an arrow
+            # pressed during an LLM/tool call replays at the next prompt and
+            # scrambles the fixed view.
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            except (OSError, ValueError, termios.error):
+                pass
+            self._input_pending.clear()
             while True:
                 raw = read_one()
                 if not raw:
@@ -1896,20 +1922,7 @@ class TuiConsole(Console):
                     self.render()
                     return None
                 if raw == b"\r":
-                    text = "".join(buffer)
-                    if text.strip() and (not self._input_history
-                                         or self._input_history[-1] != text):
-                        self._input_history.append(text)
-                        if len(self._input_history) > 100:
-                            del self._input_history[0]
-                    buffer[:] = []
-                    cursor = 0
-                    self._input_active = False
-                    self._input_buffer = []
-                    self._input_cursor = 0
-                    self._notice_line = ""
-                    self.render()
-                    return text
+                    return submit_current()
                 if raw == b"\n":
                     buffer[cursor:cursor] = ["\n"]
                     cursor += 1
@@ -1927,21 +1940,68 @@ class TuiConsole(Console):
                         continue
                     if seq in (b"[13u", b"[13;1u"):
                         # kitty/CSI-u unmodified Enter, if the terminal reports it
-                        text = "".join(buffer)
-                        if text.strip() and (
-                                not self._input_history
-                                or self._input_history[-1] != text):
-                            self._input_history.append(text)
-                            if len(self._input_history) > 100:
-                                del self._input_history[0]
-                        buffer[:] = []
-                        cursor = 0
-                        self._input_active = False
-                        self._input_buffer = []
-                        self._input_cursor = 0
-                        self._notice_line = ""
-                        self.render()
-                        return text
+                        return submit_current()
+                    if seq.startswith(b"[") and seq.endswith(b"u"):
+                        # Kitty/CSI-u control keys. Enabling the protocol makes
+                        # Ctrl+letter and Escape unambiguous; map the handful
+                        # this editor uses back to their raw behaviour.
+                        parts = seq[1:-1].split(b";")
+                        try:
+                            code = int(parts[0])
+                        except (TypeError, ValueError):
+                            code = None
+                        mod = parts[1].split(b":")[0] if len(parts) > 1 else b""
+                        if code == 27:
+                            self.dismiss_overlay()
+                        elif code == 127:
+                            if cursor > 0:
+                                del buffer[cursor - 1]
+                                cursor -= 1
+                                sync()
+                        elif code == 9:
+                            buffer[cursor:cursor] = ["\t"]
+                            cursor += 1
+                            sync()
+                        elif code in (13, 109):
+                            return submit_current()
+                        elif code in (10, 106):
+                            buffer[cursor:cursor] = ["\n"]
+                            cursor += 1
+                            sync()
+                        elif mod.startswith(b"5"):
+                            if code == 99:              # Ctrl-C
+                                raise KeyboardInterrupt
+                            if code == 100:             # Ctrl-D
+                                if not buffer:
+                                    self._input_active = False
+                                    self.render()
+                                    return None
+                                if cursor < len(buffer):
+                                    del buffer[cursor]
+                                    sync()
+                            elif code == 97:             # Ctrl-A
+                                cursor = line_start()
+                                sync()
+                            elif code == 101:            # Ctrl-E
+                                cursor = line_end()
+                                sync()
+                            elif code == 107:            # Ctrl-K
+                                del buffer[cursor:]
+                                sync()
+                            elif code == 117:            # Ctrl-U
+                                del buffer[:cursor]
+                                cursor = 0
+                                sync()
+                            elif code == 108:            # Ctrl-L
+                                self._overlay_lines = []
+                                self._last_user = ""
+                                self._last_assistant = ""
+                                self._notice_line = ""
+                                sync()
+                            elif code == 116:            # Ctrl-T
+                                self.expand_tool(1)
+                                sync()
+                        continue
                     if seq in (b"[1;2A", b"[a"):
                         self.scroll_body(1)
                         continue

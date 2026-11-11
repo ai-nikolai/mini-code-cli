@@ -1692,12 +1692,16 @@ class AgentSession:
             # Ctrl-C during a permission prompt already saved the session.
             return
         except KeyboardInterrupt:
-            self.console.note("Interrupting: Mini Code Exiting...", "error")
+            # Shut down first (restoring the TUI screen and cancelling
+            # background tasks), then print the reason on the normal screen.
             self.shutdown(farewell=False)
+            self.console.note(
+                "Interrupting: Mini Code Exiting... Background tasks "
+                "cancelled; session saved.", "error")
             return
         except Exception as e:
-            self.console.note(f"Exception {e}. Exiting...", "error")
             self.shutdown(farewell=False)
+            self.console.note(f"Exception {e}. Exiting...", "error")
             return
         finally:
             # A SystemExit/fatal path can bypass shutdown(); make sure
