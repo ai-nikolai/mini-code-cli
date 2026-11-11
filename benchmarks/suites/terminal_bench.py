@@ -26,6 +26,7 @@ Result files differ too, so :meth:`collect` understands both:
   ``{"results": [{"task_id", "is_resolved", "failure_mode"}]}``
 """
 import json
+import math
 import os
 import re
 
@@ -764,13 +765,30 @@ def _timeout(trial, key):
     return (trial.timeouts or {}).get(key, 3_600 if key == "agent_seconds" else 1_800)
 
 
+def _staged_task_count(options):
+    """Number of tasks in a local ``dataset_dir`` (the staged SIF dataset)."""
+    path = (options or {}).get("dataset_dir")
+    if not path or not os.path.isdir(path):
+        return None
+    count = sum(
+        1 for name in os.listdir(path)
+        if os.path.isfile(os.path.join(path, name, "task.toml")))
+    return count or None
+
+
 def _harness_timeout(trial, options, timeouts=None):
     """A hard wall-clock cap for one harness job.
 
     The harness owns the per-task timeout, but without a wrapper cap a stuck
     harbor/tb process can run forever. Prefer an explicit
     ``harness_timeout_sec``; otherwise derive one from the configured
-    ``instance_seconds`` times the number of tasks in this trial.
+    ``instance_seconds`` times the number of *batches* of tasks this trial
+    will run.
+
+    A full run has neither ``task_ids`` nor ``limit``: the tasks are the whole
+    staged ``dataset_dir``, and the harness runs ``n_concurrent`` at a time.
+    Counting that as one task (the old behaviour) killed an 89-task run after
+    a single 2-hour instance budget.
     """
     configured = (options or {}).get("harness_timeout_sec")
     if configured:
@@ -778,5 +796,8 @@ def _harness_timeout(trial, options, timeouts=None):
     budget = (timeouts or trial.timeouts or {}).get("instance_seconds")
     if not budget:
         return None
-    count = len(trial.suite.task_ids) or trial.limit or 1
-    return int(budget) * max(1, int(count))
+    count = (len(trial.suite.task_ids) if trial.suite.task_ids else None)
+    count = count or trial.limit or _staged_task_count(options) or 1
+    concurrency = max(int((options or {}).get("n_concurrent", 1) or 1), 1)
+    batches = max(1, math.ceil(int(count) / concurrency))
+    return int(budget) * batches

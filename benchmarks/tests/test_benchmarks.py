@@ -1200,3 +1200,37 @@ class AgentMetricsTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["llm_calls"], "4")
         self.assertEqual(rows[0]["tool_calls"], "3")
+
+
+class HarnessTimeoutTest(unittest.TestCase):
+    """The wrapper cap must cover every batch of a full staged dataset."""
+
+    def trial(self, options, timeouts=None, task_ids=None, limit=None):
+        import types
+        return types.SimpleNamespace(
+            suite=types.SimpleNamespace(task_ids=task_ids, options=options),
+            limit=limit,
+            timeouts=timeouts or {"instance_seconds": 7200})
+
+    def test_a_full_local_dataset_is_measured_in_concurrent_batches(self):
+        from benchmarks.suites import terminal_bench as tb_module
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("a", "b", "c"):
+                os.makedirs(os.path.join(tmp, name))
+                with open(os.path.join(tmp, name, "task.toml"), "w") as handle:
+                    handle.write("version = \"1.0\"\n")
+            options = {"dataset_dir": tmp, "n_concurrent": 2}
+            trial = self.trial(options)
+            # 3 tasks at 2 concurrent = 2 batches of the 7200 s instance budget.
+            self.assertEqual(
+                tb_module._harness_timeout(trial, options, trial.timeouts),
+                7200 * 2)
+
+    def test_an_explicit_harness_timeout_wins(self):
+        from benchmarks.suites import terminal_bench as tb_module
+        options = {"harness_timeout_sec": 12345,
+                   "dataset_dir": "/nonexistent", "n_concurrent": 2}
+        trial = self.trial(options)
+        self.assertEqual(
+            tb_module._harness_timeout(trial, options, trial.timeouts),
+            12345)
