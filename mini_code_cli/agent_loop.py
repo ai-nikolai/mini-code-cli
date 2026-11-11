@@ -35,6 +35,7 @@ from . import tools
 from . import utils
 from .utils import oneline, plural
 from . import ui
+from . import tui as tui_mod
 from . import subagents
 from . import skills
 from . import agent_files
@@ -231,7 +232,7 @@ def print_help(args, console=None):
         ("", "Shift+Enter (or Ctrl-J) inserts a new line; Enter sends."),
     ):
         console.emit(f"  {command:16} {description}")
-    if ui.tui_mode(getattr(args, "tui", "auto")) != "off":
+    if tui_mod.tui_mode(getattr(args, "tui", "auto")) != "off":
         console.emit("  TUI input        ↑/↓ history, ←/→ edit, Home/End, "
                         "Ctrl-A/E/K/U/L.")
     if getattr(args, "enable_subagents", False) or args.verbose:
@@ -606,11 +607,11 @@ class AgentSession:
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
         self.started_at = time.monotonic()
 
-        self.tui_mode = ui.tui_mode(getattr(args, "tui", "auto"))
+        self.tui_mode = tui_mod.tui_mode(getattr(args, "tui", "auto"))
         if console is None:
             use_tui = (self.tui_mode == "on"
-                       or (self.tui_mode == "auto" and ui.TuiConsole.supported()))
-            console = ui.TuiConsole() if use_tui else ui.console
+                       or (self.tui_mode == "auto" and tui_mod.TuiConsole.supported()))
+            console = tui_mod.TuiConsole() if use_tui else ui.console
         self.console = console
         self.console.verbose = getattr(args, "verbose", False)
 
@@ -657,8 +658,7 @@ class AgentSession:
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = (self.tui_mode != "off"
-                    and isinstance(self.console, ui.TuiConsole))
-        self.tui_active = False
+                    and isinstance(self.console, tui_mod.TuiConsole))
         self.restored_session = False
         self.compaction_strategy = getattr(
             self.args, "compaction_strategy",
@@ -1640,9 +1640,8 @@ class AgentSession:
         # consume stdin). None of them depends on which session is finally used:
         # they read args, allowed_dir, cache_dir, server_url and the resolved
         # model, plus the provisional id minted in __init__.
-        self.tui_active = False
-        if self.tui and isinstance(self.console, ui.TuiConsole):
-            self.tui_active = self.console.start_tui()
+        if self.tui and isinstance(self.console, tui_mod.TuiConsole):
+            self.console.start_tui()
         if not self.tui_active:
             self.print_welcome()
 
@@ -1713,8 +1712,13 @@ class AgentSession:
                     getattr(self, "_exit_background", 0), background_cancelled)
             if self.tui_active:
                 self.console.stop_tui()
-                self.tui_active = False
         self.shutdown()
+
+    @property
+    def tui_active(self):
+        """Whether the fixed TUI frame is currently on screen."""
+        return (self.tui and isinstance(self.console, tui_mod.TuiConsole)
+                and self.console.active)
 
     def _emit_tip(self):
         """Point at the history/navigation commands once, at startup."""
@@ -2796,7 +2800,6 @@ class AgentSession:
         """
         if self.tui_active:
             self.console.stop_tui()
-            self.tui_active = False
         background_cancelled = len(self.background_tasks.running())
         self.background_tasks.shutdown()
         self._exit_background = max(

@@ -35,7 +35,8 @@ suite.
 | `background.py` | Thread-safe background-task registry for shell commands and sub-agent tasks: process groups, log/output tails, wait/cancel, and the `background` tool schema. |
 | `compaction.py` | The compaction-strategy registry (`summarise`, `predict-files`, `predict-messages`), the index parser/selector used by `predict-messages`, and the char cap that stops a strategy refilling the context. |
 | `agent_files.py` | Agent-owned files under `--allowed-dir/.mini`: the optional scratch-pad (`SCRATCHPAD.md`) and the `open-plan` document (`PLAN.md`). Created best-effort; the normal file tools reach them through the sandbox. |
-| `ui.py` | The whole terminal renderer (banner, turns, notes, permission box, the "… thinking" spinner, transient/non-scrolling tool-call region, history views). Stdlib only; degrades gracefully to ASCII / no-colour. |
+| `ui.py` | The scrolling terminal renderer (banner, turns, notes, permission box, spinners, transient tool-call region, history views). Stdlib only; degrades gracefully to ASCII / no-colour. |
+| `tui.py` | The opt-in fixed-screen renderer (`TuiConsole`): dashboard, core conversation, scrolling viewport, questions, input box, diff redraw and the key protocol handling. Shares styling/helpers with `ui.py`. |
 | `tokens.py` | Token accounting: `estimate_messages_tokens`, `project_input_tokens` (the projection that drives compaction) and `accumulate_usage`. Stdlib only, no I/O, so the budget maths is unit-testable. |
 | `skills.py` | The optional skills feature (`--skills`): the `.mini` directory of `skill.md` files, the `SKILLS.md` summary, and the `list_skills` / `read_skill` / `create_skill` / `run_skill` tools. Script execution stays inside the skill directory and is never run through a shell. |
 | `utils.py` | `call_openai_server` (the one place we touch `requests`) and `determine_vllm_model`. |

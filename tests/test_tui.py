@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest import mock
 
-from mini_code_cli import agent_loop, ui
+from mini_code_cli import agent_loop, tui, ui
 from mini_code_cli.agent_loop import AgentSession
 
 from test_e2e_agent_loop import make_args
@@ -32,18 +32,18 @@ class TuiCliTest(unittest.TestCase):
 
     def test_auto_support_is_conservative(self):
         stdin, stdout = _FakeTty(), _FakeTty()
-        with mock.patch.object(ui.sys, "stdin", stdin), \
-                mock.patch.object(ui.sys, "stdout", stdout), \
+        with mock.patch.object(tui.sys, "stdin", stdin), \
+                mock.patch.object(tui.sys, "stdout", stdout), \
                 mock.patch.dict(os.environ, {"TERM": "xterm-256color"}):
-            self.assertTrue(ui.TuiConsole.supported())
-        with mock.patch.object(ui.sys, "stdin", stdin), \
-                mock.patch.object(ui.sys, "stdout", stdout), \
+            self.assertTrue(tui.TuiConsole.supported())
+        with mock.patch.object(tui.sys, "stdin", stdin), \
+                mock.patch.object(tui.sys, "stdout", stdout), \
                 mock.patch.dict(os.environ, {"TERM": "dumb"}):
-            self.assertFalse(ui.TuiConsole.supported())
-        with mock.patch.object(ui.sys, "stdin", io.StringIO()), \
-                mock.patch.object(ui.sys, "stdout", stdout), \
+            self.assertFalse(tui.TuiConsole.supported())
+        with mock.patch.object(tui.sys, "stdin", io.StringIO()), \
+                mock.patch.object(tui.sys, "stdout", stdout), \
                 mock.patch.dict(os.environ, {"TERM": "xterm-256color"}):
-            self.assertFalse(ui.TuiConsole.supported())
+            self.assertFalse(tui.TuiConsole.supported())
 
 
 class BaseMultilinePtyTest(unittest.TestCase):
@@ -105,12 +105,12 @@ class _FakeTty(io.StringIO):
 
 class TuiConsoleTest(unittest.TestCase):
     def console(self, color=False):
-        return ui.TuiConsole(stream=_FakeTty(), color=color, unicode=False)
+        return tui.TuiConsole(stream=_FakeTty(), color=color, unicode=False)
 
     def test_fixed_view_redraws_summary_body_and_input_box(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             self.assertTrue(console.start_tui())
             console.set_summary(["version 1.0", "model test"])
@@ -135,7 +135,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_the_middle_pane_scrolls(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((50, 14))):
             console.start_tui()
             console.set_summary(["summary"])
@@ -154,7 +154,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_escape_returns_a_scrolled_view_to_the_bottom(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((50, 14))):
             console.start_tui()
             console.turn("Assistant", "\n".join(f"line {i}" for i in range(40)))
@@ -168,7 +168,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_info_and_warning_messages_are_separated_at_the_bottom(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((50, 16))):
             console.start_tui()
             console.note("first warning", "warn")
@@ -191,7 +191,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_escape_does_not_dismiss_an_active_question(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((50, 16))):
             console.start_tui()
             console.question_box("Question to User", ["Continue?"])
@@ -202,7 +202,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_assistant_blocks_show_turn_tool_and_background_counts(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((70, 22))):
             console.start_tui()
             console.turn("You", "inspect and test")
@@ -227,7 +227,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_core_view_keeps_multiple_turns_with_separators(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             console.turn("You", "first question")
@@ -245,7 +245,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_empty_core_view_shows_a_short_hint(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             output = console.stream.getvalue()
@@ -255,7 +255,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_plan_is_appended_to_the_core_view(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             console.turn("You", "do the work")
@@ -272,7 +272,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_load_history_populates_the_core_view(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             console.load_history([("You", "old question"),
@@ -286,7 +286,7 @@ class TuiConsoleTest(unittest.TestCase):
         console = self.console()
         console.set_info_provider(lambda: "tools 4 · background 1 running")
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((70, 20))):
             console.start_tui()
             output = console.stream.getvalue()
@@ -296,7 +296,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_escape_dismisses_a_command_overlay(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             console.rule("help")
@@ -311,7 +311,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_thinking_spinner_animates_and_stops(self):
         console = self.console()
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             console.start_thinking("Thinking")
@@ -325,7 +325,7 @@ class TuiConsoleTest(unittest.TestCase):
     def test_question_uses_a_yellow_answer_box(self):
         console = self.console(color=True)
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             console.question_box("Question to User", ["1) Resume"])
@@ -342,7 +342,7 @@ class TuiConsolePtyTest(unittest.TestCase):
         child = r"""
 import argparse, sys, tempfile
 from unittest import mock
-from mini_code_cli import agent_loop, ui, utils
+from mini_code_cli import agent_loop, tui, ui, utils
 
 args = argparse.Namespace(
     url="http://localhost:1", max_tokens=None, temperature=1.0,
@@ -363,7 +363,7 @@ def fake(messages, *a, **k):
 
 with mock.patch.object(utils, "call_openai_server", new=fake), \
         mock.patch.object(utils, "determine_vllm_model", return_value=None):
-    console = ui.TuiConsole(stream=sys.stdout, color=False, unicode=False)
+    console = tui.TuiConsole(stream=sys.stdout, color=False, unicode=False)
     session = agent_loop.AgentSession(args, console=console)
     sys.stderr.write("READY\n")
     sys.stderr.flush()
@@ -418,7 +418,7 @@ with mock.patch.object(utils, "call_openai_server", new=fake), \
     def test_kitty_shift_enter_and_ctrl_c_sequences(self):
         child = r"""
 import sys
-from mini_code_cli.ui import TuiConsole
+from mini_code_cli.tui import TuiConsole
 c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
 c.start_tui()
 sys.stderr.write("READY\n")
@@ -473,7 +473,7 @@ sys.stdout.flush()
     def test_question_box_disappears_after_the_answer(self):
         child = r"""
 import sys
-from mini_code_cli.ui import TuiConsole
+from mini_code_cli.tui import TuiConsole
 c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
 c.start_tui()
 c.question_box("Question to User", ["Continue?"])
@@ -527,7 +527,7 @@ sys.stdout.flush()
     def test_shift_enter_multiline_and_shift_arrow_scroll(self):
         child = r"""
 import sys
-from mini_code_cli.ui import TuiConsole
+from mini_code_cli.tui import TuiConsole
 c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
 c.start_tui()
 c.set_summary(["test"])
@@ -588,7 +588,7 @@ sys.stdout.flush()
     def test_tui_console_history_in_a_real_pty(self):
         child = r"""
 import sys
-from mini_code_cli.ui import TuiConsole
+from mini_code_cli.tui import TuiConsole
 c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
 c.start_tui()
 c.set_summary(["test"])
@@ -647,16 +647,16 @@ class TuiClearTest(unittest.TestCase):
     def test_clear_empties_the_middle_pane_without_reprinting_the_last_turn(self):
         with tempfile.TemporaryDirectory() as work, \
                 tempfile.TemporaryDirectory() as cache:
-            console = ui.TuiConsole(stream=_FakeTty(), color=False,
+            console = tui.TuiConsole(stream=_FakeTty(), color=False,
                                      unicode=False)
             args = make_args(work, cache)
             args.tui = True
             session = AgentSession(args, console=console)
             session.start_new_session()
             with mock.patch.object(
-                    ui.shutil, "get_terminal_size",
+                    tui.shutil, "get_terminal_size",
                     return_value=os.terminal_size((60, 20))):
-                session.tui_active = console.start_tui()
+                console.start_tui()
                 session.messages += [
                     {"role": "user", "content": "hi"},
                     {"role": "assistant", "content": "hello"},
@@ -669,9 +669,9 @@ class TuiClearTest(unittest.TestCase):
 
 class TuiInfoAndColorTest(unittest.TestCase):
     def test_an_untitled_rule_does_not_clear_command_output(self):
-        console = ui.TuiConsole(stream=_FakeTty(), color=False, unicode=False)
+        console = tui.TuiConsole(stream=_FakeTty(), color=False, unicode=False)
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
             console.rule("help")
@@ -684,9 +684,9 @@ class TuiInfoAndColorTest(unittest.TestCase):
         self.assertIn("HELP BODY", last_screen)
 
     def test_warnings_are_rendered_with_status_colour_and_icon(self):
-        console = ui.TuiConsole(stream=_FakeTty(), color=True, unicode=True)
+        console = tui.TuiConsole(stream=_FakeTty(), color=True, unicode=True)
         with mock.patch.object(
-                ui.shutil, "get_terminal_size",
+                tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((70, 20))):
             console.start_tui()
             console.note("something needs attention", "warn")
@@ -700,7 +700,7 @@ class TuiExitCleanupTest(unittest.TestCase):
     def test_system_exit_at_resume_restores_the_alternate_screen(self):
         with tempfile.TemporaryDirectory() as work, \
                 tempfile.TemporaryDirectory() as cache:
-            console = ui.TuiConsole(stream=_FakeTty(), color=False,
+            console = tui.TuiConsole(stream=_FakeTty(), color=False,
                                      unicode=False)
             args = make_args(work, cache)
             args.tui = True
@@ -724,14 +724,14 @@ class TuiWidthAndDocstringTest(unittest.TestCase):
 
     def test_tool_call_display_keeps_its_docstring(self):
         self.assertIsNotNone(ui.Console.tool_call_display.__doc__)
-        self.assertIsNotNone(ui.TuiConsole.tool_call_display.__doc__)
+        self.assertIsNotNone(tui.TuiConsole.tool_call_display.__doc__)
 
 
 class TuiRestoredHistoryTest(unittest.TestCase):
     def test_restored_header_and_history_turns(self):
         with tempfile.TemporaryDirectory() as work, \
                 tempfile.TemporaryDirectory() as cache:
-            console = ui.TuiConsole(stream=_FakeTty(), color=False,
+            console = tui.TuiConsole(stream=_FakeTty(), color=False,
                                      unicode=False)
             args = make_args(work, cache)
             args.tui = True
@@ -757,7 +757,7 @@ class TuiSessionWiringTest(unittest.TestCase):
             args = make_args(work, cache)
             args.tui = True
             session = AgentSession(args)
-            self.assertIsInstance(session.console, ui.TuiConsole)
+            self.assertIsInstance(session.console, tui.TuiConsole)
 
 
 class TuiExpandCommandTest(unittest.TestCase):
