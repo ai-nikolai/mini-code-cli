@@ -55,6 +55,7 @@ _FILE_TOOL_PATH_ARGS = {
     "grep": ["file_path"],
     "glob": ["pattern", "root"],
     "run_shell_command": ["cwd"],
+    "background": ["cwd"],
 }
 
 

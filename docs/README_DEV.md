@@ -109,6 +109,8 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   compaction-strategy registry and message shapes (`summarise` / `predict-files` /
   `predict-messages`), and the planning strategies (`plan-verify-step` / `plan-verify` /
   `open-plan`).
+- **`test_background.py`** — background shell/sub-agent tasks: output and exit codes,
+  process-group cancellation, the `/background` view, tool registration, and shutdown cleanup.
 
 This keeps the tool honest as it grows, and makes it safe to experiment with riskier features
 (like `--enable-shell`) without regressions.
