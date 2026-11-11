@@ -82,6 +82,7 @@ given a reference implementation.
 | `-s`, `--enable-shell` | off | allow shell execution (classifier always applies) |
 | `-g`, `--enable-subagents` | off | expose sub-agents as tools |
 | `--background` | off | enable background shell/sub-agent tasks and the `background` tool; needs `--enable-shell` or `--enable-subagents` |
+| `--tui` | off | richer interactive prompt: up/down history, cursor editing, Home/End, Ctrl-A/E/K/U/L; Shift+Enter still inserts a newline |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
 | `--plan-strategy NAME` | `plan-verify-step` | `plan-verify-step`, `plan-verify` or `open-plan` (implies `--plan`) |
@@ -206,6 +207,11 @@ steps; it shows the last/current blocking activity rather than live-during the c
 `Enter` sends the turn. This works in the session prompt and the startup tip
 reminds you. Terminals that report `Shift+Enter` as a CSI-u/modifyOtherKeys
 sequence are recognised; elsewhere `Ctrl-J` inserts the newline.
+
+With `--tui`, the prompt gains a small line editor: `↑`/`↓` recall previous
+turns, `←`/`→` move the cursor, Home/End jump within the line, and
+`Ctrl-A/E/K/U/L` provide the usual editing/clear shortcuts. `--tui` is opt-in
+and is not part of `--all`.
 
 > [!NOTE]
 > `/history` and `/reset` are driven by `summary_history.json`, a flat recorder that maps every

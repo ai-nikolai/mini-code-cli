@@ -167,6 +167,7 @@ def parse_args():
                         help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
+    parser.add_argument("--tui", action="store_true", help="Enable the richer interactive prompt: up/down history, cursor movement, Home/End and editing shortcuts. Shift+Enter still inserts a newline. default= False")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
     parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
@@ -226,6 +227,9 @@ def print_help(args):
         ("", "Shift+Enter (or Ctrl-J) inserts a new line; Enter sends."),
     ):
         ui.console.emit(f"  {command:16} {description}")
+    if getattr(args, "tui", False):
+        ui.console.emit("  TUI input        ↑/↓ history, ←/→ edit, Home/End, "
+                        "Ctrl-A/E/K/U/L.")
     if getattr(args, "enable_subagents", False) or args.verbose:
         ui.console.emit(ui.console.style("Sub-agents:", bold=True, fg="cyan"))
         for sa in subagents.get_registry().values():
@@ -642,6 +646,7 @@ class AgentSession:
                           or requested_plan_strategy is not None)
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
+        self.tui = bool(getattr(self.args, "tui", False))
         self.compaction_strategy = getattr(
             self.args, "compaction_strategy",
             compaction_mod.DEFAULT_COMPACTION_STRATEGY)
@@ -1620,6 +1625,9 @@ class AgentSession:
                    "send one prompt without planning, /history to browse the "
                    "conversation, /history <n> to inspect a turn, /reset <n> to "
                    "rewind. Type /help for all commands.")
+        if self.tui:
+            tip = (tip + " TUI: ↑/↓ history, ←/→ edit, Home/End, "
+                   "Ctrl-A/E/K/U/L.")
         self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
     def _warn_compaction_budget(self):
@@ -2126,9 +2134,11 @@ class AgentSession:
         while True:
             self.console.short_divider()
 
+            prompt = (self.console.style("You › ", bold=True, fg="cyan")
+                      if self.tui else
+                      self.console.style("You:", bold=True, fg="cyan") + " ")
             user_input = self.console.read_line(
-                self.console.style("You:", bold=True, fg="cyan") + " ",
-                multiline=True)
+                prompt, multiline=True, tui=self.tui)
 
             # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
             # must not be dereferenced here (a piped or closed stdin would

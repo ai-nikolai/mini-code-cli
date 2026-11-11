@@ -1,0 +1,109 @@
+"""The opt-in ``--tui`` prompt: history, editing and multiline input."""
+
+import io
+import os
+import pty
+import select
+import subprocess
+import sys
+import time
+import unittest
+from unittest import mock
+
+from mini_code_cli import agent_loop, ui
+
+
+class TuiCliTest(unittest.TestCase):
+    def test_tui_is_off_by_default_and_not_part_of_all(self):
+        with mock.patch.object(sys, "argv", ["mini-code"]):
+            self.assertFalse(agent_loop.parse_args().tui)
+        with mock.patch.object(sys, "argv", ["mini-code", "--tui"]):
+            self.assertTrue(agent_loop.parse_args().tui)
+        with mock.patch.object(sys, "argv", ["mini-code", "--all"]):
+            self.assertFalse(agent_loop.parse_args().tui)
+
+
+class TuiPtyTest(unittest.TestCase):
+    def test_history_editing_and_shift_enter_in_a_real_pty(self):
+        """Drive the real termios editor through a pseudo-terminal."""
+        child = r"""
+import sys
+from mini_code_cli.ui import Console
+console = Console(stream=sys.stdout, color=False, unicode=False)
+sys.stdout.write("READY\n")
+sys.stdout.flush()
+first = console.read_line("", multiline=True, tui=True)
+second = console.read_line("", multiline=True, tui=True)
+third = console.read_line("", multiline=True, tui=True)
+fourth = console.read_line("", multiline=True, tui=True)
+sys.stdout.write("\nRESULT:%r|%r|%r|%r\n"
+                 % (first, second, third, fourth))
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"READY", output)
+            time.sleep(0.3)
+            # Enter sends; Up recalls the previous history entry; Left + X
+            # edits in the middle; Shift+Enter inserts a newline.
+            os.write(master, b"hello\r")
+            time.sleep(0.15)
+            os.write(master, b"\x1b[A\r")
+            time.sleep(0.15)
+            os.write(master, b"abc\x1b[DX\r")
+            time.sleep(0.15)
+            os.write(master, b"line1\x1b[13;2uline2\r")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(
+                b"RESULT:'hello'|'hello'|'abXc'|'line1\\nline2'", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
+
+class TuiTipTest(unittest.TestCase):
+    def test_startup_tip_advertises_tui_keys(self):
+        class Session:
+            plan_mode = False
+            tui = True
+
+            def __init__(self):
+                self.console = ui.Console(stream=io.StringIO(), color=False,
+                                          unicode=False, verbose=False)
+
+            _emit_tip = agent_loop.AgentSession._emit_tip
+
+        session = Session()
+        session._emit_tip()
+        out = session.console.stream.getvalue()
+        self.assertIn("TUI:", out)
+        self.assertIn("↑/↓ history", out)
