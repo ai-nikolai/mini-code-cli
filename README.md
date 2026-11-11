@@ -210,16 +210,18 @@ reminds you. Terminals that report `Shift+Enter` as a CSI-u/modifyOtherKeys
 sequence are recognised; elsewhere `Ctrl-J` inserts the newline.
 
 With `--tui`, mini-code switches to a fixed alternate-screen dashboard: a
-**Mini-Code** summary box (version/session/model/context) at the top, the last
-user/assistant content in the middle, and an input box with a one-line help
-hint at the bottom. The whole screen is redrawn on changes, so the view never
+**Mini-Code** summary box (version/session/model/context) at the top, a core
+conversation view of user/assistant turns in the middle, and an input box with
+a one-line help hint at the bottom. The whole screen is redrawn on changes, so the view never
 scrolls; tool/thinking status is a transient line that disappears when the
 operation finishes. The middle pane scrolls with `Shift+↑`/`Shift+↓`; the
 input box shows when a command has scrolled it back, and `Esc` returns from
 command output (`/help`, `/history`, ...) to the core view. The dashboard is coloured when the
 terminal supports it; info/warnings/errors are shown as coloured
-`ℹ`/`⚠`/`✖`/`✔` lines. Questions (resume/permission) use a yellow answer box.
-Tool details can be expanded with `/expand [n]`.
+`ℹ`/`⚠`/`✖`/`✔` lines. Questions (resume/permission) use a yellow "Question
+to User" box just above the input. Restored sessions load their history into
+the core view and mark the summary as `[restored]`; generated plans append to
+the core view. Tool details can be expanded with `/expand [n]`.
 
 The prompt has a small line editor: `↑`/`↓` recall previous turns, `←`/`→` move
 the cursor, Home/End jump within the line, and `Ctrl-A/E/K/U/L` provide the

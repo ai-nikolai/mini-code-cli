@@ -653,6 +653,7 @@ class AgentSession:
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = bool(getattr(self.args, "tui", False))
         self.tui_active = False
+        self.restored_session = False
         self.compaction_strategy = getattr(
             self.args, "compaction_strategy",
             compaction_mod.DEFAULT_COMPACTION_STRATEGY)
@@ -793,6 +794,7 @@ class AgentSession:
         """
         self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+        self.restored_session = False
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
@@ -904,6 +906,7 @@ class AgentSession:
             self.last_prompt_tokens = 0
             self.last_prompt_message_count = 0
             self._restore_usage_if_available(restore_directory)
+            self.restored_session = True
 
             # Continuing a session in place makes it the latest one again: keep
             # the pointer aimed at it so a later --load-last-session finds the
@@ -933,6 +936,7 @@ class AgentSession:
         self.last_prompt_tokens = 0
         self.last_prompt_message_count = 0
         self._persistent_messages = []
+        self.restored_session = False
         return False
 
     def _resolve_model(self, args):
@@ -1504,8 +1508,11 @@ class AgentSession:
             permission = "auto"
         shell = "on" if shell_execution_enabled(self.args) else "off"
         planning = self.plan_strategy if self.plan_mode else "off"
+        session_line = f"version {version}   session {self.unique_id}"
+        if self.restored_session:
+            session_line += "   [restored]"
         lines = [
-            f"version {version}   session {self.unique_id}",
+            session_line,
             f"model   {oneline(self.model or '(auto)', 56)}",
             f"server  {oneline(self.server_url, 56)}",
             f"dir     {oneline(self.allowed_dir, 56)}",
@@ -1516,6 +1523,22 @@ class AgentSession:
         if badge:
             lines.append(f"context {badge}")
         return lines
+
+    def _tui_history_turns(self):
+        """User/assistant turns to prime the TUI core view after a restore."""
+        persistent = {id(message) for message in self._persistent_messages}
+        turns = []
+        for message in self.messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role not in ("user", "assistant") or not content:
+                continue
+            if id(message) in persistent:
+                continue
+            if role == "user" and _is_loop_injected(message):
+                continue
+            turns.append((role, content))
+        return turns[-40:]
 
     def print_welcome(self):
         """Render the startup banner for this session."""
@@ -1578,8 +1601,8 @@ class AgentSession:
         returns None) is treated as ``"exit"`` so the loop never spins on unread input.
         """
         while True:
-            self.console.question_box("Resume previous session?", [
-                "A previous session was found. What would you like to do?",
+            self.console.question_box("Question to User", [
+                "Resume previous session? A previous session was found.",
                 "",
                 "1) Resume the previous session (continue where you left off)",
                 "2) Start a new session (empty history)",
@@ -1631,6 +1654,8 @@ class AgentSession:
             if self.tui_active:
                 self.console.set_summary(self._tui_header_lines())
                 self.console.set_info_provider(self._tui_info_line)
+                if self.restored_session:
+                    self.console.load_history(self._tui_history_turns())
             else:
                 self._print_session_id()
                 self._emit_tip()
@@ -1902,9 +1927,8 @@ class AgentSession:
         if plan_text and plan_text.strip():
             # Show the plan immediately; otherwise the user only sees it via
             # /plan or the file on disk.
-            self.console.status_box(plan_text.strip().splitlines(),
-                                    title="Plan for the current goal",
-                                    fg="cyan", dim=True)
+            self.console.plan_box(plan_text.strip().splitlines(),
+                                  title="Plan for the current goal")
         else:
             self.console.note("No plan text was generated.", "warn")
         if plan_text and plan_text.strip():

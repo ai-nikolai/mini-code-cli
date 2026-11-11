@@ -139,7 +139,7 @@ class TuiConsoleTest(unittest.TestCase):
             console.render()
             self.assertEqual(console._scroll_offset, 0)
             console.scroll_body(1)
-            self.assertGreater(console._scroll_offset, 0)
+            self.assertEqual(console._scroll_offset, 1)
             self.assertIn("scrolled up", console.stream.getvalue())
             console.scroll_body(-1)
             self.assertEqual(console._scroll_offset, 0)
@@ -162,6 +162,45 @@ class TuiConsoleTest(unittest.TestCase):
                      "second question", "second answer"):
             self.assertIn(text, output)
         self.assertIn("═" if console.unicode_enabled else "-", output)
+
+    def test_empty_core_view_shows_a_short_hint(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            output = console.stream.getvalue()
+            console.stop_tui()
+        self.assertIn("No conversation yet", output)
+
+    def test_plan_is_appended_to_the_core_view(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.turn("You", "do the work")
+            console.plan_box(["1. inspect", "2. fix"])
+            console.turn("Assistant", "working on it")
+            output = console.stream.getvalue()
+            console.stop_tui()
+        last_screen = output.rsplit("\x1b[H", 1)[-1]
+        self.assertIn("Plan", last_screen)
+        self.assertIn("1. inspect", last_screen)
+        self.assertIn("working on it", last_screen)
+
+    def test_load_history_populates_the_core_view(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.load_history([("You", "old question"),
+                                  ("Assistant", "old answer")])
+            output = console.stream.getvalue()
+            console.stop_tui()
+        self.assertIn("old question", output)
+        self.assertIn("old answer", output)
 
     def test_info_provider_updates_the_dashboard(self):
         console = self.console()
@@ -208,16 +247,70 @@ class TuiConsoleTest(unittest.TestCase):
                 ui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))):
             console.start_tui()
-            console.question_box("Resume previous session?", ["1) Resume"])
+            console.question_box("Question to User", ["1) Resume"])
             output = console.stream.getvalue()
             self.assertTrue(console._question_active)
             self.assertIn("Answer", output)
-            self.assertIn("Resume previous session?", output)
-            self.assertIn("\x1b[33m", output)
+            self.assertIn("Question to User", output)
+            self.assertIn("33m", output)
             console.stop_tui()
 
 
 class TuiConsolePtyTest(unittest.TestCase):
+    def test_question_box_disappears_after_the_answer(self):
+        child = r"""
+import sys
+from mini_code_cli.ui import TuiConsole
+c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
+c.start_tui()
+c.question_box("Question to User", ["Continue?"])
+sys.stderr.write("READY\n")
+sys.stderr.flush()
+answer = c.read_line("")
+active = c._question_active
+c.stop_tui()
+sys.stdout.write("\nRESULT:%r|%r\n" % (answer, active))
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            time.sleep(0.3)
+            os.write(master, b"yes\r")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"RESULT:'yes'|False", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
     def test_shift_enter_multiline_and_shift_arrow_scroll(self):
         child = r"""
 import sys
@@ -418,6 +511,29 @@ class TuiWidthAndDocstringTest(unittest.TestCase):
     def test_tool_call_display_keeps_its_docstring(self):
         self.assertIsNotNone(ui.Console.tool_call_display.__doc__)
         self.assertIsNotNone(ui.TuiConsole.tool_call_display.__doc__)
+
+
+class TuiRestoredHistoryTest(unittest.TestCase):
+    def test_restored_header_and_history_turns(self):
+        with tempfile.TemporaryDirectory() as work, \
+                tempfile.TemporaryDirectory() as cache:
+            console = ui.TuiConsole(stream=_FakeTty(), color=False,
+                                     unicode=False)
+            args = make_args(work, cache)
+            args.tui = True
+            session = AgentSession(args, console=console)
+            session.start_new_session()
+            session.restored_session = True
+            session.messages += [
+                {"role": "user", "content": "old question"},
+                {"role": "assistant", "content": "old answer"},
+                {"role": "user", "content": "Current plan for the goal (from CURRENT_PLAN.md):\n1. x"},
+            ]
+            header = "\n".join(session._tui_header_lines())
+            self.assertIn("[restored]", header)
+            self.assertEqual(session._tui_history_turns(),
+                             [("user", "old question"),
+                              ("assistant", "old answer")])
 
 
 class TuiSessionWiringTest(unittest.TestCase):

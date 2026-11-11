@@ -360,6 +360,10 @@ class Console:
         """Render a prominent question/confirmation box (yellow/orange)."""
         self.print_box(lines, title=title, fg="yellow")
 
+    def plan_box(self, lines, title="Plan for the current goal"):
+        """Render a generated plan (the fixed TUI appends it to the core view)."""
+        self.status_box(lines, title=title, fg="cyan", dim=True)
+
     def status_box(self, lines, title=None, fg="cyan", dim=False):
         """Render a bordered box of free-form *status* lines (used for /plan).
 
@@ -1175,7 +1179,8 @@ class Console:
         """
         console = self.parent_console if self.parent_console is not None else self
         console.clear_transient()
-        lines = [f"Tool       : {name}", f"Parameters : {params_str}"]
+        lines = [f"Permission needed for tool: {name}",
+                 f"Parameters : {params_str}"]
         if shell_cmd is not None:
             snippet = self._oneline(shell_cmd, 120)
             if tier == "ask":
@@ -1183,7 +1188,7 @@ class Console:
                 lines.append(f"           : risky - needs your confirmation ({reason})")
             else:
                 lines.append(f"Command    : {snippet}")
-        console.print_box(lines, title="Permission needed", fg="yellow")
+        console.question_box("Question to User", lines)
         prompt = self.style("Proceed? Type 'y' or 'yes' and press Enter: ",
                             fg="yellow", bold=True)
         answer = console.read_line(prompt)
@@ -1245,6 +1250,8 @@ class TuiConsole(Console):
         self._notices = []
         self._overlay_lines = []
         self._question_active = False
+        self._question_title = "Question to User"
+        self._question_lines = []
         self._scroll_offset = 0
         self._last_body_height = 1
         self._input_buffer = []
@@ -1301,6 +1308,20 @@ class TuiConsole(Console):
 
     def set_summary(self, lines):
         self._summary_lines = [str(line) for line in (lines or [])]
+        self.render()
+
+    def load_history(self, turns):
+        """Populate the core view with user/assistant turns from a restored session."""
+        self._turns = deque(list(turns or [])[-40:], maxlen=40)
+        for role, content in reversed(self._turns):
+            if role == "You":
+                self._last_user = content
+                break
+        for role, content in reversed(self._turns):
+            if role == "Assistant":
+                self._last_assistant = content
+                break
+        self._scroll_offset = 0
         self.render()
 
     def turn(self, role, content, accent="cyan", badge=None):
@@ -1435,14 +1456,35 @@ class TuiConsole(Console):
         if not self._active:
             return super().print_box(lines, title=title, fg=fg)
         self._scroll_offset = 0
-        if fg == "yellow":
-            self._question_active = True
-            styled = [self.style(str(line), fg="yellow") for line in lines or []]
-        else:
-            styled = list(lines or [])
+        styled = (list(lines or []) if fg != "yellow"
+                  else [self.style(str(line), fg="yellow") for line in lines or []])
         self._overlay_lines = ([self.style(f"[{title}]", fg=fg, bold=True)]
                                if title else []) + styled
         self.render()
+
+    def question_box(self, title, lines):
+        if not self._active:
+            return super().question_box(title, lines)
+        self._question_title = title or "Question to User"
+        self._question_lines = list(lines or [])
+        self._question_active = True
+        self._overlay_lines = []
+        self._scroll_offset = 0
+        self.render()
+
+    def append_block(self, label, text):
+        """Append a labelled block (e.g. a generated plan) to the core view."""
+        if not self._active:
+            return
+        self._turns.append((str(label), str(text)))
+        self._overlay_lines = []
+        self._scroll_offset = 0
+        self.render()
+
+    def plan_box(self, lines, title="Plan for the current goal"):
+        if not self._active:
+            return super().plan_box(lines, title=title)
+        self.append_block("Plan", "\n".join(str(line) for line in lines or []))
 
     def status_box(self, lines, title=None, fg="cyan", dim=False):
         if not self._active:
@@ -1526,12 +1568,24 @@ class TuiConsole(Console):
             return [self._fit(line, width) for line in self._overlay_lines]
         lines = []
         for role, content in self._turns:
-            role_color = "cyan" if role == "You" else "green"
-            lines.append(self.style(role, fg=role_color, bold=True))
-            lines.extend(self._wrap(content, width))
+            if role == "You":
+                role_color = "cyan"
+            elif role == "Assistant":
+                role_color = "green"
+            elif role == "Plan":
+                role_color = "yellow"
+            else:
+                role_color = "magenta"
+            lines.append(self.style(f"{self.glyph('role')} {role}",
+                                    fg=role_color, bold=True))
+            lines.extend("  " + line for line in self._wrap(content, width))
             lines.append(self.style(self.glyph("h") * max(width, 1), dim=True))
         if lines and self._turns:
             lines.pop()             # no separator after the newest turn
+        if not lines:
+            lines.append(self.style(
+                "No conversation yet. Type a message; /help lists commands.",
+                dim=True))
         if self._tool_line:
             lines.append(self.style(f"{self.glyph('gear')} {self._tool_line}",
                                     fg="magenta", dim=True))
@@ -1556,11 +1610,15 @@ class TuiConsole(Console):
             view = lines[-height:]
         return (view + [""] * height)[:height]
 
-    def scroll_body(self, pages):
+    def scroll_body(self, lines):
+        """Scroll the middle pane by ``lines`` (positive = up)."""
+        self._scroll_offset = max(0, self._scroll_offset + int(lines))
+        self.render()
+
+    def scroll_page(self, pages):
         """Scroll the middle pane by roughly one page (positive = up)."""
         page = max(self._last_body_height - 1, 1)
-        self._scroll_offset = max(0, self._scroll_offset + pages * page)
-        self.render()
+        self.scroll_body(pages * page)
 
     def dismiss_overlay(self):
         """Escape from a command output back to the core conversation view."""
@@ -1610,15 +1668,21 @@ class TuiConsole(Console):
         input_fg = "yellow" if self._question_active else "green"
         body_box = input_lines + [hint]
         input_box = self._box(input_title, body_box, cols, fg=input_fg)
-        body_height = max(rows - len(header) - len(input_box), 1)
+        question_box = []
+        if self._question_active and self._question_lines:
+            question_box = self._box(
+                self._question_title or "Question to User",
+                self._question_lines[:max(rows // 3, 3)], cols, fg="yellow")
+        body_height = max(rows - len(header) - len(question_box)
+                          - len(input_box), 1)
         body = self._body_lines(body_height, max(cols - 4, 1))
-        lines = header + body + input_box
+        lines = header + body + question_box + input_box
         lines = (lines + [""] * rows)[:rows]
         self._write("\x1b[?25l\x1b[H")
         self._write("\n".join(_pad_visual(self._fit(line, cols), cols)
                                for line in lines))
         if self._input_active:
-            input_top = len(header) + body_height
+            input_top = len(header) + body_height + len(question_box)
             prefix = "".join(self._input_buffer[:self._input_cursor])
             cursor_line = prefix.count("\n")
             column = len(prefix.rsplit("\n", 1)[-1])
@@ -1746,10 +1810,10 @@ class TuiConsole(Console):
                         self.scroll_body(-1)
                         continue
                     if seq in (b"[5~",):
-                        self.scroll_body(1)
+                        self.scroll_page(1)
                         continue
                     if seq in (b"[6~",):
-                        self.scroll_body(-1)
+                        self.scroll_page(-1)
                         continue
                     if not seq:
                         self.dismiss_overlay()
@@ -1853,6 +1917,7 @@ class TuiConsole(Console):
         finally:
             if self._question_active:
                 self._question_active = False
+                self._question_lines = []
                 self.render()
 
 
