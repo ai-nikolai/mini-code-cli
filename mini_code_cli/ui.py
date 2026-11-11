@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import sys
+import textwrap
 import threading
 from collections import deque
 
@@ -1277,6 +1278,488 @@ class Console:
         """
         return self._permission_prompt_and_answer(
             name, params_str, shell_cmd, tier, reason)
+
+
+class TuiConsole(Console):
+    """A full-screen, fixed-layout console used by ``--tui``.
+
+    Unlike the scrolling :class:`Console`, this keeps a tiny state model and
+    redraws the whole terminal on every change:
+
+        +-- Summary box (version/session/model/context) --+
+        |                                                 |
+        | last conversation content + transient status    |
+        |                                                 |
+        +-- input box + one-line help -------------------+
+
+    Nothing is appended below the screen: a new turn replaces the body, and
+    tool/thinking status is a transient line that disappears when the operation
+    finishes. The alternate screen is restored on exit.
+    """
+
+    is_fixed = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._active = False
+        self._summary_lines = []
+        self._last_user = ""
+        self._last_assistant = ""
+        self._tool_line = ""
+        self._status_line = ""
+        self._notice_line = ""
+        self._overlay_lines = []
+        self._input_buffer = []
+        self._input_cursor = 0
+        self._input_active = False
+        self._history_pos = 0
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start_tui(self):
+        try:
+            if not self.stream.isatty():
+                return False
+        except (AttributeError, OSError):
+            return False
+        self._active = True
+        self._write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
+        self.render()
+        return True
+
+    def stop_tui(self):
+        if not self._active:
+            return
+        self._active = False
+        self._write("\x1b[?25h\x1b[r\x1b[?1049l")
+
+    def _write(self, text):
+        self.stream.write(text)
+        self.stream.flush()
+
+    def _size(self):
+        size = shutil.get_terminal_size((max(self.width, 40), 24))
+        return max(int(size.columns), 20), max(int(size.lines), 8)
+
+    # -- state updates -----------------------------------------------------
+
+    def set_summary(self, lines):
+        self._summary_lines = [str(line) for line in (lines or [])]
+        self.render()
+
+    def turn(self, role, content, accent="cyan", badge=None):
+        if not self._active:
+            return super().turn(role, content, accent=accent, badge=badge)
+        text = "" if content is None else str(content)
+        if role == "You":
+            self._last_user = text
+            self._overlay_lines = []
+            self._notice_line = ""
+        elif role == "Assistant":
+            self._last_assistant = text
+            self._overlay_lines = []
+        else:
+            self._notice_line = text
+        self.render()
+
+    def note(self, msg, level="info"):
+        if not self._active:
+            return super().note(msg, level)
+        if level == "info" and not self.verbose:
+            return
+        self._notice_line = str(msg)
+        self.render()
+
+    def tool_call_display(self, name, params=None, result=None, transient=True):
+        self._tool_history.append((name, params, result))
+        if not self._active:
+            return super().tool_call_display(name, params, result,
+                                             transient=transient)
+        self._tool_line = f"tool {name}: {str(params)[:60]}"
+        self.render()
+
+    def start_thinking(self, message="Thinking"):
+        if not self._active:
+            return super().start_thinking(message)
+        self._status_line = f"… {message}"
+        self.render()
+
+    def stop_thinking(self):
+        if not self._active:
+            return super().stop_thinking()
+        self._status_line = ""
+        self.render()
+
+    def start_tool_call(self, message="calling tool", tool_name=None):
+        if not self._active:
+            return super().start_tool_call(message, tool_name=tool_name)
+        self._tool_line = f"… {message}: {tool_name or ''}".strip()
+        self.render()
+
+    def stop_tool_call(self):
+        if not self._active:
+            return super().stop_tool_call()
+        self._tool_line = ""
+        self.render()
+
+    def usage_line(self, usage, transient=None, llm_calls=None):
+        if not self._active:
+            return super().usage_line(usage, transient=transient,
+                                      llm_calls=llm_calls)
+        self._status_line = self.usage_inline(usage, llm_calls=llm_calls)
+        self.render()
+
+    def emit_transient(self, text=""):
+        if not self._active:
+            return super().emit_transient(text)
+        self._status_line = str(text or "")
+        self.render()
+
+    def clear_transient(self):
+        if not self._active:
+            return super().clear_transient()
+        self._status_line = ""
+        self.render()
+
+    def emit(self, text=""):
+        if not self._active:
+            return super().emit(text)
+        self._overlay_lines.append("" if text is None else str(text))
+        self.render()
+
+    def rule(self, title=None, char="═", fg="cyan"):
+        if not self._active:
+            return super().rule(title, char=char, fg=fg)
+        self._overlay_lines = []
+        self.render()
+
+    def divider(self):
+        if not self._active:
+            return super().divider()
+
+    def short_divider(self, char="-", width=8, fg="gray"):
+        if not self._active:
+            return super().short_divider(char=char, width=width, fg=fg)
+
+    def print_box(self, lines, title=None, fg="cyan"):
+        if not self._active:
+            return super().print_box(lines, title=title, fg=fg)
+        self._overlay_lines = list(lines or [])
+        self.render()
+
+    def status_box(self, lines, title=None, fg="cyan", dim=False):
+        if not self._active:
+            return super().status_box(lines, title=title, fg=fg, dim=dim)
+        self._overlay_lines = list(lines or [])
+        self.render()
+
+    def clear_screen(self):
+        if not self._active:
+            return super().clear_screen()
+        self._last_user = ""
+        self._last_assistant = ""
+        self._overlay_lines = []
+        self._notice_line = ""
+        self.render()
+
+    # -- rendering ---------------------------------------------------------
+
+    @staticmethod
+    def _fit(text, width):
+        text = _ANSI_RE.sub("", str(text))
+        return text if len(text) <= width else text[:max(width - 3, 0)] + "..."
+
+    def _box(self, title, body, width):
+        h = self.glyph("h")
+        v = self.glyph("v")
+        tl, tr = self.glyph("tl"), self.glyph("tr")
+        bl, br = self.glyph("bl"), self.glyph("br")
+        label = f" {title} " if title else ""
+        top_fill = max(width - 2 - len(label), 0)
+        lines = [tl + label + h * top_fill + tr]
+        inner = max(width - 4, 1)
+        for line in body:
+            text = self._fit(line, inner)
+            lines.append(v + " " + _pad_visual(text, inner) + " " + v)
+        lines.append(bl + h * max(width - 2, 0) + br)
+        return lines
+
+    def _wrap(self, text, width):
+        out = []
+        text = _ANSI_RE.sub("", str(text or ""))
+        for line in text.splitlines() or [""]:
+            if not line:
+                out.append("")
+                continue
+            out.extend(textwrap.wrap(line, width=max(width, 1)) or [""])
+        return out
+
+    def _input_lines(self):
+        text = "".join(self._input_buffer)
+        return text.split("\n") if text else [""]
+
+    def _body_lines(self, height, width):
+        if self._overlay_lines:
+            lines = self._wrap("\n".join(self._overlay_lines), width)
+            return (lines + [""] * height)[:height]
+        lines = []
+        if self._last_user:
+            lines.extend(self._wrap("You: " + self._last_user, width))
+        if self._last_assistant:
+            lines.extend(self._wrap(self._last_assistant, width))
+        status = [line for line in (self._tool_line, self._status_line,
+                                    self._notice_line) if line]
+        status = self._wrap("\n".join(status), width)[:3]
+        room = max(height - len(status), 0)
+        if len(lines) > room:
+            if room <= 0:
+                lines = []
+            elif room == 1:
+                lines = ["..."]
+            else:
+                lines = ["..."] + lines[-(room - 1):]
+        lines = (lines + [""] * room)[:room] + status
+        return (lines + [""] * height)[:height]
+
+    def render(self):
+        if not self._active:
+            return
+        cols, rows = self._size()
+        summary = self._wrap("\n".join(self._summary_lines
+                                       or ["MiniCode CLI"]), max(cols - 4, 1))
+        header = self._box("Summary", summary[:max(rows // 3, 3)], cols)
+
+        input_lines = self._input_lines()
+        hint = ("Enter send · Shift+Enter newline · ↑/↓ history · "
+                "/expand tools · /help")
+        body_box = input_lines + [hint]
+        input_box = self._box("You", body_box, cols)
+        body_height = max(rows - len(header) - len(input_box), 1)
+        body = self._body_lines(body_height, max(cols - 4, 1))
+        lines = header + body + input_box
+        lines = (lines + [""] * rows)[:rows]
+        self._write("\x1b[?25l\x1b[H")
+        self._write("\n".join(_pad_visual(self._fit(line, cols), cols)
+                               for line in lines))
+        if self._input_active:
+            input_top = len(header) + body_height
+            prefix = "".join(self._input_buffer[:self._input_cursor])
+            cursor_line = prefix.count("\n")
+            column = len(prefix.rsplit("\n", 1)[-1])
+            row = min(input_top + 2 + cursor_line, rows)
+            col = min(3 + column, cols)
+            self._write(f"\x1b[{row};{col}H\x1b[?25h")
+        else:
+            self._write("\x1b[?25l")
+
+    # -- full-screen input -------------------------------------------------
+
+    def _read_tui_input(self, prompt_text=""):
+        import codecs
+        import select
+
+        try:
+            import termios
+        except ImportError:  # pragma: no cover - Windows
+            return input(prompt_text)
+        try:
+            if not sys.stdin.isatty():
+                return input(prompt_text)
+            fd = sys.stdin.fileno()
+            previous = termios.tcgetattr(fd)
+        except (AttributeError, OSError, ValueError, termios.error):
+            return input(prompt_text)
+
+        attrs = termios.tcgetattr(fd)
+        attrs[0] &= ~(getattr(termios, "ICRNL", 0)
+                      | getattr(termios, "IXON", 0))
+        attrs[3] &= ~(termios.ICANON | termios.ECHO)
+        attrs[6][termios.VMIN] = 1
+        attrs[6][termios.VTIME] = 0
+
+        buffer = []
+        cursor = 0
+        history = list(self._input_history)
+        history_pos = len(history)
+        draft = ""
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._notice_line = prompt_text.strip() if prompt_text.strip() else ""
+        self._input_buffer = buffer
+        self._input_cursor = cursor
+        self._input_active = True
+        self.render()
+
+        def read_one():
+            return os.read(fd, 1)
+
+        def read_escape():
+            sequence = b""
+            while len(sequence) < 12:
+                ready, _w, _x = select.select([fd], [], [], 0.01)
+                if not ready:
+                    break
+                byte = read_one()
+                sequence += byte
+                if len(sequence) == 1:
+                    if byte not in (b"[", b"O"):
+                        break
+                    continue
+                code = byte[0]
+                if code < 0x20 or 0x40 <= code <= 0x7e:
+                    break
+            return sequence
+
+        def sync():
+            self._input_buffer = buffer
+            self._input_cursor = cursor
+            self.render()
+
+        def set_buffer(value):
+            nonlocal cursor
+            buffer[:] = list(value)
+            cursor = len(buffer)
+            sync()
+
+        def line_start():
+            return "".join(buffer).rfind("\n", 0, cursor) + 1
+
+        def line_end():
+            found = "".join(buffer).find("\n", cursor)
+            return len(buffer) if found < 0 else found
+
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            while True:
+                raw = read_one()
+                if not raw:
+                    self._input_active = False
+                    self.render()
+                    return None
+                if raw == b"\r":
+                    text = "".join(buffer)
+                    if text.strip() and (not self._input_history
+                                         or self._input_history[-1] != text):
+                        self._input_history.append(text)
+                        if len(self._input_history) > 100:
+                            del self._input_history[0]
+                    buffer[:] = []
+                    cursor = 0
+                    self._input_active = False
+                    self._input_buffer = []
+                    self._input_cursor = 0
+                    self._notice_line = ""
+                    self.render()
+                    return text
+                if raw == b"\n":
+                    buffer[cursor:cursor] = ["\n"]
+                    cursor += 1
+                    sync()
+                    continue
+                if raw == b"\x1b":
+                    seq = read_escape()
+                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~")
+                            or b"13;2" in seq or b";2;13" in seq):
+                        buffer[cursor:cursor] = ["\n"]
+                        cursor += 1
+                        sync()
+                        continue
+                    if seq in (b"[A", b"OA"):
+                        if history:
+                            if history_pos == len(history):
+                                draft = "".join(buffer)
+                            if history_pos > 0:
+                                history_pos -= 1
+                                set_buffer(history[history_pos])
+                    elif seq in (b"[B", b"OB"):
+                        if history_pos < len(history):
+                            history_pos += 1
+                            set_buffer(draft if history_pos == len(history)
+                                       else history[history_pos])
+                    elif seq in (b"[C", b"OC"):
+                        cursor = min(cursor + 1, len(buffer))
+                        sync()
+                    elif seq in (b"[D", b"OD"):
+                        cursor = max(cursor - 1, 0)
+                        sync()
+                    elif seq in (b"[H", b"OH", b"[1~", b"[7~"):
+                        cursor = line_start()
+                        sync()
+                    elif seq in (b"[F", b"OF", b"[4~", b"[8~"):
+                        cursor = line_end()
+                        sync()
+                    elif seq in (b"[3~",):
+                        if cursor < len(buffer):
+                            del buffer[cursor]
+                            sync()
+                    continue
+                if raw in (b"\x7f", b"\b"):
+                    if cursor > 0:
+                        del buffer[cursor - 1]
+                        cursor -= 1
+                        sync()
+                    continue
+                if raw == b"\x03":
+                    raise KeyboardInterrupt
+                if raw == b"\x04":
+                    if not buffer:
+                        self._input_active = False
+                        self.render()
+                        return None
+                    if cursor < len(buffer):
+                        del buffer[cursor]
+                        sync()
+                    continue
+                if raw == b"\x01":
+                    cursor = line_start()
+                    sync()
+                    continue
+                if raw == b"\x05":
+                    cursor = line_end()
+                    sync()
+                    continue
+                if raw == b"\x0b":
+                    del buffer[cursor:]
+                    sync()
+                    continue
+                if raw == b"\x15":
+                    del buffer[:cursor]
+                    cursor = 0
+                    sync()
+                    continue
+                if raw == b"\x0c":
+                    self._overlay_lines = []
+                    self._last_user = ""
+                    self._last_assistant = ""
+                    self._notice_line = ""
+                    sync()
+                    continue
+                if raw == b"\x14":  # Ctrl-T: expand the most recent tool
+                    self.expand_tool(1)
+                    sync()
+                    continue
+                for char in decoder.decode(raw):
+                    if char == "\n":
+                        buffer[cursor:cursor] = [char]
+                        cursor += 1
+                    elif char == "\t" or char.isprintable():
+                        buffer[cursor:cursor] = [char]
+                        cursor += 1
+                    sync()
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+            except (OSError, ValueError, termios.error):
+                pass
+
+    def read_line(self, prompt_text="", multiline=False, tui=False):
+        if not self._active:
+            return super().read_line(prompt_text, multiline=multiline, tui=tui)
+        try:
+            return self._read_tui_input(prompt_text)
+        except (EOFError, KeyboardInterrupt):
+            self._input_active = False
+            self.render()
+            return None
 
 
 # One shared default console used throughout the package.

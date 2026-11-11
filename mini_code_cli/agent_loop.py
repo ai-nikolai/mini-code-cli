@@ -201,16 +201,17 @@ def parse_args():
 # banners / helpers
 # ---------------------------------------------------------------------------
 
-def print_help(args):
+def print_help(args, console=None):
     """Print the interactive command list (``/help``)."""
-    ui.console.rule("help", fg="cyan")
+    console = console if console is not None else ui.console
+    console.rule("help", fg="cyan")
     if args.auto_mode:
         help_message = ("Auto-mode: the agent keeps calling the LLM until no "
                         "further tool calls are possible.")
     else:
         help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
-    ui.console.emit(ui.console.style(help_message, dim=True, fg="cyan"))
-    ui.console.emit(ui.console.style("History / navigation commands:", bold=True, fg="cyan"))
+    console.emit(console.style(help_message, dim=True, fg="cyan"))
+    console.emit(console.style("History / navigation commands:", bold=True, fg="cyan"))
     for command, description in (
         ("/history", "list the conversation (turn number, what happened, where)"),
         ("/history <n>", "show the full messages recorded for turn n"),
@@ -227,19 +228,19 @@ def print_help(args):
         ("/quit, /exit", "save the session and exit"),
         ("", "Shift+Enter (or Ctrl-J) inserts a new line; Enter sends."),
     ):
-        ui.console.emit(f"  {command:16} {description}")
+        console.emit(f"  {command:16} {description}")
     if getattr(args, "tui", False):
-        ui.console.emit("  TUI input        ↑/↓ history, ←/→ edit, Home/End, "
+        console.emit("  TUI input        ↑/↓ history, ←/→ edit, Home/End, "
                         "Ctrl-A/E/K/U/L.")
     if getattr(args, "enable_subagents", False) or args.verbose:
-        ui.console.emit(ui.console.style("Sub-agents:", bold=True, fg="cyan"))
+        console.emit(console.style("Sub-agents:", bold=True, fg="cyan"))
         for sa in subagents.get_registry().values():
-            ui.console.emit(f"  {sa.name:16} {sa.description}")
+            console.emit(f"  {sa.name:16} {sa.description}")
     if getattr(args, "enable_skills", False) or args.verbose:
-        ui.console.emit(ui.console.style("Skills:", bold=True, fg="cyan"))
+        console.emit(console.style("Skills:", bold=True, fg="cyan"))
         for name in skills.SKILL_TOOL_NAMES:
-            ui.console.emit(f"  {name:16} (from the local .mini directory)")
-    ui.console.rule(char="═", fg="cyan")
+            console.emit(f"  {name:16} (from the local .mini directory)")
+    console.rule(char="═", fg="cyan")
 
 
 def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None,
@@ -602,7 +603,10 @@ class AgentSession:
         self.unique_id = generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
 
-        self.console = console if console is not None else ui.console
+        if console is None:
+            console = (ui.TuiConsole() if getattr(args, "tui", False)
+                       else ui.console)
+        self.console = console
         self.console.verbose = getattr(args, "verbose", False)
 
         # LLM / server configuration.
@@ -1501,7 +1505,7 @@ class AgentSession:
         badge = self._context_badge()
         if badge:
             lines.append(f"context {badge}")
-        return self.console.box(lines, title=f"MiniCodeCLI v{version}").splitlines()
+        return lines
 
     def print_welcome(self):
         """Render the startup banner for this session."""
@@ -1596,9 +1600,8 @@ class AgentSession:
         # they read args, allowed_dir, cache_dir, server_url and the resolved
         # model, plus the provisional id minted in __init__.
         self.tui_active = False
-        if self.tui:
-            self.tui_active = self.console.tui_enter(
-                header_height=10, footer_height=4)
+        if self.tui and isinstance(self.console, ui.TuiConsole):
+            self.tui_active = self.console.start_tui()
         if not self.tui_active:
             self.print_welcome()
         self.print_announcements()
@@ -1610,7 +1613,7 @@ class AgentSession:
         # use (the banner may have shown the provisional one).
         self.start_session()
         if self.tui_active:
-            self.console.tui_set_header(self._tui_header_lines())
+            self.console.set_summary(self._tui_header_lines())
         else:
             self._print_session_id()
             self._emit_tip()
@@ -2169,17 +2172,14 @@ class AgentSession:
             if not self.tui_active:
                 self.console.short_divider()
 
-            prompt = (self.console.style("You › ", bold=True, fg="cyan")
-                      if self.tui else
-                      self.console.style("You:", bold=True, fg="cyan") + " ")
             if self.tui_active:
-                self.console.tui_begin_input()
-            try:
-                user_input = self.console.read_line(
-                    prompt, multiline=True, tui=self.tui)
-            finally:
-                if self.tui_active:
-                    self.console.tui_end_input()
+                prompt = ""
+            else:
+                prompt = (self.console.style("You › ", bold=True, fg="cyan")
+                          if self.tui else
+                          self.console.style("You:", bold=True, fg="cyan") + " ")
+            user_input = self.console.read_line(
+                prompt, multiline=True, tui=self.tui)
 
             # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
             # must not be dereferenced here (a piped or closed stdin would
@@ -2235,7 +2235,7 @@ class AgentSession:
             self._do_reset(arg)
             return True
         if cmd == "help":
-            print_help(self.args)
+            print_help(self.args, console=self.console)
             return True
         if cmd in self.CLEAR_COMMANDS:
             self._clear_and_show_last()
@@ -2729,7 +2729,7 @@ class AgentSession:
         failed.
         """
         if self.tui_active:
-            self.console.tui_leave()
+            self.console.stop_tui()
             self.tui_active = False
         self.background_tasks.shutdown()
         self._persist()

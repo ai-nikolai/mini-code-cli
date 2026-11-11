@@ -140,6 +140,115 @@ class TuiFrameTest(unittest.TestCase):
         self.assertIn("file body", output)
 
 
+class TuiConsoleTest(unittest.TestCase):
+    def console(self):
+        return ui.TuiConsole(stream=_FakeTty(), color=False, unicode=False)
+
+    def test_fixed_view_redraws_summary_body_and_input_box(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            self.assertTrue(console.start_tui())
+            console.set_summary(["version 1.0", "model test"])
+            console.turn("You", "hello")
+            console.turn("Assistant", "hi there")
+            console.start_tool_call(tool_name="read_file")
+            rendered_tool = console.stream.getvalue()
+            console.stop_tool_call()
+            console._input_buffer = list("abc")
+            console._input_cursor = 3
+            console._input_active = True
+            console.render()
+            console.stop_tui()
+            output = console.stream.getvalue()
+
+        self.assertIn("\x1b[?1049h", rendered_tool)
+        self.assertIn("Summary", rendered_tool)
+        self.assertIn("version 1.0", rendered_tool)
+        self.assertIn("You: hello", rendered_tool)
+        self.assertIn("hi there", rendered_tool)
+        self.assertIn("read_file", rendered_tool)       # transient while running
+        self.assertIn("abc", output)
+        self.assertIn("Enter send", output)
+        self.assertIn("\x1b[?1049l", output)
+
+    def test_tool_line_disappears_when_the_tool_stops(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.start_tool_call(tool_name="read_file")
+            console.stop_tool_call()
+            console.render()
+            output = console.stream.getvalue()
+            console.stop_tui()
+        # The final redraw has no running-tool line.
+        last_screen = output.rsplit("\x1b[H", 1)[-1]
+        self.assertNotIn("reading tool", last_screen)
+        self.assertNotIn("read_file", last_screen)
+
+
+class TuiConsolePtyTest(unittest.TestCase):
+    def test_tui_console_history_in_a_real_pty(self):
+        child = r"""
+import sys
+from mini_code_cli.ui import TuiConsole
+c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
+c.start_tui()
+c.set_summary(["test"])
+sys.stderr.write("READY\n")
+sys.stderr.flush()
+first = c.read_line("")
+second = c.read_line("")
+c.stop_tui()
+sys.stdout.write("\nRESULT:%r|%r\n" % (first, second))
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"READY", output)
+            time.sleep(0.3)
+            os.write(master, b"hello\r")
+            time.sleep(0.2)
+            os.write(master, b"\x1b[A\r")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"RESULT:'hello'|'hello'", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
+
 class TuiExpandCommandTest(unittest.TestCase):
     def test_expand_command_reaches_the_console(self):
         with tempfile.TemporaryDirectory() as work, \

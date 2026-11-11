@@ -209,14 +209,16 @@ steps; it shows the last/current blocking activity rather than live-during the c
 reminds you. Terminals that report `Shift+Enter` as a CSI-u/modifyOtherKeys
 sequence are recognised; elsewhere `Ctrl-J` inserts the newline.
 
-With `--tui`, mini-code switches to a fixed alternate-screen view: the welcome
-dashboard (version/session/model/context) stays at the top, the input prompt
-and key hints stay at the bottom, and only the middle transcript region scrolls.
-The prompt also gains a small line editor: `↑`/`↓` recall previous turns,
-`←`/`→` move the cursor, Home/End jump within the line, and
-`Ctrl-A/E/K/U/L` provide the usual editing/clear shortcuts. Tool calls stay as
-compact summaries; `/expand [n]` reprints the full detail of a recent one.
-`--tui` is opt-in and is not part of `--all`.
+With `--tui`, mini-code switches to a fixed alternate-screen dashboard: a
+summary box (version/session/model/context) at the top, the last
+user/assistant content in the middle, and an input box with a one-line help
+hint at the bottom. The whole screen is redrawn on changes, so the view never
+scrolls; tool/thinking status is a transient line that disappears when the
+operation finishes. Tool details can be expanded with `/expand [n]`.
+
+The prompt has a small line editor: `↑`/`↓` recall previous turns, `←`/`→` move
+the cursor, Home/End jump within the line, and `Ctrl-A/E/K/U/L` provide the
+usual editing/clear shortcuts. `--tui` is opt-in and is not part of `--all`.
 
 > [!NOTE]
 > `/history` and `/reset` are driven by `summary_history.json`, a flat recorder that maps every
