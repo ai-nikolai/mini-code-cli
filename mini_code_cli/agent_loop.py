@@ -1567,16 +1567,18 @@ class AgentSession:
         degrades cleanly on a non-TTY / piped console: an EOF / Ctrl-C (``read_line``
         returns None) is treated as ``"exit"`` so the loop never spins on unread input.
         """
-        self.console.emit(
-            self.console.style(
-                "A previous session was found. What would you like to do?", dim=True,
-                fg="cyan"))
-        self.console.emit("  1) Resume the previous session (continue where you left off)")
-        self.console.emit("  2) Start a new session (empty history)")
-        self.console.emit("  3) Exit (start nothing)")
         while True:
-            answer = self.console.read_line(
-                self.console.style("Resume previous session? Type 1, 2, or 3: ", fg="cyan"))
+            self.console.question_box("Resume previous session?", [
+                "A previous session was found. What would you like to do?",
+                "",
+                "1) Resume the previous session (continue where you left off)",
+                "2) Start a new session (empty history)",
+                "3) Exit (start nothing)",
+            ])
+            prompt = (""
+                      if self.tui_active else
+                      self.console.style("Type 1, 2, or 3: ", fg="yellow"))
+            answer = self.console.read_line(prompt)
             if answer is None:
                 # EOF / Ctrl-C at the offer -> graceful exit, no session written.
                 return "exit"
@@ -1631,15 +1633,18 @@ class AgentSession:
                 if user_input is None or user_input.lower() in self.EXIT_COMMANDS:
                     self.console.note("Thank you. Goodbye! Saving history...", "info")
                     break
-                if pending is not None:
+                was_preset = pending is not None
+                if was_preset:
                     self.console.rule(title="Preset prompt", char="=", fg="cyan")
                     self.console.short_divider()
                     self.console.turn("You", user_input, accent="cyan")
                     pending = None
                 # Interactive slash commands are handled in place and never
-                # reach the LLM.
+                # reach the LLM (and do not appear as a "You" turn in the TUI).
                 if user_input.startswith("/") and self._handle_command(user_input):
                     continue
+                if self.tui_active and not was_preset:
+                    self.console.turn("You", user_input, accent="cyan")
                 self._run_turn(user_input)
         except _Abort:
             # Ctrl-C during a permission prompt already saved the session.
@@ -2194,8 +2199,6 @@ class AgentSession:
             if user_input is None:
                 return None
             if user_input.strip():
-                if self.tui_active:
-                    self.console.turn("You", user_input, accent="cyan")
                 return user_input
             self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
 
@@ -2471,6 +2474,10 @@ class AgentSession:
         assistant reply yet, the last user turn is shown instead.
         """
         self.console.clear_screen()
+        if self.tui_active:
+            # The fixed TUI's /clear means "empty the middle pane"; the input
+            # box and dashboard remain. Do not re-print the last turn.
+            return
         last_role = last_text = None
         for m in reversed(self.messages):
             role = m.get("role")

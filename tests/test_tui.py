@@ -99,6 +99,150 @@ class _FakeTty(io.StringIO):
         return True
 
 
+class TuiConsoleTest(unittest.TestCase):
+    def console(self, color=False):
+        return ui.TuiConsole(stream=_FakeTty(), color=color, unicode=False)
+
+    def test_fixed_view_redraws_summary_body_and_input_box(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            self.assertTrue(console.start_tui())
+            console.set_summary(["version 1.0", "model test"])
+            console.turn("You", "hello")
+            console.turn("Assistant", "hi there")
+            console.note("watch out", "warn")
+            console._input_buffer = list("abc")
+            console._input_cursor = 3
+            console._input_active = True
+            console.render()
+            console.stop_tui()
+            output = console.stream.getvalue()
+
+        self.assertIn("Mini-Code", output)
+        self.assertIn("version 1.0", output)
+        self.assertIn("hello", output)
+        self.assertIn("hi there", output)
+        self.assertIn("watch out", output)
+        self.assertIn("abc", output)
+        self.assertIn("Enter send", output)
+
+    def test_the_middle_pane_scrolls_with_pgup_pgdn(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((50, 14))):
+            console.start_tui()
+            console.set_summary(["summary"])
+            console.turn("Assistant", "\n".join(f"line {i}" for i in range(40)))
+            console.render()
+            self.assertEqual(console._scroll_offset, 0)
+            console.scroll_body(1)
+            self.assertGreater(console._scroll_offset, 0)
+            self.assertIn("scrolled up", console.stream.getvalue())
+            console.scroll_body(-1)
+            self.assertEqual(console._scroll_offset, 0)
+            console.stop_tui()
+
+    def test_question_uses_a_yellow_answer_box(self):
+        console = self.console(color=True)
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.question_box("Resume previous session?", ["1) Resume"])
+            output = console.stream.getvalue()
+            self.assertTrue(console._question_active)
+            self.assertIn("Answer", output)
+            self.assertIn("Resume previous session?", output)
+            self.assertIn("\x1b[33m", output)
+            console.stop_tui()
+
+
+class TuiConsolePtyTest(unittest.TestCase):
+    def test_tui_console_history_in_a_real_pty(self):
+        child = r"""
+import sys
+from mini_code_cli.ui import TuiConsole
+c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
+c.start_tui()
+c.set_summary(["test"])
+sys.stderr.write("READY\n")
+sys.stderr.flush()
+first = c.read_line("")
+second = c.read_line("")
+c.stop_tui()
+sys.stdout.write("\nRESULT:%r|%r\n" % (first, second))
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"READY", output)
+            time.sleep(0.3)
+            os.write(master, b"hello\r")
+            time.sleep(0.2)
+            os.write(master, b"\x1b[A\r")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"RESULT:'hello'|'hello'", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
+
+class TuiClearTest(unittest.TestCase):
+    def test_clear_empties_the_middle_pane_without_reprinting_the_last_turn(self):
+        with tempfile.TemporaryDirectory() as work, \
+                tempfile.TemporaryDirectory() as cache:
+            console = ui.TuiConsole(stream=_FakeTty(), color=False,
+                                     unicode=False)
+            args = make_args(work, cache)
+            args.tui = True
+            session = AgentSession(args, console=console)
+            session.start_new_session()
+            with mock.patch.object(
+                    ui.shutil, "get_terminal_size",
+                    return_value=os.terminal_size((60, 20))):
+                session.tui_active = console.start_tui()
+                session.messages += [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                ]
+                session._clear_and_show_last()
+                console.stop_tui()
+            self.assertEqual(console._last_user, "")
+            self.assertEqual(console._last_assistant, "")
+
+
 class TuiInfoAndColorTest(unittest.TestCase):
     def test_an_untitled_rule_does_not_clear_command_output(self):
         console = ui.TuiConsole(stream=_FakeTty(), color=False, unicode=False)

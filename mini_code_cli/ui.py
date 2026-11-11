@@ -356,6 +356,10 @@ class Console:
     def print_box(self, lines, title=None, fg="cyan"):
         self.emit(self.box(lines, title=title, fg=fg))
 
+    def question_box(self, title, lines):
+        """Render a prominent question/confirmation box (yellow/orange)."""
+        self.print_box(lines, title=title, fg="yellow")
+
     def status_box(self, lines, title=None, fg="cyan", dim=False):
         """Render a bordered box of free-form *status* lines (used for /plan).
 
@@ -1235,6 +1239,9 @@ class TuiConsole(Console):
         self._notice_line = ""
         self._notices = []
         self._overlay_lines = []
+        self._question_active = False
+        self._scroll_offset = 0
+        self._last_body_height = 1
         self._input_buffer = []
         self._input_cursor = 0
         self._input_active = False
@@ -1299,9 +1306,11 @@ class TuiConsole(Console):
             self._overlay_lines = []
             self._notice_line = ""
             self._notices = []
+            self._scroll_offset = 0
         elif role == "Assistant":
             self._last_assistant = text
             self._overlay_lines = []
+            self._scroll_offset = 0
         else:
             self._notice_line = text
         self.render()
@@ -1379,6 +1388,7 @@ class TuiConsole(Console):
         # closing separator (``print_help`` emits one at the end); it must not
         # clear the output that was just produced.
         if title:
+            self._scroll_offset = 0
             self._overlay_lines = [self.style(f"[{title}]", fg=fg, bold=True)]
             self.render()
 
@@ -1393,13 +1403,20 @@ class TuiConsole(Console):
     def print_box(self, lines, title=None, fg="cyan"):
         if not self._active:
             return super().print_box(lines, title=title, fg=fg)
+        self._scroll_offset = 0
+        if fg == "yellow":
+            self._question_active = True
+            styled = [self.style(str(line), fg="yellow") for line in lines or []]
+        else:
+            styled = list(lines or [])
         self._overlay_lines = ([self.style(f"[{title}]", fg=fg, bold=True)]
-                               if title else []) + list(lines or [])
+                               if title else []) + styled
         self.render()
 
     def status_box(self, lines, title=None, fg="cyan", dim=False):
         if not self._active:
             return super().status_box(lines, title=title, fg=fg, dim=dim)
+        self._scroll_offset = 0
         self._overlay_lines = ([self.style(f"[{title}]", fg=fg, bold=True)]
                                if title else []) + list(lines or [])
         self.render()
@@ -1473,10 +1490,9 @@ class TuiConsole(Console):
                           fg=colors.get(level, "cyan"),
                           dim=(level == "info"))
 
-    def _body_lines(self, height, width):
+    def _content_lines(self, width):
         if self._overlay_lines:
-            lines = [self._fit(line, width) for line in self._overlay_lines]
-            return (lines + [""] * height)[:height]
+            return [self._fit(line, width) for line in self._overlay_lines]
         lines = []
         if self._last_user:
             lines.append(self.style("You", fg="cyan", bold=True))
@@ -1484,42 +1500,57 @@ class TuiConsole(Console):
         if self._last_assistant:
             lines.append(self.style("Assistant", fg="green", bold=True))
             lines.extend(self._wrap(self._last_assistant, width))
-        status = []
         if self._tool_line:
-            status.append(self.style(f"{self.glyph('gear')} {self._tool_line}",
-                                     fg="magenta", dim=True))
+            lines.append(self.style(f"{self.glyph('gear')} {self._tool_line}",
+                                    fg="magenta", dim=True))
         if self._status_line:
-            status.append(self.style(self._status_line, fg="cyan", dim=True))
+            lines.append(self.style(self._status_line, fg="cyan", dim=True))
         for level, msg in self._notices[-3:]:
-            status.append(self._notice_style(level, msg))
+            lines.append(self._notice_style(level, msg))
         if self._notice_line:
-            status.append(self.style(self._notice_line, fg="yellow", dim=True))
-        status = [self._fit(line, width) for line in status][:4]
-        room = max(height - len(status), 0)
-        if len(lines) > room:
-            if room <= 0:
-                lines = []
-            elif room == 1:
-                lines = ["..."]
-            else:
-                lines = ["..."] + lines[-(room - 1):]
-        lines = (lines + [""] * room)[:room] + status
-        return (lines + [""] * height)[:height]
+            lines.append(self.style(self._notice_line, fg="yellow", dim=True))
+        return [self._fit(line, width) for line in lines]
+
+    def _body_lines(self, height, width):
+        lines = self._content_lines(width)
+        self._last_body_height = max(height, 1)
+        max_offset = max(len(lines) - height, 0)
+        self._scroll_offset = min(max(self._scroll_offset, 0), max_offset)
+        if self._scroll_offset and max_offset:
+            end = max_offset - self._scroll_offset + height
+            start = max(end - height, 0)
+            view = lines[start:end]
+        else:
+            view = lines[-height:]
+        return (view + [""] * height)[:height]
+
+    def scroll_body(self, pages):
+        """Scroll the middle pane by roughly one page (positive = up)."""
+        page = max(self._last_body_height - 1, 1)
+        self._scroll_offset = max(0, self._scroll_offset + pages * page)
+        self.render()
 
     def render(self):
         if not self._active:
             return
         cols, rows = self._size()
         summary = [str(line) for line in (self._summary_lines
-                                          or ["MiniCode CLI"])]
-        header = self._box("Summary", summary[:max(rows // 3, 3)], cols,
+                                          or ["Mini-Code"])]
+        header = self._box("Mini-Code", summary[:max(rows // 3, 3)], cols,
                            fg="cyan")
 
         input_lines = self._input_lines()
-        hint = self.style("Enter send · Shift+Enter newline · ↑/↓ history · "
-                          "/expand tools · /help", dim=True)
+        if self._scroll_offset:
+            hint_text = (f"scrolled up {self._scroll_offset} line(s) · "
+                         f"PgDn to follow · Enter send")
+        else:
+            hint_text = ("Enter send · Shift+Enter newline · ↑/↓ history · "
+                         "PgUp/PgDn scroll · /expand · /help")
+        hint = self.style(hint_text, dim=True)
+        input_title = "Answer" if self._question_active else "You"
+        input_fg = "yellow" if self._question_active else "green"
         body_box = input_lines + [hint]
-        input_box = self._box("You", body_box, cols, fg="green")
+        input_box = self._box(input_title, body_box, cols, fg=input_fg)
         body_height = max(rows - len(header) - len(input_box), 1)
         body = self._body_lines(body_height, max(cols - 4, 1))
         lines = header + body + input_box
@@ -1649,6 +1680,12 @@ class TuiConsole(Console):
                         cursor += 1
                         sync()
                         continue
+                    if seq in (b"[5~",):
+                        self.scroll_body(1)
+                        continue
+                    if seq in (b"[6~",):
+                        self.scroll_body(-1)
+                        continue
                     if seq in (b"[A", b"OA"):
                         if history:
                             if history_pos == len(history):
@@ -1744,8 +1781,11 @@ class TuiConsole(Console):
             return self._read_tui_input(prompt_text)
         except (EOFError, KeyboardInterrupt):
             self._input_active = False
-            self.render()
             return None
+        finally:
+            if self._question_active:
+                self._question_active = False
+                self.render()
 
 
 # One shared default console used throughout the package.
