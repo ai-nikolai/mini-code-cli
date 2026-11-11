@@ -1483,6 +1483,16 @@ class AgentSession:
             fg="red",
         )
 
+    def _tui_info_line(self):
+        """A one-line session summary for the fixed dashboard."""
+        usage = getattr(self, "total_usage", {}) or {}
+        tasks = self.background_tasks.list() if hasattr(self, "background_tasks") else []
+        running = sum(1 for task in tasks
+                      if task.get("status") in ("running", "cancelling"))
+        return (f"tools {usage.get('tool_calls', 0)} · "
+                f"llm {usage.get('llm_calls', 0)} · "
+                f"background {running} running / {len(tasks)}")
+
     def _tui_header_lines(self):
         """The fixed dashboard content for --tui."""
         from . import __version__ as version
@@ -1620,6 +1630,7 @@ class AgentSession:
             self.start_session()
             if self.tui_active:
                 self.console.set_summary(self._tui_header_lines())
+                self.console.set_info_provider(self._tui_info_line)
             else:
                 self._print_session_id()
                 self._emit_tip()

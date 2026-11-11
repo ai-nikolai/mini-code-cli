@@ -1232,8 +1232,13 @@ class TuiConsole(Console):
         super().__init__(*args, **kwargs)
         self._active = False
         self._summary_lines = []
+        self._turns = deque(maxlen=40)
         self._last_user = ""
         self._last_assistant = ""
+        self._info_provider = None
+        self._render_lock = threading.RLock()
+        self._thinking_stop = None
+        self._thinking_thread = None
         self._tool_line = ""
         self._status_line = ""
         self._notice_line = ""
@@ -1274,6 +1279,7 @@ class TuiConsole(Console):
     def stop_tui(self):
         if not self._active:
             return
+        self.stop_thinking()
         self._active = False
         if self._old_winch is not None and hasattr(signal, "SIGWINCH"):
             try:
@@ -1303,12 +1309,14 @@ class TuiConsole(Console):
         text = "" if content is None else str(content)
         if role == "You":
             self._last_user = text
+            self._turns.append((role, text))
             self._overlay_lines = []
             self._notice_line = ""
             self._notices = []
             self._scroll_offset = 0
         elif role == "Assistant":
             self._last_assistant = text
+            self._turns.append((role, text))
             self._overlay_lines = []
             self._scroll_offset = 0
         else:
@@ -1334,12 +1342,35 @@ class TuiConsole(Console):
     def start_thinking(self, message="Thinking"):
         if not self._active:
             return super().start_thinking(message)
-        self._status_line = f"… {message}"
-        self.render()
+        self.stop_thinking()
+        frames = ("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if self.unicode_enabled else "|/-\\")
+        stop = threading.Event()
+
+        def spin():
+            index = 0
+            while not stop.is_set():
+                self._status_line = f"{frames[index % len(frames)]} {message}…"
+                index += 1
+                self.render()
+                stop.wait(0.12)
+            self._status_line = ""
+            self.render()
+
+        self._thinking_stop = stop
+        self._thinking_thread = threading.Thread(target=spin, daemon=True)
+        self._thinking_thread.start()
 
     def stop_thinking(self):
         if not self._active:
             return super().stop_thinking()
+        stop = self._thinking_stop
+        thread = self._thinking_thread
+        self._thinking_stop = None
+        self._thinking_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
         self._status_line = ""
         self.render()
 
@@ -1494,12 +1525,13 @@ class TuiConsole(Console):
         if self._overlay_lines:
             return [self._fit(line, width) for line in self._overlay_lines]
         lines = []
-        if self._last_user:
-            lines.append(self.style("You", fg="cyan", bold=True))
-            lines.extend(self._wrap(self._last_user, width))
-        if self._last_assistant:
-            lines.append(self.style("Assistant", fg="green", bold=True))
-            lines.extend(self._wrap(self._last_assistant, width))
+        for role, content in self._turns:
+            role_color = "cyan" if role == "You" else "green"
+            lines.append(self.style(role, fg=role_color, bold=True))
+            lines.extend(self._wrap(content, width))
+            lines.append(self.style(self.glyph("h") * max(width, 1), dim=True))
+        if lines and self._turns:
+            lines.pop()             # no separator after the newest turn
         if self._tool_line:
             lines.append(self.style(f"{self.glyph('gear')} {self._tool_line}",
                                     fg="magenta", dim=True))
@@ -1530,22 +1562,49 @@ class TuiConsole(Console):
         self._scroll_offset = max(0, self._scroll_offset + pages * page)
         self.render()
 
+    def dismiss_overlay(self):
+        """Escape from a command output back to the core conversation view."""
+        if self._question_active:
+            return
+        if self._overlay_lines:
+            self._overlay_lines = []
+            self._scroll_offset = 0
+            self.render()
+
+    def set_info_provider(self, provider):
+        """Set a callable returning a one-line session summary for the header."""
+        self._info_provider = provider
+
     def render(self):
         if not self._active:
             return
+        with self._render_lock:
+            self._render_locked()
+
+    def _render_locked(self):
         cols, rows = self._size()
         summary = [str(line) for line in (self._summary_lines
                                           or ["Mini-Code"])]
+        if self._info_provider is not None:
+            try:
+                info = self._info_provider()
+            except Exception:
+                info = ""
+            if info:
+                summary.append(self.style(info, dim=True))
         header = self._box("Mini-Code", summary[:max(rows // 3, 3)], cols,
                            fg="cyan")
 
         input_lines = self._input_lines()
+        max_input = max(1, min(rows // 2, rows - 6))
+        if len(input_lines) > max_input:
+            input_lines = input_lines[-max_input:]
         if self._scroll_offset:
             hint_text = (f"scrolled up {self._scroll_offset} line(s) · "
-                         f"PgDn to follow · Enter send")
+                         f"Shift+↓ to follow · Enter send")
         else:
             hint_text = ("Enter send · Shift+Enter newline · ↑/↓ history · "
-                         "PgUp/PgDn scroll · /expand · /help")
+                         "Shift+↑/↓ scroll · Esc close command · /help")
         hint = self.style(hint_text, dim=True)
         input_title = "Answer" if self._question_active else "You"
         input_fg = "yellow" if self._question_active else "green"
@@ -1680,11 +1739,20 @@ class TuiConsole(Console):
                         cursor += 1
                         sync()
                         continue
+                    if seq in (b"[1;2A", b"[a"):
+                        self.scroll_body(1)
+                        continue
+                    if seq in (b"[1;2B", b"[b"):
+                        self.scroll_body(-1)
+                        continue
                     if seq in (b"[5~",):
                         self.scroll_body(1)
                         continue
                     if seq in (b"[6~",):
                         self.scroll_body(-1)
+                        continue
+                    if not seq:
+                        self.dismiss_overlay()
                         continue
                     if seq in (b"[A", b"OA"):
                         if history:

@@ -128,7 +128,7 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertIn("abc", output)
         self.assertIn("Enter send", output)
 
-    def test_the_middle_pane_scrolls_with_pgup_pgdn(self):
+    def test_the_middle_pane_scrolls(self):
         console = self.console()
         with mock.patch.object(
                 ui.shutil, "get_terminal_size",
@@ -143,6 +143,63 @@ class TuiConsoleTest(unittest.TestCase):
             self.assertIn("scrolled up", console.stream.getvalue())
             console.scroll_body(-1)
             self.assertEqual(console._scroll_offset, 0)
+            console.stop_tui()
+
+    def test_core_view_keeps_multiple_turns_with_separators(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.turn("You", "first question")
+            console.turn("Assistant", "first answer")
+            console.turn("You", "second question")
+            console.turn("Assistant", "second answer")
+            console.render()
+            output = console.stream.getvalue()
+            console.stop_tui()
+        for text in ("first question", "first answer",
+                     "second question", "second answer"):
+            self.assertIn(text, output)
+        self.assertIn("═" if console.unicode_enabled else "-", output)
+
+    def test_info_provider_updates_the_dashboard(self):
+        console = self.console()
+        console.set_info_provider(lambda: "tools 4 · background 1 running")
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((70, 20))):
+            console.start_tui()
+            output = console.stream.getvalue()
+            console.stop_tui()
+        self.assertIn("tools 4 · background 1 running", output)
+
+    def test_escape_dismisses_a_command_overlay(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.rule("help")
+            console.emit("HELP BODY")
+            console.dismiss_overlay()
+            output = console.stream.getvalue()
+            console.stop_tui()
+        last_screen = output.rsplit("\x1b[H", 1)[-1]
+        self.assertNotIn("HELP BODY", last_screen)
+
+    def test_thinking_spinner_animates_and_stops(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.start_thinking("Thinking")
+            time.sleep(0.25)
+            self.assertTrue(console._status_line)
+            self.assertTrue(console._thinking_thread.is_alive())
+            console.stop_thinking()
+            self.assertEqual(console._status_line, "")
             console.stop_tui()
 
     def test_question_uses_a_yellow_answer_box(self):
@@ -161,6 +218,67 @@ class TuiConsoleTest(unittest.TestCase):
 
 
 class TuiConsolePtyTest(unittest.TestCase):
+    def test_shift_enter_multiline_and_shift_arrow_scroll(self):
+        child = r"""
+import sys
+from mini_code_cli.ui import TuiConsole
+c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
+c.start_tui()
+c.set_summary(["test"])
+sys.stderr.write("READY\n")
+sys.stderr.flush()
+first = c.read_line("")
+c.turn("Assistant", "\n".join("line %d" % i for i in range(40)))
+second = c.read_line("")
+offset = c._scroll_offset
+c.stop_tui()
+sys.stdout.write("\nRESULT:%r|%r|%d\n" % (first, second, offset))
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"READY", output)
+            time.sleep(0.3)
+            os.write(master, b"line1\x1b[13;2uline2\r")
+            time.sleep(0.25)
+            os.write(master, b"\x1b[1;2A\r")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"RESULT:'line1\\nline2'|''|", output)
+            marker = output.split(b"RESULT:", 1)[1]
+            self.assertNotEqual(marker.rsplit(b"|", 1)[-1].strip(), b"0")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
     def test_tui_console_history_in_a_real_pty(self):
         child = r"""
 import sys
