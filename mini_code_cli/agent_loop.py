@@ -218,6 +218,7 @@ def print_help(args):
         ("/plan", "show the current goal + plan (plan mode only)"),
         ("/context", "show how the context window is used (tokens + percentages)"),
         ("/background [id]", "show foreground activity + background tasks (or one task's output)"),
+        ("/expand [n]", "show the full detail of the nth most recent tool call"),
         ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
         ("", "a bare /reset only re-saves the current state (no data loss)"),
@@ -647,6 +648,7 @@ class AgentSession:
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = bool(getattr(self.args, "tui", False))
+        self.tui_active = False
         self.compaction_strategy = getattr(
             self.args, "compaction_strategy",
             compaction_mod.DEFAULT_COMPACTION_STRATEGY)
@@ -1477,6 +1479,30 @@ class AgentSession:
             fg="red",
         )
 
+    def _tui_header_lines(self):
+        """The fixed dashboard content for --tui."""
+        from . import __version__ as version
+        if getattr(self.args, "sudo", False):
+            permission = "sudo"
+        elif getattr(self.args, "ask_permission", False):
+            permission = "ask"
+        else:
+            permission = "auto"
+        shell = "on" if shell_execution_enabled(self.args) else "off"
+        planning = self.plan_strategy if self.plan_mode else "off"
+        lines = [
+            f"version {version}   session {self.unique_id}",
+            f"model   {oneline(self.model or '(auto)', 56)}",
+            f"server  {oneline(self.server_url, 56)}",
+            f"dir     {oneline(self.allowed_dir, 56)}",
+            f"perm    {permission}   shell {shell}",
+            f"compact {self.compaction_strategy}   planning {planning}",
+        ]
+        badge = self._context_badge()
+        if badge:
+            lines.append(f"context {badge}")
+        return self.console.box(lines, title=f"MiniCodeCLI v{version}").splitlines()
+
     def print_welcome(self):
         """Render the startup banner for this session."""
         print_welcome(self.allowed_dir, self.server_url, self.args,
@@ -1569,7 +1595,12 @@ class AgentSession:
         # consume stdin). None of them depends on which session is finally used:
         # they read args, allowed_dir, cache_dir, server_url and the resolved
         # model, plus the provisional id minted in __init__.
-        self.print_welcome()
+        self.tui_active = False
+        if self.tui:
+            self.tui_active = self.console.tui_enter(
+                header_height=10, footer_height=4)
+        if not self.tui_active:
+            self.print_welcome()
         self.print_announcements()
         self._warn_compaction_budget()
 
@@ -1578,8 +1609,11 @@ class AgentSession:
         # line and the tip therefore come after it and show the id actually in
         # use (the banner may have shown the provisional one).
         self.start_session()
-        self._print_session_id()
-        self._emit_tip()
+        if self.tui_active:
+            self.console.tui_set_header(self._tui_header_lines())
+        else:
+            self._print_session_id()
+            self._emit_tip()
 
         # The --prompt value is a one-shot initial turn: it is sent verbatim and
         # then cleared, so later turns come from the user (manual mode) or are
@@ -2132,13 +2166,20 @@ class AgentSession:
         # A loop, not recursion: holding Enter used to recurse once per blank
         # line, so a long run of empty input could exhaust the interpreter stack.
         while True:
-            self.console.short_divider()
+            if not self.tui_active:
+                self.console.short_divider()
 
             prompt = (self.console.style("You › ", bold=True, fg="cyan")
                       if self.tui else
                       self.console.style("You:", bold=True, fg="cyan") + " ")
-            user_input = self.console.read_line(
-                prompt, multiline=True, tui=self.tui)
+            if self.tui_active:
+                self.console.tui_begin_input()
+            try:
+                user_input = self.console.read_line(
+                    prompt, multiline=True, tui=self.tui)
+            finally:
+                if self.tui_active:
+                    self.console.tui_end_input()
 
             # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
             # must not be dereferenced here (a piped or closed stdin would
@@ -2146,6 +2187,8 @@ class AgentSession:
             if user_input is None:
                 return None
             if user_input.strip():
+                if self.tui_active:
+                    self.console.turn("You", user_input, accent="cyan")
                 return user_input
             self.console.note("No input. (Type /help for commands, /quit to exit.)", "warn")
 
@@ -2166,6 +2209,8 @@ class AgentSession:
                              (tokens and percentages)
           /background [id]   show what the loop is doing and the background
                              tasks (or the output of one task)
+          /expand [n]        show the full detail of the nth most recent tool
+                             call (default: the last one)
           /skip-plan <text>  send <text> without generating or reviewing a plan
           /clear             clear the screen (keeps the conversation)
           /help              show the command help
@@ -2203,6 +2248,9 @@ class AgentSession:
             return True
         if cmd in ("background", "bg", "tasks"):
             self._show_background(arg)
+            return True
+        if cmd in ("expand", "tool"):
+            self.console.expand_tool(arg or 1)
             return True
         if cmd in ("skip-plan", "skip_plan", "skipplan"):
             self._run_skipped_plan(arg)
@@ -2680,6 +2728,9 @@ class AgentSession:
         the wrong note, and the state it would recap is the state that just
         failed.
         """
+        if self.tui_active:
+            self.console.tui_leave()
+            self.tui_active = False
         self.background_tasks.shutdown()
         self._persist()
         segments = history_segment_indices(self.session_dir)

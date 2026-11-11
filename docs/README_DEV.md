@@ -111,8 +111,9 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   `open-plan`).
 - **`test_background.py`** — background shell/sub-agent tasks: output and exit codes,
   process-group cancellation, the `/background` view, tool registration, and shutdown cleanup.
-- **`test_tui.py`** — the opt-in `--tui` prompt: up/down history, cursor editing and
-  Shift+Enter multiline input, exercised through a real pseudo-terminal.
+- **`test_tui.py`** — the opt-in `--tui` view: fixed alternate-screen frame/header,
+  up/down history, cursor editing, `/expand`, and Shift+Enter multiline input,
+  exercised through a real pseudo-terminal where relevant.
 
 This keeps the tool honest as it grows, and makes it safe to experiment with riskier features
 (like `--enable-shell`) without regressions.

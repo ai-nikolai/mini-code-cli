@@ -28,6 +28,7 @@ import re
 import shutil
 import sys
 import threading
+from collections import deque
 
 from .utils import oneline, plural
 
@@ -107,6 +108,10 @@ class Console:
         # TUI mode's up/down history. It lives on the console so it survives
         # across prompts for the whole session.
         self._input_history = []
+        # Recent tool calls, for /expand in the fixed TUI (and normal mode).
+        self._tool_history = deque(maxlen=20)
+        # Fixed-screen frame: None when the regular scrolling console is used.
+        self.tui_frame = None
         self._color = color
         self._unicode = unicode
         self._width = width
@@ -451,14 +456,105 @@ class Console:
         """
         self.emit(self.style(char * width, fg=fg, dim=True))
 
+    # -- fixed-screen TUI ---------------------------------------------------
+
+    def _tui_write(self, text):
+        self.stream.write(text)
+        self.stream.flush()
+
+    def tui_enter(self, header_height=10, footer_height=4):
+        """Switch to the fixed alternate screen. Returns whether it worked.
+
+        The top ``header_height`` rows are a fixed dashboard; the bottom
+        ``footer_height`` rows hold the input prompt and hint. The middle is a
+        normal scrolling region, so all existing turn/tool output keeps working
+        while the welcome box and input stay put.
+        """
+        if self.tui_frame is not None:
+            return True
+        try:
+            if not self.stream.isatty():
+                return False
+        except (AttributeError, OSError):
+            return False
+        size = shutil.get_terminal_size((max(self.width, 40), 24))
+        rows = max(int(size.lines), 16)
+        header = max(4, min(int(header_height), rows // 2))
+        footer = max(2, min(int(footer_height), rows - header - 4))
+        top, bottom = header + 1, rows - footer
+        if bottom <= top:
+            return False
+        self.tui_frame = {
+            "rows": rows, "cols": max(int(size.columns), 40),
+            "header": header, "footer": footer, "top": top, "bottom": bottom,
+        }
+        self._tui_write("\x1b[?1049h\x1b[2J\x1b[H")
+        self._tui_set_scroll_region()
+        self.tui_set_header([""] * header)
+        return True
+
+    def tui_leave(self):
+        """Restore the normal screen after a fixed-frame session."""
+        if self.tui_frame is None:
+            return
+        self._tui_write("\x1b[r\x1b[?1049l")
+        self.tui_frame = None
+
+    def _tui_set_scroll_region(self):
+        frame = self.tui_frame
+        self._tui_write(f"\x1b[{frame['top']};{frame['bottom']}r"
+                        f"\x1b[{frame['bottom']};1H")
+
+    def tui_set_header(self, lines):
+        """Draw the fixed header (the welcome box and session summary)."""
+        if self.tui_frame is None:
+            return
+        lines = ["" if line is None else str(line) for line in lines]
+        for row in range(1, self.tui_frame["header"] + 1):
+            self._tui_write(f"\x1b[{row};1H\x1b[2K")
+            if row <= len(lines):
+                self._tui_write(lines[row - 1])
+        self._tui_write(f"\x1b[{self.tui_frame['bottom']};1H")
+
+    def tui_begin_input(self, hint=None):
+        """Clear the footer and put the cursor on the prompt line."""
+        if self.tui_frame is None:
+            return
+        frame = self.tui_frame
+        start = frame["rows"] - frame["footer"] + 1
+        for row in range(start, frame["rows"] + 1):
+            self._tui_write(f"\x1b[{row};1H\x1b[2K")
+        hint = hint or ("↑/↓ history · ←/→ edit · Enter send · Shift+Enter newline "
+                        "· /expand tools · /help")
+        self._tui_write(f"\x1b[{start};1H")
+        self._tui_write(self.style(hint, dim=True))
+        self._tui_write(f"\x1b[{start + 1};1H")
+
+    def tui_end_input(self):
+        """Clear the footer and return the cursor to the scrolling region."""
+        if self.tui_frame is None:
+            return
+        frame = self.tui_frame
+        start = frame["rows"] - frame["footer"] + 1
+        for row in range(start, frame["rows"] + 1):
+            self._tui_write(f"\x1b[{row};1H\x1b[2K")
+        self._tui_write(f"\x1b[{frame['bottom']};1H")
+
     def clear_screen(self):
         """Clear the terminal and move the cursor to the top-left.
 
         Implements the /clear command: it wipes the current view but keeps the
         session history intact, so subsequent turns continue from where the
-        conversation is now.
+        conversation is now. In the fixed TUI only the scrolling region is
+        cleared; the dashboard and footer survive.
         """
         self.clear_transient()
+        if self.tui_frame is not None:
+            frame = self.tui_frame
+            for row in range(frame["top"], frame["bottom"] + 1):
+                self._tui_write(f"\x1b[{row};1H\x1b[2K")
+            self._tui_write(f"\x1b[{frame['bottom']};1H")
+            return
         self.stream.write("\033[2J\033[H")
         self.stream.flush()
 
@@ -590,6 +686,7 @@ class Console:
                 self.emit(f"    {arrow} {self._oneline(first, 300)}")
 
     def tool_call_display(self, name, params=None, result=None, transient=True):
+        self._tool_history.append((name, params, result))
         """Render one attempted tool call.
 
         In verbose mode (``transient=False``) the full detail (name, parameters
@@ -605,6 +702,24 @@ class Console:
         label = self.style("tool", fg="yellow", bold=True) if self.color_enabled else "tool"
         self.emit(label)
         self.emit(f"    {name}: {str(params)[:35]}")
+
+    def expand_tool(self, index=1):
+        """Print the full detail of a recent tool call (``/expand [n]``)."""
+        try:
+            index = max(int(index), 1)
+        except (TypeError, ValueError):
+            index = 1
+        if not self._tool_history:
+            self.note("No tool calls have run yet.", "warn")
+            return
+        if index > len(self._tool_history):
+            self.note(
+                f"No tool call {index} back; only {len(self._tool_history)} "
+                f"are remembered.", "warn")
+            return
+        name, params, result = self._tool_history[-index]
+        self.rule(title=f"tool call {index} back", char="═", fg="cyan")
+        self.tool_group(name, params, result)
 
     def usage_inline(self, usage, llm_calls=None):
         """A compact one-liner describing token usage.

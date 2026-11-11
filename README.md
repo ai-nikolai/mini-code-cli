@@ -199,6 +199,7 @@ steps; it shows the last/current blocking activity rather than live-during the c
 | `/plan` | show the current goal + plan (plan mode only) |
 | `/context` | show how the context window is used: tokens and percentages by category (system prompt, user/assistant messages, tool calls/outputs, reasoning, overhead) |
 | `/background [id]` | show foreground activity + background tasks, or one task's output tail |
+| `/expand [n]` | show the full detail of the nth most recent tool call (default: the last one) |
 | `/skip-plan <prompt>` | send `<prompt>` once without generating or reviewing a plan |
 | `/help` | show this help |
 | `/quit`, `/exit` | save the session and exit |
@@ -208,10 +209,14 @@ steps; it shows the last/current blocking activity rather than live-during the c
 reminds you. Terminals that report `Shift+Enter` as a CSI-u/modifyOtherKeys
 sequence are recognised; elsewhere `Ctrl-J` inserts the newline.
 
-With `--tui`, the prompt gains a small line editor: `↑`/`↓` recall previous
-turns, `←`/`→` move the cursor, Home/End jump within the line, and
-`Ctrl-A/E/K/U/L` provide the usual editing/clear shortcuts. `--tui` is opt-in
-and is not part of `--all`.
+With `--tui`, mini-code switches to a fixed alternate-screen view: the welcome
+dashboard (version/session/model/context) stays at the top, the input prompt
+and key hints stay at the bottom, and only the middle transcript region scrolls.
+The prompt also gains a small line editor: `↑`/`↓` recall previous turns,
+`←`/`→` move the cursor, Home/End jump within the line, and
+`Ctrl-A/E/K/U/L` provide the usual editing/clear shortcuts. Tool calls stay as
+compact summaries; `/expand [n]` reprints the full detail of a recent one.
+`--tui` is opt-in and is not part of `--all`.
 
 > [!NOTE]
 > `/history` and `/reset` are driven by `summary_history.json`, a flat recorder that maps every
