@@ -81,6 +81,31 @@ def _pad_visual(text, width):
     return text + (" " * pad if pad > 0 else "")
 
 
+def _read_escape_sequence(fd, read_one, pending, select_module):
+    """Read one CSI/SS3 sequence, stopping on its final byte.
+
+    ``read_one`` abstracts bytes already pushed back by the caller. A lone Esc
+    returns once the 10 ms quiet period elapses; a CSI final byte is in
+    ``@``..``~``.
+    """
+    sequence = b""
+    while len(sequence) < 12:
+        if not pending:
+            ready, _w, _x = select_module.select([fd], [], [], 0.01)
+            if not ready:
+                break
+        byte = read_one()
+        sequence += byte
+        if len(sequence) == 1:
+            if byte not in (b"[", b"O"):
+                break
+            continue
+        code = byte[0]
+        if code < 0x20 or 0x40 <= code <= 0x7e:
+            break
+    return sequence
+
+
 # Glyph tables for the unicode and ascii (fallback) renderers.
 _UNICODE_GLYPHS = {
     "tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "h": "═", "v": "║",
@@ -123,9 +148,6 @@ class Console:
         # CRLF, or a key that arrived right after Enter). It lives on the
         # console so it survives into the next read_line call.
         self._input_pending = []
-        # TUI mode's up/down history. It lives on the console so it survives
-        # across prompts for the whole session.
-        self._input_history = []
         # Recent tool calls, for /expand in the fixed TUI (and normal mode).
         self._tool_history = deque(maxlen=20)
         self._color = color
@@ -840,29 +862,23 @@ class Console:
 
     # -- interactive input --------------------------------------------------
     def read_line(self, prompt_text="", multiline=False, tui=False):
-        """Print an (already-styled) prompt and read input from stdin.
+        """Print an (already-styled) prompt and read one line from stdin.
 
-        Returns the typed text, or ``None`` on EOF / Ctrl-C. Routing every
-        interactive prompt (the "You:" line, permission answers, ...) through
-        the console keeps all input handling in one place.
-
-        ``multiline=True`` uses a small TTY line editor: Enter sends, while
-        Shift+Enter (and Ctrl-J / LF) inserts a newline. ``tui=True`` enables
-        the richer editor (up/down history, cursor movement, Home/End,
-        Ctrl-A/E/K/U, Ctrl-L); it implies the multiline key handling. On a
-        non-TTY stdin both fall back to a normal ``input()`` line.
+        Returns the typed text, or ``None`` on EOF / Ctrl-C. ``multiline=True``
+        uses the small TTY editor: Enter sends and Shift+Enter / Ctrl-J inserts
+        a newline. The richer history/editing behaviour lives in
+        :class:`TuiConsole`; ``tui`` is accepted for call-site compatibility and
+        ignored here. On a non-TTY stdin this falls back to ``input()``.
         """
         if self.parent_console is not None:
             # A swallowed console (e.g. a sub-agent's) has its output redirected
             # away from the terminal; route both the prompt and the typed answer
-            # through the console that actually owns the screen. The prompt
-            # string carries its own styling, so it renders identically here or
-            # there.
-            return self.parent_console.read_line(
-                prompt_text, multiline=multiline, tui=tui)
-        if multiline or tui:
+            # through the console that actually owns the screen.
+            return self.parent_console.read_line(prompt_text,
+                                                 multiline=multiline, tui=tui)
+        if multiline:
             try:
-                return self._read_multiline(prompt_text, tui=tui)
+                return self._read_multiline(prompt_text)
             except (EOFError, KeyboardInterrupt):
                 return None
         try:
@@ -870,16 +886,12 @@ class Console:
         except (EOFError, KeyboardInterrupt):
             return None
 
-    def _read_multiline(self, prompt_text="", tui=False):
-        """Read one (possibly multi-line) turn from a TTY.
+    def _read_multiline(self, prompt_text=""):
+        """Read one (possibly multi-line) value from a TTY.
 
-        Uses termios only for the duration of the prompt. Enter (CR) submits;
-        LF / Ctrl-J / the Shift+Enter CSI-u sequence insert a newline. In TUI
-        mode the line is redrawn as it is edited, with up/down history and
-        cursor movement. Ctrl-C still raises KeyboardInterrupt (ISIG stays
-        enabled), and the original terminal settings are restored in
-        ``finally``. Anything that is not a TTY (tests, pipes, Windows without
-        termios) falls back to ``input()``.
+        Enter (CR) submits; LF / Ctrl-J / Shift+Enter inserts a newline. The
+        richer cursor/history editor is :class:`TuiConsole`; this fallback only
+        needs to keep multiline input working on the ordinary console.
         """
         import codecs
         import select
@@ -897,10 +909,6 @@ class Console:
             return input(prompt_text)
 
         attrs = termios.tcgetattr(fd)
-        # Keep ISIG (so Ctrl-C still interrupts) and OPOST (normal newlines),
-        # but read key-by-key without canonical line buffering or echo. ICRNL
-        # and IXON are *input* flags: clear them there, so Enter stays CR (the
-        # submit key) and Ctrl-S/Ctrl-Q do not freeze the prompt.
         attrs[0] &= ~(getattr(termios, "ICRNL", 0)
                       | getattr(termios, "IXON", 0))
         attrs[3] &= ~(termios.ICANON | termios.ECHO)
@@ -908,153 +916,27 @@ class Console:
         attrs[6][termios.VTIME] = 0
 
         buffer = []
-        cursor = 0
-        history = list(self._input_history)
-        history_pos = len(history)
-        draft = ""
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
-        last_render = {"lines": 0, "cursor_line": 0}
+        pending = self._input_pending
 
         def write(text):
             self.stream.write(text)
             self.stream.flush()
-
-        # Bytes read while peeking past a CR (to swallow a CRLF) but not
-        # consumed belong here, so the next key is never silently dropped --
-        # even when it arrives after this call has already returned.
-        pending = self._input_pending
 
         def read_one():
             if pending:
                 return pending.pop(0)
             return os.read(fd, 1)
 
-        def read_escape():
-            """Read the rest of an escape sequence without waiting for lone Esc.
-
-            CSI/SS3 sequences end on a final byte in ``@``..``~``; stopping
-            there matters for the TUI editor, otherwise the next key (often
-            Enter) is swallowed into an arrow-key sequence.
-            """
-            sequence = b""
-            while len(sequence) < 12:
-                if not pending:
-                    ready, _w, _x = select.select([fd], [], [], 0.01)
-                    if not ready:
-                        break
-                byte = read_one()
-                sequence += byte
-                if len(sequence) == 1:
-                    if byte not in (b"[", b"O"):
-                        break
-                    continue
-                code = byte[0]
-                if code < 0x20 or 0x40 <= code <= 0x7e:
-                    break
-            return sequence
-
-        def text_value():
-            return "".join(buffer)
-
-        def line_start():
-            return text_value().rfind("\n", 0, cursor) + 1
-
-        def line_end():
-            found = text_value().find("\n", cursor)
-            return len(buffer) if found < 0 else found
-
-        def set_buffer(value):
-            nonlocal cursor
-            buffer[:] = list(value)
-            cursor = len(buffer)
-
-        def insert(value):
-            nonlocal cursor
-            if not value:
-                return
-            buffer[cursor:cursor] = list(value)
-            cursor += len(value)
-
-        def render():
-            """Redraw the whole input block and place the cursor."""
-            if not tui:
-                return
-            if last_render["lines"]:
-                write("\r")
-                if last_render["cursor_line"]:
-                    write(f"\x1b[{last_render['cursor_line']}A")
-                write("\x1b[J")
-            text = prompt_text + text_value()
-            lines = text.split("\n")
-            for index, line in enumerate(lines):
-                write(line)
-                if index < len(lines) - 1:
-                    write("\n")
-            prefix = prompt_text + "".join(buffer[:cursor])
-            prefix_lines = prefix.split("\n")
-            cursor_line = len(prefix_lines) - 1
-            column = _visual_len(prefix_lines[-1])
-            up = len(lines) - 1 - cursor_line
-            if up > 0:
-                write(f"\x1b[{up}A")
-            write("\r")
-            if column > 0:
-                write(f"\x1b[{column}C")
-            last_render["lines"] = len(lines)
-            last_render["cursor_line"] = cursor_line
-
-        def history_up():
-            nonlocal history_pos, draft
-            if not history:
-                return
-            if history_pos == len(history):
-                draft = text_value()
-            if history_pos > 0:
-                history_pos -= 1
-                set_buffer(history[history_pos])
-                render()
-
-        def history_down():
-            nonlocal history_pos
-            if not history or history_pos >= len(history):
-                return
-            history_pos += 1
-            set_buffer(draft if history_pos == len(history)
-                       else history[history_pos])
-            render()
-
-        def submit():
-            nonlocal cursor
-            cursor = len(buffer)
-            if tui:
-                render()
-            write("\n")
-            text = text_value()
-            if tui and text.strip():
-                if not self._input_history or self._input_history[-1] != text:
-                    self._input_history.append(text)
-                    if len(self._input_history) > 100:
-                        del self._input_history[0]
-            return text
-
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
-            if tui:
-                render()
-            else:
-                write(prompt_text)
+            write(prompt_text)
             while True:
                 raw = read_one()
                 if not raw:  # EOF
-                    if tui and buffer:
-                        cursor = len(buffer)
-                        render()
-                        write("\n")
-                    return None if not buffer else text_value()
+                    return None if not buffer else "".join(buffer)
                 if raw == b"\r":
-                    # Some terminals send CRLF; consume the LF so it does not
-                    # appear as a spurious empty line on the next prompt, but
-                    # push any other following byte back for the next read.
+                    # Consume the LF of a CRLF so the next prompt is clean.
                     if pending:
                         nxt = read_one()
                     else:
@@ -1062,105 +944,39 @@ class Console:
                         nxt = os.read(fd, 1) if ready else b""
                     if nxt not in (b"", b"\n"):
                         pending.insert(0, nxt)
-                    return submit()
+                    write("\n")
+                    return "".join(buffer)
                 if raw == b"\n":       # Ctrl-J / terminals that send LF
-                    if tui:
-                        insert("\n")
-                        render()
-                    else:
+                    buffer.append("\n")
+                    write("\n... ")
+                    continue
+                if raw == b"\x1b":      # Shift+Enter / modified Enter
+                    seq = _read_escape_sequence(fd, read_one, pending, select)
+                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~",
+                                b"[13;2;13~", b"[27;2;13u")
+                            or b"13;2" in seq or b";2;13" in seq
+                            or seq == b"\r"):
                         buffer.append("\n")
                         write("\n... ")
                     continue
-                if raw == b"\x1b":      # CSI-u / modifyOtherKeys Shift+Enter
-                    seq = read_escape()
-                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~")
-                            or b"13;2" in seq or b";2;13" in seq):
-                        if tui:
-                            insert("\n")
-                            render()
-                        else:
-                            buffer.append("\n")
-                            write("\n... ")
-                        continue
-                    if tui:
-                        if seq in (b"[A", b"OA"):
-                            history_up()
-                        elif seq in (b"[B", b"OB"):
-                            history_down()
-                        elif seq in (b"[C", b"OC"):
-                            cursor = min(cursor + 1, len(buffer))
-                            render()
-                        elif seq in (b"[D", b"OD"):
-                            cursor = max(cursor - 1, 0)
-                            render()
-                        elif seq in (b"[H", b"OH", b"[1~", b"[7~"):
-                            cursor = line_start()
-                            render()
-                        elif seq in (b"[F", b"OF", b"[4~", b"[8~"):
-                            cursor = line_end()
-                            render()
-                        elif seq in (b"[3~",):
-                            if cursor < len(buffer):
-                                del buffer[cursor]
-                                render()
-                    continue
-                if raw in (b"\x7f", b"\b"):  # backspace
-                    if tui:
-                        if cursor > 0:
-                            del buffer[cursor - 1]
-                            cursor -= 1
-                            render()
-                    elif buffer and buffer[-1] != "\n":
+                if raw in (b"\x7f", b"\b"):
+                    if buffer and buffer[-1] != "\n":
                         buffer.pop()
                         write("\b \b")
                     continue
-                if raw == b"\x03":      # Ctrl-C (if ISIG were disabled)
+                if raw == b"\x03":
                     raise KeyboardInterrupt
-                if raw == b"\x04":      # Ctrl-D
+                if raw == b"\x04":
                     if not buffer:
                         return None
-                    if tui and cursor < len(buffer):
-                        del buffer[cursor]
-                        render()
-                    continue
-                if tui and raw == b"\x01":  # Ctrl-A
-                    cursor = line_start()
-                    render()
-                    continue
-                if tui and raw == b"\x05":  # Ctrl-E
-                    cursor = line_end()
-                    render()
-                    continue
-                if tui and raw == b"\x0b":  # Ctrl-K
-                    del buffer[cursor:]
-                    render()
-                    continue
-                if tui and raw == b"\x15":  # Ctrl-U
-                    del buffer[:cursor]
-                    cursor = 0
-                    render()
-                    continue
-                if tui and raw == b"\x0c":  # Ctrl-L
-                    write("\x1b[2J\x1b[H")
-                    last_render["lines"] = 0
-                    last_render["cursor_line"] = 0
-                    render()
                     continue
                 for char in decoder.decode(raw):
                     if char == "\n":
-                        if tui:
-                            insert(char)
-                            render()
-                        else:
-                            buffer.append(char)
-                            write("\n... ")
+                        buffer.append(char)
+                        write("\n... ")
                     elif char == "\t" or char.isprintable():
-                        if tui:
-                            insert(char)
-                            render()
-                        else:
-                            buffer.append(char)
-                            write(char)
+                        buffer.append(char)
+                        write(char)
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, previous)
@@ -1268,6 +1084,8 @@ class TuiConsole(Console):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._active = False
+        # Up/down prompt history for this full-screen console.
+        self._input_history = []
         self._summary_lines = []
         self._turns = deque(maxlen=40)
         self._turn_id = 0
@@ -1295,7 +1113,6 @@ class TuiConsole(Console):
         self._input_buffer = []
         self._input_cursor = 0
         self._input_active = False
-        self._history_pos = 0
         self._old_winch = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -1853,23 +1670,6 @@ class TuiConsole(Console):
         def read_one():
             return os.read(fd, 1)
 
-        def read_escape():
-            sequence = b""
-            while len(sequence) < 12:
-                ready, _w, _x = select.select([fd], [], [], 0.01)
-                if not ready:
-                    break
-                byte = read_one()
-                sequence += byte
-                if len(sequence) == 1:
-                    if byte not in (b"[", b"O"):
-                        break
-                    continue
-                code = byte[0]
-                if code < 0x20 or 0x40 <= code <= 0x7e:
-                    break
-            return sequence
-
         def sync():
             self._input_buffer = buffer
             self._input_cursor = cursor
@@ -1929,7 +1729,7 @@ class TuiConsole(Console):
                     sync()
                     continue
                 if raw == b"\x1b":
-                    seq = read_escape()
+                    seq = _read_escape_sequence(fd, read_one, [], select)
                     if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~",
                                 b"[13;2;13~", b"[27;2;13u")
                             or b"13;2" in seq or b";2;13" in seq

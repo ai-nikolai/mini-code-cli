@@ -46,21 +46,16 @@ class TuiCliTest(unittest.TestCase):
             self.assertFalse(ui.TuiConsole.supported())
 
 
-class TuiPtyTest(unittest.TestCase):
-    def test_history_editing_and_shift_enter_in_a_real_pty(self):
-        """Drive the real termios editor through a pseudo-terminal."""
+class BaseMultilinePtyTest(unittest.TestCase):
+    def test_plain_multiline_editor_still_accepts_shift_enter(self):
         child = r"""
 import sys
 from mini_code_cli.ui import Console
-console = Console(stream=sys.stdout, color=False, unicode=False)
+c = Console(stream=sys.stdout, color=False, unicode=False)
 sys.stdout.write("READY\n")
 sys.stdout.flush()
-first = console.read_line("", multiline=True, tui=True)
-second = console.read_line("", multiline=True, tui=True)
-third = console.read_line("", multiline=True, tui=True)
-fourth = console.read_line("", multiline=True, tui=True)
-sys.stdout.write("\nRESULT:%r|%r|%r|%r\n"
-                 % (first, second, third, fourth))
+text = c.read_line("", multiline=True)
+sys.stdout.write("\nRESULT:%r\n" % text)
 sys.stdout.flush()
 """
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -90,22 +85,12 @@ sys.stdout.flush()
             deadline = time.time() + 10
             while b"READY" not in output and time.time() < deadline:
                 drain(deadline)
-            self.assertIn(b"READY", output)
             time.sleep(0.3)
-            # Enter sends; Up recalls the previous history entry; Left + X
-            # edits in the middle; Shift+Enter inserts a newline.
-            os.write(master, b"hello\r")
-            time.sleep(0.15)
-            os.write(master, b"\x1b[A\r")
-            time.sleep(0.15)
-            os.write(master, b"abc\x1b[DX\r")
-            time.sleep(0.15)
-            os.write(master, b"line1\x1b[27;2;13~line2\r")
+            os.write(master, b"a\x1b[13;2ub\r")
             deadline = time.time() + 10
             while b"RESULT:" not in output and time.time() < deadline:
                 drain(deadline)
-            self.assertIn(
-                b"RESULT:'hello'|'hello'|'abXc'|'line1\\nline2'", output)
+            self.assertIn(b"RESULT:'a\\nb'", output)
         finally:
             if proc.poll() is None:
                 proc.kill()
