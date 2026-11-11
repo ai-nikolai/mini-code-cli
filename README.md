@@ -214,7 +214,9 @@ summary box (version/session/model/context) at the top, the last
 user/assistant content in the middle, and an input box with a one-line help
 hint at the bottom. The whole screen is redrawn on changes, so the view never
 scrolls; tool/thinking status is a transient line that disappears when the
-operation finishes. Tool details can be expanded with `/expand [n]`.
+operation finishes. The dashboard is coloured when the terminal supports it;
+info/warnings/errors are shown as coloured `ℹ`/`⚠`/`✖`/`✔` lines. Tool details
+can be expanded with `/expand [n]`.
 
 The prompt has a small line editor: `↑`/`↓` recall previous turns, `←`/`→` move
 the cursor, Home/End jump within the line, and `Ctrl-A/E/K/U/L` provide the
