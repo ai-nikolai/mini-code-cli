@@ -398,6 +398,14 @@ class TerminalBenchSuiteTests(unittest.TestCase):
         self.assertIn("{instruction}", template)
         self.assertIn("--sudo", template)
 
+    def test_claude_code_harbor_selection_passes_no_retired_kwargs(self):
+        adapter = get_adapter(AgentSpec(name="claude-code"))
+        model = ModelSpec(name="c", model="m",
+                          base_url="http://127.0.0.1:1", api="anthropic")
+        # The current harbor ClaudeCode schema has no ``model_name`` option; it
+        # resolves the model from ``-m`` / MODEL_CONNECTION.
+        self.assertEqual(adapter.harbor_selection(model), {"agent": "claude-code"})
+
     def test_harbor_uses_its_own_agents_for_claude_code_and_pi(self):
         for name, expected in (("claude-code", "claude-code"), ("pi", "pi")):
             trial = minimal_config(
