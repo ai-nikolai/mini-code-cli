@@ -214,9 +214,10 @@ With `--tui`, mini-code switches to a fixed alternate-screen dashboard: a
 conversation view of user/assistant turns in the middle, and an input box with
 a one-line help hint at the bottom. The whole screen is redrawn on changes, so the view never
 scrolls; tool/thinking status is a transient line that disappears when the
-operation finishes. The middle pane scrolls with `Shift+↑`/`Shift+↓`; the
-input box shows when a command has scrolled it back, and `Esc` returns from
-command output (`/help`, `/history`, ...) to the core view. The dashboard is coloured when the
+operation finishes. `Shift+↑`/`Shift+↓` scroll the middle pane one line at a
+time and show `(lines scrolled / total)`; `Esc` returns to the bottom or closes
+command output (`/help`, `/history`, ...). Info/warnings sit below a small
+separator at the bottom of the body. The dashboard is coloured when the
 terminal supports it; info/warnings/errors are shown as coloured
 `ℹ`/`⚠`/`✖`/`✔` lines. Questions (resume/permission) use a yellow "Question
 to User" box just above the input. Restored sessions load their history into

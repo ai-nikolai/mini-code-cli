@@ -140,9 +140,59 @@ class TuiConsoleTest(unittest.TestCase):
             self.assertEqual(console._scroll_offset, 0)
             console.scroll_body(1)
             self.assertEqual(console._scroll_offset, 1)
-            self.assertIn("scrolled up", console.stream.getvalue())
+            self.assertGreater(console._total_body_lines, 10)
+            self.assertIn(f"scrolled 1/{console._total_body_lines}",
+                          console.stream.getvalue())
             console.scroll_body(-1)
             self.assertEqual(console._scroll_offset, 0)
+            console.stop_tui()
+
+    def test_escape_returns_a_scrolled_view_to_the_bottom(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((50, 14))):
+            console.start_tui()
+            console.turn("Assistant", "\n".join(f"line {i}" for i in range(40)))
+            console.render()
+            console.scroll_body(5)
+            self.assertEqual(console._scroll_offset, 5)
+            console.dismiss_overlay()
+            self.assertEqual(console._scroll_offset, 0)
+            console.stop_tui()
+
+    def test_info_and_warning_messages_are_separated_at_the_bottom(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((50, 16))):
+            console.start_tui()
+            console.note("first warning", "warn")
+            console.note("second warning", "warn")
+            console.note("third warning", "warn")
+            console.note("latest info", "info")
+            lines = console._content_lines(45)
+            plain = [ui._ANSI_RE.sub("", line) for line in lines]
+            text = "\n".join(plain)
+            self.assertNotIn("first warning", text)
+            for kept in ("second warning", "third warning", "latest info"):
+                self.assertIn(kept, text)
+            warning_index = next(i for i, line in enumerate(plain)
+                                 if "latest info" in line)
+            separator = console.glyph("h")
+            self.assertTrue(any(set(line.strip()) == {separator}
+                                for line in plain[:warning_index]))
+            console.stop_tui()
+
+    def test_escape_does_not_dismiss_an_active_question(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((50, 16))):
+            console.start_tui()
+            console.question_box("Question to User", ["Continue?"])
+            console.dismiss_overlay()
+            self.assertTrue(console._question_active)
             console.stop_tui()
 
     def test_core_view_keeps_multiple_turns_with_separators(self):

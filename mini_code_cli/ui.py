@@ -1254,6 +1254,7 @@ class TuiConsole(Console):
         self._question_lines = []
         self._scroll_offset = 0
         self._last_body_height = 1
+        self._total_body_lines = 0
         self._input_buffer = []
         self._input_cursor = 0
         self._input_active = False
@@ -1591,15 +1592,19 @@ class TuiConsole(Console):
                                     fg="magenta", dim=True))
         if self._status_line:
             lines.append(self.style(self._status_line, fg="cyan", dim=True))
-        for level, msg in self._notices[-3:]:
-            lines.append(self._notice_style(level, msg))
+        notices = [self._notice_style(level, msg)
+                   for level, msg in self._notices[-3:]]
         if self._notice_line:
-            lines.append(self.style(self._notice_line, fg="yellow", dim=True))
+            notices.append(self.style(self._notice_line, fg="yellow", dim=True))
+        if notices:
+            lines.append(self.style(self.glyph("h") * max(width, 1), dim=True))
+            lines.extend(notices)
         return [self._fit(line, width) for line in lines]
 
     def _body_lines(self, height, width):
         lines = self._content_lines(width)
         self._last_body_height = max(height, 1)
+        self._total_body_lines = len(lines)
         max_offset = max(len(lines) - height, 0)
         self._scroll_offset = min(max(self._scroll_offset, 0), max_offset)
         if self._scroll_offset and max_offset:
@@ -1621,11 +1626,14 @@ class TuiConsole(Console):
         self.scroll_body(pages * page)
 
     def dismiss_overlay(self):
-        """Escape from a command output back to the core conversation view."""
+        """Escape from command output or a scrolled view back to the core view."""
         if self._question_active:
             return
         if self._overlay_lines:
             self._overlay_lines = []
+            self._scroll_offset = 0
+            self.render()
+        elif self._scroll_offset:
             self._scroll_offset = 0
             self.render()
 
@@ -1658,8 +1666,9 @@ class TuiConsole(Console):
         if len(input_lines) > max_input:
             input_lines = input_lines[-max_input:]
         if self._scroll_offset:
-            hint_text = (f"scrolled up {self._scroll_offset} line(s) · "
-                         f"Shift+↓ to follow · Enter send")
+            hint_text = (f"scrolled {self._scroll_offset}/"
+                         f"{self._total_body_lines} lines · "
+                         f"Shift+↓ / Esc to bottom")
         else:
             hint_text = ("Enter send · Shift+Enter newline · ↑/↓ history · "
                          "Shift+↑/↓ scroll · Esc close command · /help")
