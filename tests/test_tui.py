@@ -461,6 +461,10 @@ with mock.patch.object(utils, "call_openai_server", new=slow), \
             drain(time.time() + 1)
             self.assertIn(b"Interrupting", output)
             self.assertIn(b"\x1b[?1049l", output)
+            # The cancellation still ends like a normal session: save note and
+            # good-bye box on the restored screen.
+            self.assertIn(b"Saved session to", output)
+            self.assertIn(b"goodbye", output)
         finally:
             if proc.poll() is None:
                 proc.kill()

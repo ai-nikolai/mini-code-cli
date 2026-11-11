@@ -1691,12 +1691,16 @@ class AgentSession:
             # Ctrl-C during a permission prompt already saved the session.
             return
         except KeyboardInterrupt:
-            # Shut down first (restoring the TUI screen and cancelling
-            # background tasks), then print the reason on the normal screen.
-            self.shutdown(farewell=False)
+            # Stop the fixed view first so the reason, the save note and the
+            # good-bye box all land on the normal screen. A cancellation is a
+            # normal end to the session: keep the farewell summary (including
+            # any background tasks this interrupt cancelled).
+            if self.tui_active:
+                self.console.stop_tui()
             self.console.note(
                 "Interrupting: Mini Code Exiting... Background tasks "
                 "cancelled; session saved.", "error")
+            self.shutdown()
             return
         except Exception as e:
             self.shutdown(farewell=False)
@@ -2792,11 +2796,12 @@ class AgentSession:
     def shutdown(self, farewell=True):
         """Persist and print a final summary (called on quit / exit).
 
-        ``farewell=False`` is used by the interrupt / fatal paths in :meth:`run`,
-        which have already told the user (in red) that the session is being torn
+        ``farewell=False`` is used by the fatal-exception path in :meth:`run`,
+        which has already told the user (in red) that the session is being torn
         down: a cheerful "thanks and here is your state" box on top of a crash is
         the wrong note, and the state it would recap is the state that just
-        failed.
+        failed. A user cancellation is different -- it is a normal end -- so the
+        interrupt path still prints the farewell box.
         """
         if self.tui_active:
             self.console.stop_tui()

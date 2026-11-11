@@ -1087,7 +1087,7 @@ class FarewellBoxTest(_SessionCase):
 
     It is the last thing a user sees, and the only place the quiet (non-verbose)
     view states what the session left behind, so the content and the "exactly
-    once, normal exits only" rule are both pinned here.
+    once, on normal exits and user cancellations" rule are both pinned here.
     """
 
     def make(self):
@@ -1154,7 +1154,7 @@ class FarewellBoxTest(_SessionCase):
             "cancelled")
         self.assertIn("task cancelled on exit", self.output())
 
-    def test_no_box_on_the_interrupt_and_fatal_paths(self):
+    def test_no_box_on_the_fatal_path(self):
         session = self.make()
         session.console.emit("")
 
@@ -1164,7 +1164,7 @@ class FarewellBoxTest(_SessionCase):
         # ... but the session was still persisted ("Saved session to ...").
         self.assertIn("Saved session to", self.output())
 
-    def test_the_interrupt_path_in_run_prints_no_box(self):
+    def test_the_interrupt_path_in_run_still_prints_the_box(self):
         session = self.make()
         session.console.emit("")
         with mock.patch.object(AgentSession, "print_welcome"), \
@@ -1179,7 +1179,37 @@ class FarewellBoxTest(_SessionCase):
 
         text = self.output()
         self.assertIn("Interrupting: Mini Code Exiting...", text)
-        self.assertNotIn("Goodbye, and thanks", text)
+        self.assertIn("Saved session to", text)
+        self.assertIn("Goodbye, and thanks", text)
+        # The reason comes first, then the saved state and the good-bye box.
+        self.assertLess(text.index("Interrupting:"),
+                        text.index("Goodbye, and thanks"))
+
+    def test_the_interrupt_path_inside_a_tool_call_prints_the_box(self):
+        # Cancelling a running tool takes the same path as cancelling a prompt:
+        # the session is saved and closed with the normal summary.
+        session = self.make()
+        session.console.emit("")
+        target = os.path.join(self.workdir, "tool.txt")
+        with open(target, "w") as handle:
+            handle.write("hello\n")
+        call = tool_call("c1", "read_file", {"file_path": target})
+        stub = StubLLM([("", [call], USAGE)])
+        with mock.patch.object(utils, "call_openai_server", new=stub), \
+                mock.patch.object(agent_loop, "call_function_with_timeout",
+                                  side_effect=KeyboardInterrupt), \
+                mock.patch.object(AgentSession, "print_welcome"), \
+                mock.patch.object(AgentSession, "print_announcements"), \
+                mock.patch.object(AgentSession, "_warn_compaction_budget"), \
+                mock.patch.object(AgentSession, "start_session"), \
+                mock.patch.object(AgentSession, "_print_session_id"), \
+                mock.patch.object(AgentSession, "_emit_tip"):
+            session.run(initial_prompt="read it")
+
+        text = self.output()
+        self.assertIn("Interrupting: Mini Code Exiting...", text)
+        self.assertIn("Saved session to", text)
+        self.assertIn("Goodbye, and thanks", text)
 
 
 def scan_project_version(path):
