@@ -1116,6 +1116,10 @@ class FarewellBoxTest(_SessionCase):
         self.assertIn("conversation", text)
         self.assertIn("tokens", text)
         self.assertIn("calls", text)
+        self.assertIn("duration", text)
+        self.assertIn("background", text)
+        self.assertIn("resume", text)
+        self.assertIn("--load-last-session", text)
 
     def test_it_is_not_the_startup_banner(self):
         # The welcome box lists how the session *will* run; the farewell box
@@ -1126,7 +1130,7 @@ class FarewellBoxTest(_SessionCase):
         session.shutdown()
 
         text = self.output()
-        for absent in ("allowed dir", "server url", "permissions :", "model       :"):
+        for absent in ("allowed dir", "server url", "permissions :"):
             self.assertNotIn(absent, text)
 
     def test_it_prints_exactly_once_across_repeated_shutdowns(self):
@@ -1137,6 +1141,18 @@ class FarewellBoxTest(_SessionCase):
         session.shutdown()
 
         self.assertEqual(self.output().count("Goodbye, and thanks"), 1)
+
+    def test_background_tasks_are_cancelled_and_reported(self):
+        session = self.make()
+        task = session.background_tasks.start_shell("sleep 30")
+        session.console.emit("")
+
+        session.shutdown()
+
+        self.assertEqual(
+            session.background_tasks.wait(task.id, timeout=5)["status"],
+            "cancelled")
+        self.assertIn("task cancelled on exit", self.output())
 
     def test_no_box_on_the_interrupt_and_fatal_paths(self):
         session = self.make()

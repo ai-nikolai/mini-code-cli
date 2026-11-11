@@ -408,19 +408,24 @@ transcript and the segment left untouched.
 ### Exiting — the good-bye box
 
 Quitting (`/quit`, `exit`, or EOF on stdin) saves the session and then prints a short yellow
-box: the version, a sign-off, and what the session left behind — session id, folder, the
-history segments on disk, how many turns were recorded, and the token / call totals.
+box: the version, a sign-off, and what the session left behind — session id, model, folder,
+the history segments on disk, how many turns were recorded, run duration, token / call totals,
+background tasks cancelled on exit, and a `--load-last-session` resume hint.
 
 ```
 ╔══════════ MiniCodeCLI v0.1.1.2 - goodbye ═════════════════════╗
 ║ Goodbye, and thanks for using MiniCodeCLI!                    ║
 ║                                                               ║
 ║ session id   : 1792666273983619-36ca3c2e                      ║
+║ model        : ornith-ai/Ornith-1.5-35B-A3B                   ║
 ║ saved under  : ~/.cache/mini/sessions/1792…-36ca3c2e/         ║
 ║ history      : history_0.json (segment 0), 5 messages         ║
 ║ conversation : 2 recorded turns                               ║
+║ duration     : 12m 34s                                        ║
 ║ tokens       : 20 in / 10 out (30 total)                      ║
 ║ calls        : 2 LLM, 0 tool                                  ║
+║ background   : none running                                   ║
+║ resume       : mini-code --load-last-session                  ║
 ╚═══════════════════════════════════════════════════════════════╝
 ```
 

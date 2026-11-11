@@ -604,6 +604,7 @@ class AgentSession:
         # start_session) can differ from the id in the banner.
         self.unique_id = generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+        self.started_at = time.monotonic()
 
         self.tui_mode = ui.tui_mode(getattr(args, "tui", "auto"))
         if console is None:
@@ -1699,6 +1700,13 @@ class AgentSession:
             self.shutdown(farewell=False)
             return
         finally:
+            # A SystemExit/fatal path can bypass shutdown(); make sure
+            # background work never outlives the session.
+            background_cancelled = len(self.background_tasks.running())
+            self.background_tasks.shutdown()
+            if background_cancelled:
+                self._exit_background = max(
+                    getattr(self, "_exit_background", 0), background_cancelled)
             if self.tui_active:
                 self.console.stop_tui()
                 self.tui_active = False
@@ -2785,7 +2793,10 @@ class AgentSession:
         if self.tui_active:
             self.console.stop_tui()
             self.tui_active = False
+        background_cancelled = len(self.background_tasks.running())
         self.background_tasks.shutdown()
+        self._exit_background = max(
+            getattr(self, "_exit_background", 0), background_cancelled)
         self._persist()
         segments = history_segment_indices(self.session_dir)
         # List what is really on disk. The old message claimed
@@ -2844,17 +2855,29 @@ class AgentSession:
             except (TypeError, ValueError):
                 return 0
 
+        elapsed = max(time.monotonic() - getattr(self, "started_at",
+                                                  time.monotonic()), 0.0)
+        hours, remainder = divmod(int(elapsed), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        duration = (f"{hours}h {minutes:02d}m" if hours
+                    else f"{minutes}m {seconds:02d}s")
+        cancelled = getattr(self, "_exit_background", 0)
         rows = [
             ("session id", self.unique_id),
+            ("model", self.model or "(auto)"),
             ("saved under", f"{self.cache_dir}/{self.unique_id}/"),
             ("history", f"{where} (segment {self.history_index}), "
                         f"{plural(len(self.messages), 'message')}"),
             ("conversation", plural(turns, "recorded turn")),
+            ("duration", duration),
             ("tokens", f"{count('prompt_tokens'):,} in / "
                        f"{count('completion_tokens'):,} out "
                        f"({count('total_tokens'):,} total)"),
             ("calls", f"{count('llm_calls'):,} LLM, "
                       f"{count('tool_calls'):,} tool"),
+            ("background", (f"{plural(cancelled, 'task')} cancelled on exit"
+                            if cancelled else "none running")),
+            ("resume", "mini-code --load-last-session"),
         ]
         self.console.farewell(version, rows)
 
