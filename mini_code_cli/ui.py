@@ -28,6 +28,8 @@ import re
 import shutil
 import sys
 import threading
+import unicodedata
+from collections import deque
 
 from .utils import oneline, plural
 
@@ -51,8 +53,23 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 # --- helpers ----------------------------------------------------------------
 
 def _visual_len(text):
-    """Length of *text* on screen, ignoring ANSI escape codes."""
-    return len(_ANSI_RE.sub("", text))
+    """Width of *text* in terminal columns, ignoring ANSI escape codes.
+
+    Wide East-Asian glyphs and emoji take two columns; combining/format marks
+    take none. This keeps boxes aligned for CJK text and emoji instead of
+    silently shifting every border by one column.
+    """
+    total = 0
+    for char in _ANSI_RE.sub("", str(text)):
+        if unicodedata.category(char) in ("Mn", "Me", "Cf"):
+            continue
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            total += 2
+        elif 0x1F000 <= ord(char) <= 0x1FAFF:
+            total += 2
+        else:
+            total += 1
+    return total
 
 
 def _pad_visual(text, width):
@@ -60,6 +77,31 @@ def _pad_visual(text, width):
     text = str(text)
     pad = width - _visual_len(text)
     return text + (" " * pad if pad > 0 else "")
+
+
+def _read_escape_sequence(fd, read_one, pending, select_module):
+    """Read one CSI/SS3 sequence, stopping on its final byte.
+
+    ``read_one`` abstracts bytes already pushed back by the caller. A lone Esc
+    returns once the 10 ms quiet period elapses; a CSI final byte is in
+    ``@``..``~``.
+    """
+    sequence = b""
+    while len(sequence) < 12:
+        if not pending:
+            ready, _w, _x = select_module.select([fd], [], [], 0.01)
+            if not ready:
+                break
+        byte = read_one()
+        sequence += byte
+        if len(sequence) == 1:
+            if byte not in (b"[", b"O"):
+                break
+            continue
+        code = byte[0]
+        if code < 0x20 or 0x40 <= code <= 0x7e:
+            break
+    return sequence
 
 
 # Glyph tables for the unicode and ascii (fallback) renderers.
@@ -104,6 +146,8 @@ class Console:
         # CRLF, or a key that arrived right after Enter). It lives on the
         # console so it survives into the next read_line call.
         self._input_pending = []
+        # Recent tool calls, for /expand in the fixed TUI (and normal mode).
+        self._tool_history = deque(maxlen=20)
         self._color = color
         self._unicode = unicode
         self._width = width
@@ -332,6 +376,14 @@ class Console:
     def print_box(self, lines, title=None, fg="cyan"):
         self.emit(self.box(lines, title=title, fg=fg))
 
+    def question_box(self, title, lines):
+        """Render a prominent question/confirmation box (yellow/orange)."""
+        self.print_box(lines, title=title, fg="yellow")
+
+    def plan_box(self, lines, title="Plan for the current goal"):
+        """Render a generated plan (the fixed TUI appends it to the core view)."""
+        self.status_box(lines, title=title, fg="cyan", dim=True)
+
     def status_box(self, lines, title=None, fg="cyan", dim=False):
         """Render a bordered box of free-form *status* lines (used for /plan).
 
@@ -453,7 +505,8 @@ class Console:
 
         Implements the /clear command: it wipes the current view but keeps the
         session history intact, so subsequent turns continue from where the
-        conversation is now.
+        conversation is now. The full-screen TUI overrides this to preserve its
+        fixed dashboard.
         """
         self.clear_transient()
         self.stream.write("\033[2J\033[H")
@@ -596,12 +649,31 @@ class Console:
         line below -- rather than flashing the call in the live region and then
         clearing it away completely.
         """
+        self._tool_history.append((name, params, result))
         if not transient:
             self.tool_group(name, params, result)
             return
         label = self.style("tool", fg="yellow", bold=True) if self.color_enabled else "tool"
         self.emit(label)
         self.emit(f"    {name}: {str(params)[:35]}")
+
+    def expand_tool(self, index=1):
+        """Print the full detail of a recent tool call (``/expand [n]``)."""
+        try:
+            index = max(int(index), 1)
+        except (TypeError, ValueError):
+            index = 1
+        if not self._tool_history:
+            self.note("No tool calls have run yet.", "warn")
+            return
+        if index > len(self._tool_history):
+            self.note(
+                f"No tool call {index} back; only {len(self._tool_history)} "
+                f"are remembered.", "warn")
+            return
+        name, params, result = self._tool_history[-index]
+        self.rule(title=f"tool call {index} back", char="═", fg="cyan")
+        self.tool_group(name, params, result)
 
     def usage_inline(self, usage, llm_calls=None):
         """A compact one-liner describing token usage.
@@ -787,26 +859,21 @@ class Console:
                   "warn")
 
     # -- interactive input --------------------------------------------------
-    def read_line(self, prompt_text="", multiline=False):
-        """Print an (already-styled) prompt and read input from stdin.
+    def read_line(self, prompt_text="", multiline=False, tui=False):
+        """Print an (already-styled) prompt and read one line from stdin.
 
-        Returns the typed text, or ``None`` on EOF / Ctrl-C. Routing every
-        interactive prompt (the "You:" line, permission answers, ...) through
-        the console keeps all input handling in one place.
-
-        ``multiline=True`` uses a small TTY line editor: Enter sends, while
-        Shift+Enter (and Ctrl-J / LF) inserts a newline. Terminals that encode
-        Shift+Enter as the CSI-u sequence ``\x1b[13;2u`` (or the xterm
-        modifyOtherKeys variant) are recognised; on a non-TTY stdin it falls
-        back to a normal ``input()`` line.
+        Returns the typed text, or ``None`` on EOF / Ctrl-C. ``multiline=True``
+        uses the small TTY editor: Enter sends and Shift+Enter / Ctrl-J inserts
+        a newline. The richer history/editing behaviour lives in
+        :class:`TuiConsole`; ``tui`` is accepted for call-site compatibility and
+        ignored here. On a non-TTY stdin this falls back to ``input()``.
         """
         if self.parent_console is not None:
             # A swallowed console (e.g. a sub-agent's) has its output redirected
             # away from the terminal; route both the prompt and the typed answer
-            # through the console that actually owns the screen. The prompt
-            # string carries its own styling, so it renders identically here or
-            # there.
-            return self.parent_console.read_line(prompt_text, multiline=multiline)
+            # through the console that actually owns the screen.
+            return self.parent_console.read_line(prompt_text,
+                                                 multiline=multiline, tui=tui)
         if multiline:
             try:
                 return self._read_multiline(prompt_text)
@@ -818,13 +885,11 @@ class Console:
             return None
 
     def _read_multiline(self, prompt_text=""):
-        """Read one (possibly multi-line) turn from a TTY.
+        """Read one (possibly multi-line) value from a TTY.
 
-        Uses termios only for the duration of the prompt. Enter (CR) submits;
-        LF / Ctrl-J / the Shift+Enter CSI-u sequence insert a newline. Ctrl-C
-        still raises KeyboardInterrupt (ISIG stays enabled), and the original
-        terminal settings are restored in ``finally``. Anything that is not a
-        TTY (tests, pipes, Windows without termios) falls back to ``input()``.
+        Enter (CR) submits; LF / Ctrl-J / Shift+Enter inserts a newline. The
+        richer cursor/history editor is :class:`TuiConsole`; this fallback only
+        needs to keep multiline input working on the ordinary console.
         """
         import codecs
         import select
@@ -842,10 +907,6 @@ class Console:
             return input(prompt_text)
 
         attrs = termios.tcgetattr(fd)
-        # Keep ISIG (so Ctrl-C still interrupts) and OPOST (normal newlines),
-        # but read key-by-key without canonical line buffering or echo. ICRNL
-        # and IXON are *input* flags: clear them there, so Enter stays CR (the
-        # submit key) and Ctrl-S/Ctrl-Q do not freeze the prompt.
         attrs[0] &= ~(getattr(termios, "ICRNL", 0)
                       | getattr(termios, "IXON", 0))
         attrs[3] &= ~(termios.ICANON | termios.ECHO)
@@ -854,33 +915,16 @@ class Console:
 
         buffer = []
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending = self._input_pending
 
         def write(text):
             self.stream.write(text)
             self.stream.flush()
 
-        # Bytes read while peeking past a CR (to swallow a CRLF) but not
-        # consumed belong here, so the next key is never silently dropped --
-        # even when it arrives after this call has already returned.
-        pending = self._input_pending
-
         def read_one():
             if pending:
                 return pending.pop(0)
             return os.read(fd, 1)
-
-        def read_escape():
-            """Read the rest of an escape sequence without waiting for lone Esc."""
-            sequence = b""
-            while len(sequence) < 12:
-                if not pending:
-                    ready, _w, _x = select.select([fd], [], [], 0.01)
-                    if not ready:
-                        break
-                sequence += read_one()
-                if sequence[-1:] in (b"u", b"~"):
-                    break
-            return sequence
 
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
@@ -890,9 +934,7 @@ class Console:
                 if not raw:  # EOF
                     return None if not buffer else "".join(buffer)
                 if raw == b"\r":
-                    # Some terminals send CRLF; consume the LF so it does not
-                    # appear as a spurious empty line on the next prompt, but
-                    # push any other following byte back for the next read.
+                    # Consume the LF of a CRLF so the next prompt is clean.
                     if pending:
                         nxt = read_one()
                     else:
@@ -906,21 +948,33 @@ class Console:
                     buffer.append("\n")
                     write("\n... ")
                     continue
-                if raw == b"\x1b":      # CSI-u / modifyOtherKeys Shift+Enter
-                    seq = read_escape()
-                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~")
-                            or b"13;2" in seq or b";2;13" in seq):
+                if raw == b"\x1b":      # Shift+Enter / modified Enter
+                    seq = _read_escape_sequence(fd, read_one, pending, select)
+                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~",
+                                b"[13;2;13~", b"[27;2;13u")
+                            or b"13;2" in seq or b";2;13" in seq
+                            or seq == b"\r"):
                         buffer.append("\n")
                         write("\n... ")
+                    elif seq and not seq.startswith((b"[", b"O")):
+                        # Esc followed quickly by a printable key: keep the
+                        # key instead of consuming it as part of an escape.
+                        for char in decoder.decode(seq):
+                            if char == "\n":
+                                buffer.append(char)
+                                write("\n... ")
+                            elif char == "\t" or char.isprintable():
+                                buffer.append(char)
+                                write(char)
                     continue
-                if raw in (b"\x7f", b"\b"):  # backspace
+                if raw in (b"\x7f", b"\b"):
                     if buffer and buffer[-1] != "\n":
                         buffer.pop()
                         write("\b \b")
                     continue
-                if raw == b"\x03":      # Ctrl-C (if ISIG were disabled)
+                if raw == b"\x03":
                     raise KeyboardInterrupt
-                if raw == b"\x04":      # Ctrl-D
+                if raw == b"\x04":
                     if not buffer:
                         return None
                     continue
@@ -949,7 +1003,8 @@ class Console:
         """
         console = self.parent_console if self.parent_console is not None else self
         console.clear_transient()
-        lines = [f"Tool       : {name}", f"Parameters : {params_str}"]
+        lines = [f"Permission needed for tool: {name}",
+                 f"Parameters : {params_str}"]
         if shell_cmd is not None:
             snippet = self._oneline(shell_cmd, 120)
             if tier == "ask":
@@ -957,7 +1012,7 @@ class Console:
                 lines.append(f"           : risky - needs your confirmation ({reason})")
             else:
                 lines.append(f"Command    : {snippet}")
-        console.print_box(lines, title="Permission needed", fg="yellow")
+        console.question_box("Question to User", lines)
         prompt = self.style("Proceed? Type 'y' or 'yes' and press Enter: ",
                             fg="yellow", bold=True)
         answer = console.read_line(prompt)

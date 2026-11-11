@@ -131,7 +131,7 @@ def pointer_dir(allowed_dir):
     return os.path.join(os.path.abspath(allowed_dir), SESSION_DIRNAME)
 
 
-def _last_session_dir_store(allowed_dir):
+def _last_session_dir_store(allowed_dir, console=None):
     """Return the pointer directory for ``allowed_dir`` (creating it if needed).
 
     Best-effort: never raises. Returns None if the directory cannot be ensured,
@@ -144,11 +144,13 @@ def _last_session_dir_store(allowed_dir):
         os.makedirs(store, exist_ok=True)
         return store
     except OSError as e:
-        ui.console.note(f"Could not use {store} for the latest-session pointer: {e}", "warn")
+        (console or ui.console).note(
+            f"Could not use {store} for the latest-session pointer: {e}",
+            "warn")
         return None
 
 
-def save_last_session_pointer(allowed_dir, session_dir):
+def save_last_session_pointer(allowed_dir, session_dir, console=None):
     """Record ``session_dir`` as the latest session in ``<allowed_dir>/.mini``.
 
     Writes a tiny JSON file (the absolute path plus a timestamp) so a later
@@ -160,10 +162,13 @@ def save_last_session_pointer(allowed_dir, session_dir):
     Written atomically (temp file + ``os.replace``) so a reader never observes a
     half-written pointer. Best-effort: never raises, returns the written path or
     None.
+
+    ``console`` defaults to the module-level renderer; the agent loop passes its
+    own so a sub-agent's failure is not printed onto the parent's screen.
     """
     if not session_dir:
         return None
-    store = _last_session_dir_store(allowed_dir)
+    store = _last_session_dir_store(allowed_dir, console=console)
     if store is None:
         return None
     path = os.path.join(store, LAST_SESSION_FILENAME)
@@ -178,7 +183,8 @@ def save_last_session_pointer(allowed_dir, session_dir):
         os.replace(tmp_path, path)
         return path
     except OSError as e:
-        ui.console.note(f"Could not record latest-session pointer: {e}", "warn")
+        (console or ui.console).note(
+            f"Could not record latest-session pointer: {e}", "warn")
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -292,7 +298,7 @@ def _segment_indices(directory, pattern):
     return sorted(indices)
 
 
-def delete_segments_above(directory, keep_index):
+def delete_segments_above(directory, keep_index, console=None):
     """Delete every history/usage segment whose index is above ``keep_index``.
 
     A ``/reset`` that lands on an *earlier* segment must not leave the segments
@@ -324,7 +330,8 @@ def delete_segments_above(directory, keep_index):
                 os.unlink(path)
                 removed.append(path)
             except OSError as e:
-                ui.console.note(f"Could not remove {name}: {e}", "warn")
+                (console or ui.console).note(
+                    f"Could not remove {name}: {e}", "warn")
     return removed
 
 

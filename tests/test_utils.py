@@ -4,10 +4,11 @@ The loop is deliberately tolerant of a dead server (it degrades to a failed
 step), but a *transient* failure should not cost a turn -- these tests pin the
 bounded retry and the fact that a client error is not retried.
 """
+import io
 import unittest
 from unittest import mock
 
-from mini_code_cli import utils
+from mini_code_cli import ui, utils
 
 
 class FakeResponse:
@@ -87,6 +88,23 @@ class RetryTest(unittest.TestCase):
         result, _ = self.call(post)
         self.assertEqual(result[0], "ok")
         self.assertEqual(post.call_count, 2)
+
+    def test_failure_notes_go_to_the_supplied_console(self):
+        stream = io.StringIO()
+        console = ui.Console(stream=stream, color=False, unicode=False,
+                             verbose=False)
+        post = mock.Mock(
+            side_effect=utils.requests.exceptions.RequestException("down"))
+        with mock.patch.object(utils.requests, "post", post), \
+                mock.patch.object(utils.time, "sleep"), \
+                mock.patch.object(ui.console, "note") as global_note:
+            result = utils.call_openai_server(
+                [{"role": "user", "content": "hi"}],
+                server_url="http://x", console=console)
+
+        self.assertEqual(result, (None, None, None, None))
+        self.assertIn("model server", stream.getvalue())
+        global_note.assert_not_called()
 
 
 if __name__ == "__main__":

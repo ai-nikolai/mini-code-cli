@@ -35,6 +35,7 @@ from . import tools
 from . import utils
 from .utils import oneline, plural
 from . import ui
+from . import tui as tui_mod
 from . import subagents
 from . import skills
 from . import agent_files
@@ -167,6 +168,9 @@ def parse_args():
                         help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
+    parser.add_argument("--tui", nargs="?", const="on", default="auto",
+                        choices=("auto", "on", "off"),
+                        help="Fixed-screen TUI: auto (default; only on a known TTY), on, or off. Includes history, scrolling, colours and Shift+Enter multiline input.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
     parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
@@ -200,16 +204,17 @@ def parse_args():
 # banners / helpers
 # ---------------------------------------------------------------------------
 
-def print_help(args):
+def print_help(args, console=None):
     """Print the interactive command list (``/help``)."""
-    ui.console.rule("help", fg="cyan")
+    console = console if console is not None else ui.console
+    console.rule("help", fg="cyan")
     if args.auto_mode:
         help_message = ("Auto-mode: the agent keeps calling the LLM until no "
                         "further tool calls are possible.")
     else:
         help_message = "Manual-mode: the agent asks for your input after each LLM prediction."
-    ui.console.emit(ui.console.style(help_message, dim=True, fg="cyan"))
-    ui.console.emit(ui.console.style("History / navigation commands:", bold=True, fg="cyan"))
+    console.emit(console.style(help_message, dim=True, fg="cyan"))
+    console.emit(console.style("History / navigation commands:", bold=True, fg="cyan"))
     for command, description in (
         ("/history", "list the conversation (turn number, what happened, where)"),
         ("/history <n>", "show the full messages recorded for turn n"),
@@ -217,24 +222,28 @@ def print_help(args):
         ("/plan", "show the current goal + plan (plan mode only)"),
         ("/context", "show how the context window is used (tokens + percentages)"),
         ("/background [id]", "show foreground activity + background tasks (or one task's output)"),
+        ("/expand [n]", "show the full detail of the nth most recent tool call"),
         ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
         ("", "a bare /reset only re-saves the current state (no data loss)"),
-        ("/clear", "clear the screen (keeps the conversation history)"),
+        ("/clear", "dismiss command output/notices (keeps the conversation)"),
         ("/help", "show this help"),
         ("/quit, /exit", "save the session and exit"),
         ("", "Shift+Enter (or Ctrl-J) inserts a new line; Enter sends."),
     ):
-        ui.console.emit(f"  {command:16} {description}")
+        console.emit(f"  {command:16} {description}")
+    if tui_mod.tui_mode(getattr(args, "tui", "auto")) != "off":
+        console.emit("  TUI input        ↑/↓ history, ←/→ edit, Home/End, "
+                        "Ctrl-A/E/K/U/L.")
     if getattr(args, "enable_subagents", False) or args.verbose:
-        ui.console.emit(ui.console.style("Sub-agents:", bold=True, fg="cyan"))
+        console.emit(console.style("Sub-agents:", bold=True, fg="cyan"))
         for sa in subagents.get_registry().values():
-            ui.console.emit(f"  {sa.name:16} {sa.description}")
+            console.emit(f"  {sa.name:16} {sa.description}")
     if getattr(args, "enable_skills", False) or args.verbose:
-        ui.console.emit(ui.console.style("Skills:", bold=True, fg="cyan"))
+        console.emit(console.style("Skills:", bold=True, fg="cyan"))
         for name in skills.SKILL_TOOL_NAMES:
-            ui.console.emit(f"  {name:16} (from the local .mini directory)")
-    ui.console.rule(char="═", fg="cyan")
+            console.emit(f"  {name:16} (from the local .mini directory)")
+    console.rule(char="═", fg="cyan")
 
 
 def print_welcome(allowed_dir, server_url, args, unique_id, cache_dir, model_name=None,
@@ -460,6 +469,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
                         server_url=server_url,
                         api_key=api_key,
                         timeout=llm_timeout,
+                        console=console,
                     ))
             finally:
                 console.stop_thinking()
@@ -602,8 +612,14 @@ class AgentSession:
         # start_session) can differ from the id in the banner.
         self.unique_id = generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+        self.started_at = time.monotonic()
 
-        self.console = console if console is not None else ui.console
+        self.tui_mode = tui_mod.tui_mode(getattr(args, "tui", "auto"))
+        if console is None:
+            use_tui = (self.tui_mode == "on"
+                       or (self.tui_mode == "auto" and tui_mod.TuiConsole.supported()))
+            console = tui_mod.TuiConsole() if use_tui else ui.console
+        self.console = console
         self.console.verbose = getattr(args, "verbose", False)
 
         # LLM / server configuration.
@@ -648,6 +664,9 @@ class AgentSession:
                           or requested_plan_strategy is not None)
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
+        self.tui = (self.tui_mode != "off"
+                    and isinstance(self.console, tui_mod.TuiConsole))
+        self.restored_session = False
         self.compaction_strategy = getattr(
             self.args, "compaction_strategy",
             compaction_mod.DEFAULT_COMPACTION_STRATEGY)
@@ -789,6 +808,7 @@ class AgentSession:
         """
         self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
+        self.restored_session = False
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
@@ -900,6 +920,7 @@ class AgentSession:
             self.last_prompt_tokens = 0
             self.last_prompt_message_count = 0
             self._restore_usage_if_available(restore_directory)
+            self.restored_session = True
 
             # Continuing a session in place makes it the latest one again: keep
             # the pointer aimed at it so a later --load-last-session finds the
@@ -929,6 +950,7 @@ class AgentSession:
         self.last_prompt_tokens = 0
         self.last_prompt_message_count = 0
         self._persistent_messages = []
+        self.restored_session = False
         return False
 
     def _resolve_model(self, args):
@@ -1439,7 +1461,8 @@ class AgentSession:
                 f"Could not persist the rewind ({e}); the session is unchanged.", "error")
             return False
 
-        removed = delete_segments_above(self.session_dir, target_index)
+        removed = delete_segments_above(self.session_dir, target_index,
+                                        console=self.console)
 
         self.messages = messages
         self.history_index = target_index
@@ -1478,6 +1501,73 @@ class AgentSession:
             title="DANGER",
             fg="red",
         )
+
+    def _tui_info_line(self):
+        """A one-line session summary for the fixed dashboard."""
+        usage = getattr(self, "total_usage", {}) or {}
+        tasks = (self.background_tasks.list()
+                 if hasattr(self, "background_tasks") else [])
+
+        def count(key):
+            # The dashboard refreshes on every turn: a display detail must
+            # never raise, even if a server reported a null/odd usage value.
+            try:
+                return int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        running = sum(1 for task in tasks
+                      if task.get("status") in ("running", "cancelling"))
+        if tasks:
+            background = (f"{running} of "
+                          f"{plural(len(tasks), 'background task')} running")
+        else:
+            background = "no background tasks"
+        return (f"{plural(count('tool_calls'), 'tool call')} · "
+                f"{plural(count('llm_calls'), 'LLM call')} · {background}")
+
+    def _tui_header_lines(self):
+        """The fixed dashboard content for --tui."""
+        from . import __version__ as version
+        if getattr(self.args, "sudo", False):
+            permission = "sudo"
+        elif getattr(self.args, "ask_permission", False):
+            permission = "ask"
+        else:
+            permission = "auto"
+        shell = "on" if shell_execution_enabled(self.args) else "off"
+        planning = self.plan_strategy if self.plan_mode else "off"
+        session_line = f"version {version}   session {self.unique_id}"
+        if self.restored_session:
+            session_line += "   [restored]"
+        lines = [
+            session_line,
+            f"model   {oneline(self.model or '(auto)', 56)}",
+            f"server  {oneline(self.server_url, 56)}",
+            f"dir     {oneline(self.allowed_dir, 56)}",
+            f"perm    {permission}   shell {shell}",
+            f"compact {self.compaction_strategy}   planning {planning}",
+        ]
+        badge = self._context_badge()
+        if badge:
+            lines.append(f"context {badge}")
+        return lines
+
+    def _tui_history_turns(self):
+        """User/assistant turns to prime the TUI core view after a restore."""
+        persistent = {id(message) for message in self._persistent_messages}
+        turns = []
+        for message in self.messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role not in ("user", "assistant") or not content:
+                continue
+            if id(message) in persistent:
+                continue
+            if role == "user" and _is_loop_injected(message):
+                continue
+            turns.append((role, content))
+        return turns[-40:]
 
     def print_welcome(self):
         """Render the startup banner for this session."""
@@ -1539,16 +1629,18 @@ class AgentSession:
         degrades cleanly on a non-TTY / piped console: an EOF / Ctrl-C (``read_line``
         returns None) is treated as ``"exit"`` so the loop never spins on unread input.
         """
-        self.console.emit(
-            self.console.style(
-                "A previous session was found. What would you like to do?", dim=True,
-                fg="cyan"))
-        self.console.emit("  1) Resume the previous session (continue where you left off)")
-        self.console.emit("  2) Start a new session (empty history)")
-        self.console.emit("  3) Exit (start nothing)")
         while True:
-            answer = self.console.read_line(
-                self.console.style("Resume previous session? Type 1, 2, or 3: ", fg="cyan"))
+            self.console.question_box("Question to User", [
+                "Resume previous session? A previous session was found.",
+                "",
+                "1) Resume the previous session (continue where you left off)",
+                "2) Start a new session (empty history)",
+                "3) Exit (start nothing)",
+            ])
+            prompt = (""
+                      if self.tui_active else
+                      self.console.style("Type 1, 2, or 3: ", fg="yellow"))
+            answer = self.console.read_line(prompt)
             if answer is None:
                 # EOF / Ctrl-C at the offer -> graceful exit, no session written.
                 return "exit"
@@ -1571,50 +1663,97 @@ class AgentSession:
         # consume stdin). None of them depends on which session is finally used:
         # they read args, allowed_dir, cache_dir, server_url and the resolved
         # model, plus the provisional id minted in __init__.
-        self.print_welcome()
-        self.print_announcements()
-        self._warn_compaction_budget()
+        if self.tui and isinstance(self.console, tui_mod.TuiConsole):
+            if not self.console.start_tui():
+                # --tui on requested the fixed view, but this terminal cannot
+                # host it (piped output, an unsupported TERM, ...). Fall back
+                # to the scrolling console instead of leaving self.tui true
+                # with no frame on screen.
+                self.tui = False
+                self.console.note(
+                    "TUI is not available on this terminal; using the "
+                    "scrolling console.", "warn")
+        if not self.tui_active:
+            self.print_welcome()
 
-        # Only now resolve the session (resume offer / restore / fresh start),
-        # because all of that can consume input and can replace the id. The id
-        # line and the tip therefore come after it and show the id actually in
-        # use (the banner may have shown the provisional one).
-        self.start_session()
-        self._print_session_id()
-        self._emit_tip()
-
-        # The --prompt value is a one-shot initial turn: it is sent verbatim and
-        # then cleared, so later turns come from the user (manual mode) or are
-        # produced automatically by the loop (auto mode).
-        pending = initial_prompt
+        # Startup (including the resume offer, which may raise SystemExit) is
+        # inside the guarded region so the alternate screen is always restored.
         try:
+            self.print_announcements()
+            self._warn_compaction_budget()
+
+            # Only now resolve the session (resume offer / restore / fresh start),
+            # because all of that can consume input and can replace the id. The id
+            # line and the tip therefore come after it and show the id actually in
+            # use (the banner may have shown the provisional one).
+            self.start_session()
+            if self.tui_active:
+                self.console.set_summary(self._tui_header_lines())
+                self.console.set_info_provider(self._tui_info_line)
+                if self.restored_session:
+                    self.console.load_history(self._tui_history_turns())
+            else:
+                self._print_session_id()
+                self._emit_tip()
+
+            # The --prompt value is a one-shot initial turn: it is sent verbatim
+            # and then cleared, so later turns come from the user (manual mode) or
+            # are produced automatically by the loop (auto mode).
+            pending = initial_prompt
             while True:
                 user_input = pending if pending is not None else self._read_user_line()
                 if user_input is None or user_input.lower() in self.EXIT_COMMANDS:
                     self.console.note("Thank you. Goodbye! Saving history...", "info")
                     break
-                if pending is not None:
+                was_preset = pending is not None
+                if was_preset:
                     self.console.rule(title="Preset prompt", char="=", fg="cyan")
                     self.console.short_divider()
                     self.console.turn("You", user_input, accent="cyan")
                     pending = None
                 # Interactive slash commands are handled in place and never
-                # reach the LLM.
+                # reach the LLM (and do not appear as a "You" turn in the TUI).
                 if user_input.startswith("/") and self._handle_command(user_input):
                     continue
+                if self.tui_active and not was_preset:
+                    self.console.turn("You", user_input, accent="cyan")
                 self._run_turn(user_input)
         except _Abort:
             # Ctrl-C during a permission prompt already saved the session.
             return
         except KeyboardInterrupt:
-            self.console.note("Interrupting: Mini Code Exiting...", "error")
-            self.shutdown(farewell=False)
+            # Stop the fixed view first so the reason, the save note and the
+            # good-bye box all land on the normal screen. A cancellation is a
+            # normal end to the session: keep the farewell summary (including
+            # any background tasks this interrupt cancelled).
+            if self.tui_active:
+                self.console.stop_tui()
+            self.console.note(
+                "Interrupting: Mini Code Exiting... Background tasks "
+                "cancelled; session saved.", "error")
+            self.shutdown()
             return
         except Exception as e:
-            self.console.note(f"Exception {e}. Exiting...", "error")
             self.shutdown(farewell=False)
+            self.console.note(f"Exception {e}. Exiting...", "error")
             return
+        finally:
+            # A SystemExit/fatal path can bypass shutdown(); make sure
+            # background work never outlives the session.
+            background_cancelled = len(self.background_tasks.running())
+            self.background_tasks.shutdown()
+            if background_cancelled:
+                self._exit_background = max(
+                    getattr(self, "_exit_background", 0), background_cancelled)
+            if self.tui_active:
+                self.console.stop_tui()
         self.shutdown()
+
+    @property
+    def tui_active(self):
+        """Whether the fixed TUI frame is currently on screen."""
+        return (self.tui and isinstance(self.console, tui_mod.TuiConsole)
+                and self.console.active)
 
     def _emit_tip(self):
         """Point at the history/navigation commands once, at startup."""
@@ -1627,6 +1766,9 @@ class AgentSession:
                    "send one prompt without planning, /history to browse the "
                    "conversation, /history <n> to inspect a turn, /reset <n> to "
                    "rewind. Type /help for all commands.")
+        if self.tui:
+            tip = (tip + " TUI: ↑/↓ history, ←/→ edit, Home/End, "
+                   "Ctrl-A/E/K/U/L.")
         self.console.emit(self.console.style(tip, dim=True, fg="cyan"))
 
     def _warn_compaction_budget(self):
@@ -1725,7 +1867,8 @@ class AgentSession:
         """
         if self.background_mode or not self.allowed_dir:
             return
-        save_last_session_pointer(self.allowed_dir, self.session_dir)
+        save_last_session_pointer(self.allowed_dir, self.session_dir,
+                                  console=self.console)
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
@@ -1822,6 +1965,7 @@ class AgentSession:
                     server_url=self.server_url,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
 
             self._record_usage(usage)
@@ -1841,9 +1985,8 @@ class AgentSession:
         if plan_text and plan_text.strip():
             # Show the plan immediately; otherwise the user only sees it via
             # /plan or the file on disk.
-            self.console.status_box(plan_text.strip().splitlines(),
-                                    title="Plan for the current goal",
-                                    fg="cyan", dim=True)
+            self.console.plan_box(plan_text.strip().splitlines(),
+                                  title="Plan for the current goal")
         else:
             self.console.note("No plan text was generated.", "warn")
         if plan_text and plan_text.strip():
@@ -1874,6 +2017,7 @@ class AgentSession:
                     server_url=self.server_url,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
             self._record_usage(usage)
             self._note_prompt_size(usage, len(self.messages))
@@ -2010,6 +2154,7 @@ class AgentSession:
                     tools=read_tools,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
         except Exception as exc:
             self.console.note(
@@ -2068,6 +2213,7 @@ class AgentSession:
                     server_url=self.server_url,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
         except Exception as exc:
             self.console.note(
@@ -2131,11 +2277,17 @@ class AgentSession:
         # A loop, not recursion: holding Enter used to recurse once per blank
         # line, so a long run of empty input could exhaust the interpreter stack.
         while True:
-            self.console.short_divider()
+            if not self.tui_active:
+                self.console.short_divider()
 
+            if self.tui_active:
+                prompt = ""
+            else:
+                prompt = (self.console.style("You › ", bold=True, fg="cyan")
+                          if self.tui else
+                          self.console.style("You:", bold=True, fg="cyan") + " ")
             user_input = self.console.read_line(
-                self.console.style("You:", bold=True, fg="cyan") + " ",
-                multiline=True)
+                prompt, multiline=True, tui=self.tui)
 
             # EOF / Ctrl-C at the prompt: the caller treats None as "quit", so it
             # must not be dereferenced here (a piped or closed stdin would
@@ -2163,6 +2315,8 @@ class AgentSession:
                              (tokens and percentages)
           /background [id]   show what the loop is doing and the background
                              tasks (or the output of one task)
+          /expand [n]        show the full detail of the nth most recent tool
+                             call (default: the last one)
           /skip-plan <text>  send <text> without generating or reviewing a plan
           /clear             clear the screen (keeps the conversation)
           /help              show the command help
@@ -2187,7 +2341,7 @@ class AgentSession:
             self._do_reset(arg)
             return True
         if cmd == "help":
-            print_help(self.args)
+            print_help(self.args, console=self.console)
             return True
         if cmd in self.CLEAR_COMMANDS:
             self._clear_and_show_last()
@@ -2200,6 +2354,9 @@ class AgentSession:
             return True
         if cmd in ("background", "bg", "tasks"):
             self._show_background(arg)
+            return True
+        if cmd in ("expand", "tool"):
+            self.console.expand_tool(arg or 1)
             return True
         if cmd in ("skip-plan", "skip_plan", "skipplan"):
             self._run_skipped_plan(arg)
@@ -2406,13 +2563,18 @@ class AgentSession:
                                 fg="cyan", dim=True)
 
     def _clear_and_show_last(self):
-        """Handle /clear: wipe the screen and re-print the last turn.
+        """Handle /clear: dismiss transient output and re-orient the view.
 
-        The conversation itself is unchanged; we just redraw the most recent
-        exchange so the user re-orients after clearing the view. If there is no
-        assistant reply yet, the last user turn is shown instead.
+        The conversation itself is unchanged. In the fixed TUI this behaves
+        like Escape in command mode: it closes command output, returns a
+        scrolled view to the bottom, and drops info/warning notices, while the
+        core conversation stays on screen. The scrolling console clears the
+        terminal and re-prints the last turn instead.
         """
         self.console.clear_screen()
+        if self.tui_active:
+            # The TUI keeps the conversation visible; do not re-print it.
+            return
         last_role = last_text = None
         for m in reversed(self.messages):
             role = m.get("role")
@@ -2671,13 +2833,19 @@ class AgentSession:
     def shutdown(self, farewell=True):
         """Persist and print a final summary (called on quit / exit).
 
-        ``farewell=False`` is used by the interrupt / fatal paths in :meth:`run`,
-        which have already told the user (in red) that the session is being torn
+        ``farewell=False`` is used by the fatal-exception path in :meth:`run`,
+        which has already told the user (in red) that the session is being torn
         down: a cheerful "thanks and here is your state" box on top of a crash is
         the wrong note, and the state it would recap is the state that just
-        failed.
+        failed. A user cancellation is different -- it is a normal end -- so the
+        interrupt path still prints the farewell box.
         """
+        if self.tui_active:
+            self.console.stop_tui()
+        background_cancelled = len(self.background_tasks.running())
         self.background_tasks.shutdown()
+        self._exit_background = max(
+            getattr(self, "_exit_background", 0), background_cancelled)
         self._persist()
         segments = history_segment_indices(self.session_dir)
         # List what is really on disk. The old message claimed
@@ -2736,17 +2904,29 @@ class AgentSession:
             except (TypeError, ValueError):
                 return 0
 
+        elapsed = max(time.monotonic() - getattr(self, "started_at",
+                                                  time.monotonic()), 0.0)
+        hours, remainder = divmod(int(elapsed), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        duration = (f"{hours}h {minutes:02d}m" if hours
+                    else f"{minutes}m {seconds:02d}s")
+        cancelled = getattr(self, "_exit_background", 0)
         rows = [
             ("session id", self.unique_id),
+            ("model", self.model or "(auto)"),
             ("saved under", f"{self.cache_dir}/{self.unique_id}/"),
             ("history", f"{where} (segment {self.history_index}), "
                         f"{plural(len(self.messages), 'message')}"),
             ("conversation", plural(turns, "recorded turn")),
+            ("duration", duration),
             ("tokens", f"{count('prompt_tokens'):,} in / "
                        f"{count('completion_tokens'):,} out "
                        f"({count('total_tokens'):,} total)"),
             ("calls", f"{count('llm_calls'):,} LLM, "
                       f"{count('tool_calls'):,} tool"),
+            ("background", (f"{plural(cancelled, 'task')} cancelled on exit"
+                            if cancelled else "none running")),
+            ("resume", "mini-code --load-last-session"),
         ]
         self.console.farewell(version, rows)
 
@@ -2844,6 +3024,7 @@ class AgentSession:
                         tools=self.llm_tools,
                         api_key=self.api_key,
                         timeout=self.args.llm_timeout,
+                        console=self.console,
                     ))
         finally:
             self.console.stop_thinking()

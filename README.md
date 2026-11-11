@@ -82,6 +82,7 @@ given a reference implementation.
 | `-s`, `--enable-shell` | off | allow shell execution (classifier always applies) |
 | `-g`, `--enable-subagents` | off | expose sub-agents as tools |
 | `--background` | off | enable background shell/sub-agent tasks and the `background` tool; needs `--enable-shell` or `--enable-subagents` |
+| `--tui [auto\|on\|off]` | `auto` | fixed full-screen dashboard. `auto` enables it only on a known interactive TTY; `on` forces it; `off` uses the scrolling console |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
 | `--plan-strategy NAME` | `plan-verify-step` | `plan-verify-step`, `plan-verify` or `open-plan` (implies `--plan`) |
@@ -198,6 +199,7 @@ steps; it shows the last/current blocking activity rather than live-during the c
 | `/plan` | show the current goal + plan (plan mode only) |
 | `/context` | show how the context window is used: tokens and percentages by category (system prompt, user/assistant messages, tool calls/outputs, reasoning, overhead) |
 | `/background [id]` | show foreground activity + background tasks, or one task's output tail |
+| `/expand [n]` | show the full detail of the nth most recent tool call (default: the last one) |
 | `/skip-plan <prompt>` | send `<prompt>` once without generating or reviewing a plan |
 | `/help` | show this help |
 | `/quit`, `/exit` | save the session and exit |
@@ -206,6 +208,28 @@ steps; it shows the last/current blocking activity rather than live-during the c
 `Enter` sends the turn. This works in the session prompt and the startup tip
 reminds you. Terminals that report `Shift+Enter` as a CSI-u/modifyOtherKeys
 sequence are recognised; elsewhere `Ctrl-J` inserts the newline.
+
+With `--tui`, mini-code switches to a fixed alternate-screen dashboard: a
+**Mini-Code** summary box (version/session/model/context) at the top, a core
+conversation view of user/assistant turns in the middle, and an input box with
+a one-line help hint at the bottom. The whole screen is redrawn on changes, so the view never
+scrolls; tool/thinking status is a transient line that disappears when the
+operation finishes. `Shift+↑`/`Shift+↓` scroll the middle pane one line at a
+time and show `(lines scrolled / total)`; `Esc` returns to the bottom or closes
+command output (`/help`, `/history`, ...). Info/warnings sit below a small
+separator at the bottom of the body. The dashboard is coloured when the
+terminal supports it; info/warnings/errors are shown as coloured
+`ℹ`/`⚠`/`✖`/`✔` lines. Each assistant block also carries a dim line with
+that turn's tool calls, background tasks and assistant-message count.
+Questions (resume/permission) use a yellow "Question to User" box just above
+the input. Restored sessions load their history into
+the core view and mark the summary as `[restored]`; generated plans append to
+the core view. Tool details can be expanded with `/expand [n]`.
+
+The prompt has a small line editor: `↑`/`↓` recall previous turns, `←`/`→` move
+the cursor, Home/End jump within the line, and `Ctrl-A/E/K/U/L` provide the
+usual editing/clear shortcuts. `--tui` defaults to `auto` (known TTY only); use `--tui=off` for the old
+scrolling console or `--tui=on` to force it. It is not part of `--all`.
 
 > [!NOTE]
 > `/history` and `/reset` are driven by `summary_history.json`, a flat recorder that maps every
@@ -386,19 +410,24 @@ transcript and the segment left untouched.
 ### Exiting — the good-bye box
 
 Quitting (`/quit`, `exit`, or EOF on stdin) saves the session and then prints a short yellow
-box: the version, a sign-off, and what the session left behind — session id, folder, the
-history segments on disk, how many turns were recorded, and the token / call totals.
+box: the version, a sign-off, and what the session left behind — session id, model, folder,
+the history segments on disk, how many turns were recorded, run duration, token / call totals,
+background tasks cancelled on exit, and a `--load-last-session` resume hint.
 
 ```
 ╔══════════ MiniCodeCLI v0.1.1.2 - goodbye ═════════════════════╗
 ║ Goodbye, and thanks for using MiniCodeCLI!                    ║
 ║                                                               ║
 ║ session id   : 1792666273983619-36ca3c2e                      ║
+║ model        : ornith-ai/Ornith-1.5-35B-A3B                   ║
 ║ saved under  : ~/.cache/mini/sessions/1792…-36ca3c2e/         ║
 ║ history      : history_0.json (segment 0), 5 messages         ║
 ║ conversation : 2 recorded turns                               ║
+║ duration     : 12m 34s                                        ║
 ║ tokens       : 20 in / 10 out (30 total)                      ║
 ║ calls        : 2 LLM, 0 tool                                  ║
+║ background   : none running                                   ║
+║ resume       : mini-code --load-last-session                  ║
 ╚═══════════════════════════════════════════════════════════════╝
 ```
 
