@@ -644,6 +644,22 @@ class LatestSessionPointerTest(_SessionCase):
                 persistence.save_last_session_pointer(self.workdir, self.cache_dir))
         self.assertIn("latest-session pointer", self.output())
 
+    def test_writer_warns_on_the_supplied_console(self):
+        """A session console receives the warning; the module default is not used."""
+        blocker = os.path.join(self.workdir, persistence.SESSION_DIRNAME)
+        with open(blocker, "w") as f:
+            f.write("not a directory")
+
+        console = self.console()
+        fallback = mock.Mock()
+        with mock.patch.object(persistence.ui, "console", fallback):
+            self.assertIsNone(
+                persistence.save_last_session_pointer(
+                    self.workdir, self.cache_dir, console=console))
+
+        self.assertIn("latest-session pointer", self.output())
+        fallback.note.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # the pointer is written by real sessions, and only when it should be

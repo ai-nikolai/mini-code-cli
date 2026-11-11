@@ -399,11 +399,19 @@ class TuiConsole(Console):
     def clear_screen(self):
         if not self._active:
             return super().clear_screen()
+        # /clear empties the middle pane while the conversation itself stays in
+        # the session. The core view is built from _turns, so reset that state
+        # (and the cursor into it) rather than only the last printed lines.
+        self._turns.clear()
+        self._turn_id = 0
+        self._current_assistant = None
+        self._current_tool_entry = None
         self._last_user = ""
         self._last_assistant = ""
         self._overlay_lines = []
         self._notice_line = ""
         self._notices = []
+        self._scroll_offset = 0
         self.render()
 
     # -- rendering ---------------------------------------------------------
@@ -657,7 +665,23 @@ class TuiConsole(Console):
 
         input_lines = self._input_lines()
         max_input = max(1, min(rows // 2, rows - 6))
-        if len(input_lines) > max_input:
+        cursor_line = 0
+        column = 0
+        if self._input_active:
+            prefix = "".join(self._input_buffer[:self._input_cursor])
+            cursor_line = prefix.count("\n")
+            # Keep the caret's line visible instead of always showing the tail
+            # of a tall input: the visible window follows the cursor, then
+            # clamps to the end of the buffer.
+            start = max(0, cursor_line - max_input + 1)
+            start = min(start, max(0, len(input_lines) - max_input))
+            input_lines = input_lines[start:start + max_input]
+            visible_cursor_line = cursor_line - start
+            # CJK and other wide glyphs occupy two cells, so use display width
+            # rather than the number of code points.
+            column = _visual_len(prefix.rsplit("\n", 1)[-1])
+        else:
+            visible_cursor_line = 0
             input_lines = input_lines[-max_input:]
         if self._scroll_offset:
             hint_text = (f"scrolled {self._scroll_offset}/"
@@ -694,11 +718,10 @@ class TuiConsole(Console):
         self._last_frame_size = (cols, rows)
         if self._input_active:
             input_top = len(header) + body_height + len(question_box)
-            prefix = "".join(self._input_buffer[:self._input_cursor])
-            cursor_line = prefix.count("\n")
-            column = len(prefix.rsplit("\n", 1)[-1])
-            row = min(input_top + 2 + cursor_line, rows)
-            col = min(3 + column, cols)
+            row = min(input_top + 2 + visible_cursor_line, rows)
+            # Text starts at column 3 (border + space); stop at the inner edge
+            # so a long line never puts the caret on the right border.
+            col = max(3, min(3 + column, cols - 2))
             self._write(f"\x1b[{row};{col}H\x1b[?25h")
         else:
             self._write("\x1b[?25l")
@@ -795,7 +818,16 @@ class TuiConsole(Console):
             self._input_pending.clear()
             while True:
                 raw = read_one()
-                if not raw:
+                if not raw:  # EOF
+                    # Match the scrolling console: a final unterminated line is
+                    # still input, not a discard. Only an empty buffer means
+                    # "quit".
+                    if buffer:
+                        text = "".join(buffer)
+                        self._input_buffer = []
+                        self._input_cursor = 0
+                        self._input_active = False
+                        return text
                     self._input_active = False
                     self.render()
                     return None
@@ -808,6 +840,23 @@ class TuiConsole(Console):
                     continue
                 if raw == b"\x1b":
                     seq = _read_escape_sequence(fd, read_one, [], select)
+                    if seq and not seq.startswith((b"[", b"O")):
+                        # Esc followed quickly by a printable key is not an
+                        # escape sequence; insert the key rather than swallowing
+                        # it. Feeding the byte through the incremental decoder
+                        # also keeps a multibyte UTF-8 character intact (the
+                        # first byte may decode to ""; the rest arrives on the
+                        # next loop iteration).
+                        decoded = decoder.decode(seq)
+                        text = "".join(c for c in decoded
+                                       if c in ("\n", "\t") or c.isprintable())
+                        if text:
+                            buffer[cursor:cursor] = list(text)
+                            cursor += len(text)
+                            sync()
+                        elif decoded:
+                            self.dismiss_overlay()
+                        continue
                     if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~",
                                 b"[13;2;13~", b"[27;2;13u")
                             or b"13;2" in seq or b";2;13" in seq

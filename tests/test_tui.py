@@ -3,6 +3,7 @@
 import io
 import os
 import pty
+import re
 import select
 import signal
 import subprocess
@@ -98,15 +99,200 @@ sys.stdout.flush()
             proc.wait(timeout=5)
             os.close(master)
 
+    def test_escape_then_a_letter_keeps_the_letter(self):
+        child = r"""
+import sys
+from mini_code_cli.ui import Console
+c = Console(stream=sys.stdout, color=False, unicode=False)
+sys.stdout.write("READY\n")
+sys.stdout.flush()
+text = c.read_line("", multiline=True)
+sys.stdout.write("\nRESULT:%r\n" % text)
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            time.sleep(0.3)
+            os.write(master, b"\x1ba\r")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"RESULT:'a'", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
 
 class _FakeTty(io.StringIO):
     def isatty(self):
         return True
 
 
+class _FakeStdin:
+    def isatty(self):
+        return True
+
+    def fileno(self):
+        return 0
+
+
 class TuiConsoleTest(unittest.TestCase):
     def console(self, color=False):
         return tui.TuiConsole(stream=_FakeTty(), color=color, unicode=False)
+
+    def _feed_input(self, console, data):
+        """Drive the TUI editor with ``data`` bytes, then EOF."""
+        calls = [bytes([byte]) for byte in data] + [b""]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"), \
+                mock.patch("termios.tcflush"), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"), \
+                mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
+            return console.read_line("", multiline=True, tui=True)
+
+    @staticmethod
+    def _caret(output):
+        matches = re.findall(r"\x1b\[(\d+);(\d+)H\x1b\[\?25h", output)
+        return tuple(map(int, matches[-1]))
+
+    def test_clear_screen_empties_the_core_view(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console.turn("You", "hello")
+            console.turn("Assistant", "hi there")
+
+            console.clear_screen()
+
+            self.assertEqual(list(console._turns), [])
+            self.assertIsNone(console._current_assistant)
+            self.assertEqual(console._turn_id, 0)
+            self.assertEqual(console._scroll_offset, 0)
+            self.assertIn("No conversation yet",
+                          "\n".join(console._content_lines(50)))
+            console.stop_tui()
+
+    def test_eof_with_a_non_empty_buffer_returns_the_text(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            text = self._feed_input(console, b"abc")
+            console.stop_tui()
+
+        self.assertEqual(text, "abc")
+        self.assertEqual(console._input_buffer, [])
+        self.assertFalse(console._input_active)
+
+    def test_caret_column_uses_display_width_for_cjk(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console._input_buffer = list("日")
+            console._input_cursor = 1
+            console._input_active = True
+            console.render()
+            row, col = self._caret(console.stream.getvalue())
+            console.stop_tui()
+
+        # One wide glyph occupies two cells: text starts at column 3.
+        self.assertEqual(col, 5)
+        self.assertGreater(row, 0)
+
+    def test_caret_row_follows_a_tall_input_into_view(self):
+        console = self.console()
+        lines = [f"line {i}" for i in range(30)]
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((40, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console._input_buffer = list("\n".join(lines))
+            console._input_cursor = len(console._input_buffer)
+            console._input_active = True
+            console.render()
+            output = console.stream.getvalue()
+            row, _col = self._caret(output)
+            frame = console._last_frame_lines
+            top = next(i for i, line in enumerate(frame)
+                       if line.startswith("+ You"))
+            console.stop_tui()
+
+        # 10 input rows are visible and the cursor is on the last one.
+        self.assertEqual(row, top + 2 + 9)
+        self.assertLess(row, 20)
+
+    def test_tui_on_falls_back_on_an_unsupported_terminal(self):
+        with tempfile.TemporaryDirectory() as workdir, \
+                tempfile.TemporaryDirectory() as cache:
+            args = make_args(workdir, cache)
+            args.tui = "on"
+            stream = io.StringIO()
+            console = tui.TuiConsole(stream=stream, color=False, unicode=False)
+            session = AgentSession(args, console=console)
+            with mock.patch.object(AgentSession, "print_welcome"), \
+                    mock.patch.object(AgentSession, "print_announcements"), \
+                    mock.patch.object(AgentSession, "_warn_compaction_budget"), \
+                    mock.patch.object(AgentSession, "_print_session_id"), \
+                    mock.patch.object(AgentSession, "_emit_tip"), \
+                    mock.patch.object(AgentSession, "_read_user_line",
+                                      return_value=None):
+                session.run()
+
+        self.assertFalse(session.tui)
+        self.assertIn("TUI is not available", stream.getvalue())
+
+    def test_escape_then_a_letter_does_not_swallow_the_letter(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            text = self._feed_input(console, b"\x1ba\r")
+            console.stop_tui()
+
+        self.assertEqual(text, "a")
 
     def test_fixed_view_redraws_summary_body_and_input_box(self):
         console = self.console()

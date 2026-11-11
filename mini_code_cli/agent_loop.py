@@ -469,6 +469,7 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
                         server_url=server_url,
                         api_key=api_key,
                         timeout=llm_timeout,
+                        console=console,
                     ))
             finally:
                 console.stop_thinking()
@@ -1453,7 +1454,8 @@ class AgentSession:
                 f"Could not persist the rewind ({e}); the session is unchanged.", "error")
             return False
 
-        removed = delete_segments_above(self.session_dir, target_index)
+        removed = delete_segments_above(self.session_dir, target_index,
+                                        console=self.console)
 
         self.messages = messages
         self.history_index = target_index
@@ -1641,7 +1643,15 @@ class AgentSession:
         # they read args, allowed_dir, cache_dir, server_url and the resolved
         # model, plus the provisional id minted in __init__.
         if self.tui and isinstance(self.console, tui_mod.TuiConsole):
-            self.console.start_tui()
+            if not self.console.start_tui():
+                # --tui on requested the fixed view, but this terminal cannot
+                # host it (piped output, an unsupported TERM, ...). Fall back
+                # to the scrolling console instead of leaving self.tui true
+                # with no frame on screen.
+                self.tui = False
+                self.console.note(
+                    "TUI is not available on this terminal; using the "
+                    "scrolling console.", "warn")
         if not self.tui_active:
             self.print_welcome()
 
@@ -1836,7 +1846,8 @@ class AgentSession:
         """
         if self.background_mode or not self.allowed_dir:
             return
-        save_last_session_pointer(self.allowed_dir, self.session_dir)
+        save_last_session_pointer(self.allowed_dir, self.session_dir,
+                                  console=self.console)
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
@@ -1933,6 +1944,7 @@ class AgentSession:
                     server_url=self.server_url,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
 
             self._record_usage(usage)
@@ -1984,6 +1996,7 @@ class AgentSession:
                     server_url=self.server_url,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
             self._record_usage(usage)
             self._note_prompt_size(usage, len(self.messages))
@@ -2120,6 +2133,7 @@ class AgentSession:
                     tools=read_tools,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
         except Exception as exc:
             self.console.note(
@@ -2178,6 +2192,7 @@ class AgentSession:
                     server_url=self.server_url,
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
+                    console=self.console,
                 ))
         except Exception as exc:
             self.console.note(
@@ -2987,6 +3002,7 @@ class AgentSession:
                         tools=self.llm_tools,
                         api_key=self.api_key,
                         timeout=self.args.llm_timeout,
+                        console=self.console,
                     ))
         finally:
             self.console.stop_thinking()

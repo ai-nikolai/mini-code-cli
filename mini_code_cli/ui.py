@@ -956,6 +956,16 @@ class Console:
                             or seq == b"\r"):
                         buffer.append("\n")
                         write("\n... ")
+                    elif seq and not seq.startswith((b"[", b"O")):
+                        # Esc followed quickly by a printable key: keep the
+                        # key instead of consuming it as part of an escape.
+                        for char in decoder.decode(seq):
+                            if char == "\n":
+                                buffer.append(char)
+                                write("\n... ")
+                            elif char == "\t" or char.isprintable():
+                                buffer.append(char)
+                                write(char)
                     continue
                 if raw in (b"\x7f", b"\b"):
                     if buffer and buffer[-1] != "\n":
