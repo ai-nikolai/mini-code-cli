@@ -99,6 +99,34 @@ class _FakeTty(io.StringIO):
         return True
 
 
+class TuiInfoAndColorTest(unittest.TestCase):
+    def test_an_untitled_rule_does_not_clear_command_output(self):
+        console = ui.TuiConsole(stream=_FakeTty(), color=False, unicode=False)
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.rule("help")
+            console.emit("HELP BODY")
+            console.rule(char="=")          # closing separator
+            output = console.stream.getvalue()
+            console.stop_tui()
+        last_screen = output.rsplit("\x1b[H", 1)[-1]
+        self.assertIn("HELP BODY", last_screen)
+
+    def test_warnings_are_rendered_with_status_colour_and_icon(self):
+        console = ui.TuiConsole(stream=_FakeTty(), color=True, unicode=True)
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((70, 20))):
+            console.start_tui()
+            console.note("something needs attention", "warn")
+            output = console.stream.getvalue()
+            console.stop_tui()
+        self.assertIn("something needs attention", output)
+        self.assertIn("\x1b[", output)
+
+
 class TuiExitCleanupTest(unittest.TestCase):
     def test_system_exit_at_resume_restores_the_alternate_screen(self):
         with tempfile.TemporaryDirectory() as work, \

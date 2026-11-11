@@ -1233,6 +1233,7 @@ class TuiConsole(Console):
         self._tool_line = ""
         self._status_line = ""
         self._notice_line = ""
+        self._notices = []
         self._overlay_lines = []
         self._input_buffer = []
         self._input_cursor = 0
@@ -1297,6 +1298,7 @@ class TuiConsole(Console):
             self._last_user = text
             self._overlay_lines = []
             self._notice_line = ""
+            self._notices = []
         elif role == "Assistant":
             self._last_assistant = text
             self._overlay_lines = []
@@ -1307,9 +1309,8 @@ class TuiConsole(Console):
     def note(self, msg, level="info"):
         if not self._active:
             return super().note(msg, level)
-        if level == "info" and not self.verbose:
-            return
-        self._notice_line = str(msg)
+        self._notices.append((level, str(msg)))
+        del self._notices[:-3]
         self.render()
 
     def tool_call_display(self, name, params=None, result=None, transient=True):
@@ -1374,8 +1375,12 @@ class TuiConsole(Console):
     def rule(self, title=None, char="═", fg="cyan"):
         if not self._active:
             return super().rule(title, char=char, fg=fg)
-        self._overlay_lines = []
-        self.render()
+        # A titled rule starts a new command output. An untitled rule is a
+        # closing separator (``print_help`` emits one at the end); it must not
+        # clear the output that was just produced.
+        if title:
+            self._overlay_lines = [self.style(f"[{title}]", fg=fg, bold=True)]
+            self.render()
 
     def divider(self):
         if not self._active:
@@ -1388,13 +1393,15 @@ class TuiConsole(Console):
     def print_box(self, lines, title=None, fg="cyan"):
         if not self._active:
             return super().print_box(lines, title=title, fg=fg)
-        self._overlay_lines = list(lines or [])
+        self._overlay_lines = ([self.style(f"[{title}]", fg=fg, bold=True)]
+                               if title else []) + list(lines or [])
         self.render()
 
     def status_box(self, lines, title=None, fg="cyan", dim=False):
         if not self._active:
             return super().status_box(lines, title=title, fg=fg, dim=dim)
-        self._overlay_lines = list(lines or [])
+        self._overlay_lines = ([self.style(f"[{title}]", fg=fg, bold=True)]
+                               if title else []) + list(lines or [])
         self.render()
 
     def clear_screen(self):
@@ -1404,28 +1411,43 @@ class TuiConsole(Console):
         self._last_assistant = ""
         self._overlay_lines = []
         self._notice_line = ""
+        self._notices = []
         self.render()
 
     # -- rendering ---------------------------------------------------------
 
     @staticmethod
     def _fit(text, width):
-        text = _ANSI_RE.sub("", str(text))
-        return text if len(text) <= width else text[:max(width - 3, 0)] + "..."
+        text = "" if text is None else str(text)
+        if _visual_len(text) <= width:
+            return text
+        plain = _ANSI_RE.sub("", text)
+        limit = max(width - 3, 0)
+        out, used = [], 0
+        for char in plain:
+            char_width = _visual_len(char)
+            if used + char_width > limit:
+                break
+            out.append(char)
+            used += char_width
+        return "".join(out) + "..."
 
-    def _box(self, title, body, width):
+    def _box(self, title, body, width, fg="cyan"):
         h = self.glyph("h")
         v = self.glyph("v")
         tl, tr = self.glyph("tl"), self.glyph("tr")
         bl, br = self.glyph("bl"), self.glyph("br")
         label = f" {title} " if title else ""
-        top_fill = max(width - 2 - len(label), 0)
-        lines = [tl + label + h * top_fill + tr]
+        top_fill = max(width - 2 - _visual_len(label), 0)
+        top = self.style(tl + label + h * top_fill + tr, fg=fg, bold=True)
+        bottom = self.style(bl + h * max(width - 2, 0) + br, fg=fg, bold=True)
+        border = self.style(v, fg=fg, bold=True)
+        lines = [top]
         inner = max(width - 4, 1)
         for line in body:
             text = self._fit(line, inner)
-            lines.append(v + " " + _pad_visual(text, inner) + " " + v)
-        lines.append(bl + h * max(width - 2, 0) + br)
+            lines.append(border + " " + _pad_visual(text, inner) + " " + border)
+        lines.append(bottom)
         return lines
 
     def _wrap(self, text, width):
@@ -1442,18 +1464,37 @@ class TuiConsole(Console):
         text = "".join(self._input_buffer)
         return text.split("\n") if text else [""]
 
+    def _notice_style(self, level, msg):
+        icons = {"info": self.glyph("info"), "warn": self.glyph("warn"),
+                 "error": self.glyph("error"), "ok": self.glyph("ok")}
+        colors = {"info": "cyan", "warn": "yellow", "error": "red",
+                  "ok": "green"}
+        return self.style(f"{icons.get(level, self.glyph('info'))} {msg}",
+                          fg=colors.get(level, "cyan"),
+                          dim=(level == "info"))
+
     def _body_lines(self, height, width):
         if self._overlay_lines:
-            lines = self._wrap("\n".join(self._overlay_lines), width)
+            lines = [self._fit(line, width) for line in self._overlay_lines]
             return (lines + [""] * height)[:height]
         lines = []
         if self._last_user:
-            lines.extend(self._wrap("You: " + self._last_user, width))
+            lines.append(self.style("You", fg="cyan", bold=True))
+            lines.extend(self._wrap(self._last_user, width))
         if self._last_assistant:
+            lines.append(self.style("Assistant", fg="green", bold=True))
             lines.extend(self._wrap(self._last_assistant, width))
-        status = [line for line in (self._tool_line, self._status_line,
-                                    self._notice_line) if line]
-        status = self._wrap("\n".join(status), width)[:3]
+        status = []
+        if self._tool_line:
+            status.append(self.style(f"{self.glyph('gear')} {self._tool_line}",
+                                     fg="magenta", dim=True))
+        if self._status_line:
+            status.append(self.style(self._status_line, fg="cyan", dim=True))
+        for level, msg in self._notices[-3:]:
+            status.append(self._notice_style(level, msg))
+        if self._notice_line:
+            status.append(self.style(self._notice_line, fg="yellow", dim=True))
+        status = [self._fit(line, width) for line in status][:4]
         room = max(height - len(status), 0)
         if len(lines) > room:
             if room <= 0:
@@ -1469,15 +1510,16 @@ class TuiConsole(Console):
         if not self._active:
             return
         cols, rows = self._size()
-        summary = self._wrap("\n".join(self._summary_lines
-                                       or ["MiniCode CLI"]), max(cols - 4, 1))
-        header = self._box("Summary", summary[:max(rows // 3, 3)], cols)
+        summary = [str(line) for line in (self._summary_lines
+                                          or ["MiniCode CLI"])]
+        header = self._box("Summary", summary[:max(rows // 3, 3)], cols,
+                           fg="cyan")
 
         input_lines = self._input_lines()
-        hint = ("Enter send · Shift+Enter newline · ↑/↓ history · "
-                "/expand tools · /help")
+        hint = self.style("Enter send · Shift+Enter newline · ↑/↓ history · "
+                          "/expand tools · /help", dim=True)
         body_box = input_lines + [hint]
-        input_box = self._box("You", body_box, cols)
+        input_box = self._box("You", body_box, cols, fg="green")
         body_height = max(rows - len(header) - len(input_box), 1)
         body = self._body_lines(body_height, max(cols - 4, 1))
         lines = header + body + input_box
