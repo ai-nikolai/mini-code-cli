@@ -1214,6 +1214,20 @@ class Console:
             name, params_str, shell_cmd, tier, reason)
 
 
+def tui_mode(value):
+    """Normalise ``--tui`` / legacy bool flags to ``auto``, ``on`` or ``off``."""
+    if value is True:
+        return "on"
+    if value is False or value is None:
+        return "off"
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return "on"
+    if text in ("0", "false", "no", "off"):
+        return "off"
+    return "auto"
+
+
 class TuiConsole(Console):
     """A full-screen, fixed-layout console used by ``--tui``.
 
@@ -1232,6 +1246,24 @@ class TuiConsole(Console):
     """
 
     is_fixed = True
+
+    @classmethod
+    def supported(cls):
+        """Whether the current terminal is a sensible default for the TUI."""
+        try:
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                return False
+        except (AttributeError, OSError, ValueError):
+            return False
+        term = os.environ.get("TERM", "").strip().lower()
+        if not term or term in ("dumb", "unknown"):
+            return False
+        known = (
+            "xterm", "screen", "tmux", "rxvt", "alacritty", "kitty",
+            "wezterm", "foot", "konsole", "vte", "gnome", "iterm",
+            "eterm", "ansi", "linux", "cygwin", "vt100", "vt220",
+        )
+        return term.startswith(known)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1252,6 +1284,8 @@ class TuiConsole(Console):
         self._question_active = False
         self._question_title = "Question to User"
         self._question_lines = []
+        self._last_frame_lines = []
+        self._last_frame_size = None
         self._scroll_offset = 0
         self._last_body_height = 1
         self._total_body_lines = 0
@@ -1270,6 +1304,8 @@ class TuiConsole(Console):
         except (AttributeError, OSError):
             return False
         self._active = True
+        self._last_frame_lines = []
+        self._last_frame_size = None
         if hasattr(signal, "SIGWINCH"):
             try:
                 self._old_winch = signal.getsignal(signal.SIGWINCH)
@@ -1291,6 +1327,8 @@ class TuiConsole(Console):
             return
         self.stop_thinking()
         self._active = False
+        self._last_frame_lines = []
+        self._last_frame_size = None
         if self._old_winch is not None and hasattr(signal, "SIGWINCH"):
             try:
                 signal.signal(signal.SIGWINCH, self._old_winch)
@@ -1689,9 +1727,17 @@ class TuiConsole(Console):
         body = self._body_lines(body_height, max(cols - 4, 1))
         lines = header + body + question_box + input_box
         lines = (lines + [""] * rows)[:rows]
-        self._write("\x1b[?25l\x1b[H")
-        self._write("\n".join(_pad_visual(self._fit(line, cols), cols)
-                               for line in lines))
+        padded = [_pad_visual(self._fit(line, cols), cols) for line in lines]
+        self._write("\x1b[?25l")
+        if self._last_frame_size != (cols, rows):
+            self._write("\x1b[2J\x1b[H")
+            self._write("\n".join(padded))
+        else:
+            for row, line in enumerate(padded, start=1):
+                if line != self._last_frame_lines[row - 1]:
+                    self._write(f"\x1b[{row};1H\x1b[2K{line}")
+        self._last_frame_lines = padded
+        self._last_frame_size = (cols, rows)
         if self._input_active:
             input_top = len(header) + body_height + len(question_box)
             prefix = "".join(self._input_buffer[:self._input_cursor])

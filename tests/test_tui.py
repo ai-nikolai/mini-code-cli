@@ -18,13 +18,32 @@ from test_e2e_agent_loop import make_args
 
 
 class TuiCliTest(unittest.TestCase):
-    def test_tui_is_off_by_default_and_not_part_of_all(self):
+    def test_tui_modes_default_to_auto(self):
         with mock.patch.object(sys, "argv", ["mini-code"]):
-            self.assertFalse(agent_loop.parse_args().tui)
+            self.assertEqual(agent_loop.parse_args().tui, "auto")
         with mock.patch.object(sys, "argv", ["mini-code", "--tui"]):
-            self.assertTrue(agent_loop.parse_args().tui)
+            self.assertEqual(agent_loop.parse_args().tui, "on")
+        with mock.patch.object(sys, "argv", ["mini-code", "--tui=off"]):
+            self.assertEqual(agent_loop.parse_args().tui, "off")
+        with mock.patch.object(sys, "argv", ["mini-code", "--tui=auto"]):
+            self.assertEqual(agent_loop.parse_args().tui, "auto")
         with mock.patch.object(sys, "argv", ["mini-code", "--all"]):
-            self.assertFalse(agent_loop.parse_args().tui)
+            self.assertEqual(agent_loop.parse_args().tui, "auto")
+
+    def test_auto_support_is_conservative(self):
+        stdin, stdout = _FakeTty(), _FakeTty()
+        with mock.patch.object(ui.sys, "stdin", stdin), \
+                mock.patch.object(ui.sys, "stdout", stdout), \
+                mock.patch.dict(os.environ, {"TERM": "xterm-256color"}):
+            self.assertTrue(ui.TuiConsole.supported())
+        with mock.patch.object(ui.sys, "stdin", stdin), \
+                mock.patch.object(ui.sys, "stdout", stdout), \
+                mock.patch.dict(os.environ, {"TERM": "dumb"}):
+            self.assertFalse(ui.TuiConsole.supported())
+        with mock.patch.object(ui.sys, "stdin", io.StringIO()), \
+                mock.patch.object(ui.sys, "stdout", stdout), \
+                mock.patch.dict(os.environ, {"TERM": "xterm-256color"}):
+            self.assertFalse(ui.TuiConsole.supported())
 
 
 class TuiPtyTest(unittest.TestCase):
@@ -232,9 +251,10 @@ class TuiConsoleTest(unittest.TestCase):
             console.turn("You", "do the work")
             console.plan_box(["1. inspect", "2. fix"])
             console.turn("Assistant", "working on it")
-            output = console.stream.getvalue()
+            last_screen = "\n".join(
+                ui._ANSI_RE.sub("", line)
+                for line in console._last_frame_lines)
             console.stop_tui()
-        last_screen = output.rsplit("\x1b[H", 1)[-1]
         self.assertIn("Plan", last_screen)
         self.assertIn("1. inspect", last_screen)
         self.assertIn("working on it", last_screen)
@@ -272,9 +292,10 @@ class TuiConsoleTest(unittest.TestCase):
             console.rule("help")
             console.emit("HELP BODY")
             console.dismiss_overlay()
-            output = console.stream.getvalue()
+            last_screen = "\n".join(
+                ui._ANSI_RE.sub("", line)
+                for line in console._last_frame_lines)
             console.stop_tui()
-        last_screen = output.rsplit("\x1b[H", 1)[-1]
         self.assertNotIn("HELP BODY", last_screen)
 
     def test_thinking_spinner_animates_and_stops(self):
@@ -307,6 +328,83 @@ class TuiConsoleTest(unittest.TestCase):
 
 
 class TuiConsolePtyTest(unittest.TestCase):
+    def test_full_session_turn_and_quit_in_a_pty(self):
+        child = r"""
+import argparse, sys, tempfile
+from unittest import mock
+from mini_code_cli import agent_loop, ui, utils
+
+args = argparse.Namespace(
+    url="http://localhost:1", max_tokens=None, temperature=1.0,
+    model="test-model", api_key=None, cache_dir=tempfile.mkdtemp(),
+    restore_session=None, load_last_session=False, system_prompt=None,
+    auto_mode=True, agent_md=None, prompt=None, ask_permission=False,
+    sudo=False, allowed_dir=tempfile.mkdtemp(), enable_shell=False,
+    enable_subagents=False, skills=False, llm_timeout=30, tool_timeout=30,
+    max_context_tokens=None, plan=False, verbose=False, scratchpad=False,
+    background=False, compaction_strategy="summarise", plan_strategy=None,
+    tui="on")
+
+def fake(messages, *a, **k):
+    return ("Hello from stub.", [], {"prompt_tokens": 1,
+                                     "completion_tokens": 1,
+                                     "total_tokens": 2,
+                                     "tool_calls": 0}, None)
+
+with mock.patch.object(utils, "call_openai_server", new=fake), \
+        mock.patch.object(utils, "determine_vllm_model", return_value=None):
+    console = ui.TuiConsole(stream=sys.stdout, color=False, unicode=False)
+    session = agent_loop.AgentSession(args, console=console)
+    sys.stderr.write("READY\n")
+    sys.stderr.flush()
+    session.run()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"READY", output)
+            time.sleep(0.5)
+            os.write(master, b"hello\r")
+            time.sleep(0.8)
+            os.write(master, b"/quit\r")
+            deadline = time.time() + 10
+            while proc.poll() is None and time.time() < deadline:
+                drain(deadline)
+            self.assertIsNotNone(proc.poll(), "session did not exit")
+            drain(time.time() + 1)
+            self.assertIn(b"Hello from", output)
+            self.assertIn(b"\x1b[?1049h", output)
+            self.assertIn(b"\x1b[?1049l", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
     def test_question_box_disappears_after_the_answer(self):
         child = r"""
 import sys
@@ -514,9 +612,10 @@ class TuiInfoAndColorTest(unittest.TestCase):
             console.rule("help")
             console.emit("HELP BODY")
             console.rule(char="=")          # closing separator
-            output = console.stream.getvalue()
+            last_screen = "\n".join(
+                ui._ANSI_RE.sub("", line)
+                for line in console._last_frame_lines)
             console.stop_tui()
-        last_screen = output.rsplit("\x1b[H", 1)[-1]
         self.assertIn("HELP BODY", last_screen)
 
     def test_warnings_are_rendered_with_status_colour_and_icon(self):

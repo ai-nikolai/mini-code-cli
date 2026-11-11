@@ -167,7 +167,9 @@ def parse_args():
                         help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
-    parser.add_argument("--tui", action="store_true", help="Enable the richer interactive prompt: up/down history, cursor movement, Home/End and editing shortcuts. Shift+Enter still inserts a newline. default= False")
+    parser.add_argument("--tui", nargs="?", const="on", default="auto",
+                        choices=("auto", "on", "off"),
+                        help="Fixed-screen TUI: auto (default; only on a known TTY), on, or off. Includes history, scrolling, colours and Shift+Enter multiline input.")
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
     parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
@@ -229,7 +231,7 @@ def print_help(args, console=None):
         ("", "Shift+Enter (or Ctrl-J) inserts a new line; Enter sends."),
     ):
         console.emit(f"  {command:16} {description}")
-    if getattr(args, "tui", False):
+    if ui.tui_mode(getattr(args, "tui", "auto")) != "off":
         console.emit("  TUI input        ↑/↓ history, ←/→ edit, Home/End, "
                         "Ctrl-A/E/K/U/L.")
     if getattr(args, "enable_subagents", False) or args.verbose:
@@ -603,9 +605,11 @@ class AgentSession:
         self.unique_id = generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
 
+        self.tui_mode = ui.tui_mode(getattr(args, "tui", "auto"))
         if console is None:
-            console = (ui.TuiConsole() if getattr(args, "tui", False)
-                       else ui.console)
+            use_tui = (self.tui_mode == "on"
+                       or (self.tui_mode == "auto" and ui.TuiConsole.supported()))
+            console = ui.TuiConsole() if use_tui else ui.console
         self.console = console
         self.console.verbose = getattr(args, "verbose", False)
 
@@ -651,7 +655,8 @@ class AgentSession:
                           or requested_plan_strategy is not None)
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
-        self.tui = bool(getattr(self.args, "tui", False))
+        self.tui = (self.tui_mode != "off"
+                    and isinstance(self.console, ui.TuiConsole))
         self.tui_active = False
         self.restored_session = False
         self.compaction_strategy = getattr(
