@@ -99,6 +99,37 @@ class _FakeTty(io.StringIO):
         return True
 
 
+class TuiExitCleanupTest(unittest.TestCase):
+    def test_system_exit_at_resume_restores_the_alternate_screen(self):
+        with tempfile.TemporaryDirectory() as work, \
+                tempfile.TemporaryDirectory() as cache:
+            console = ui.TuiConsole(stream=_FakeTty(), color=False,
+                                     unicode=False)
+            args = make_args(work, cache)
+            args.tui = True
+            session = AgentSession(args, console=console)
+            with mock.patch.object(AgentSession, "start_session",
+                                   side_effect=SystemExit):
+                with self.assertRaises(SystemExit):
+                    session.run()
+            output = console.stream.getvalue()
+            self.assertIn("\x1b[?1049h", output)
+            self.assertIn("\x1b[?1049l", output)
+
+
+class TuiWidthAndDocstringTest(unittest.TestCase):
+    def test_visual_width_handles_wide_and_combining_characters(self):
+        self.assertEqual(ui._visual_len("aa"), 2)
+        self.assertEqual(ui._visual_len("\u6f22"), 2)
+        self.assertEqual(ui._visual_len("e\u0301"), 1)
+        self.assertEqual(ui._visual_len("\U0001f642"), 2)
+        self.assertEqual(ui._visual_len("\x1b[31mred\x1b[0m"), 3)
+
+    def test_tool_call_display_keeps_its_docstring(self):
+        self.assertIsNotNone(ui.Console.tool_call_display.__doc__)
+        self.assertIsNotNone(ui.TuiConsole.tool_call_display.__doc__)
+
+
 class TuiSessionWiringTest(unittest.TestCase):
     def test_session_uses_tui_console_when_flag_is_on(self):
         with tempfile.TemporaryDirectory() as work, \

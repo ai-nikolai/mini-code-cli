@@ -1604,25 +1604,28 @@ class AgentSession:
             self.tui_active = self.console.start_tui()
         if not self.tui_active:
             self.print_welcome()
-        self.print_announcements()
-        self._warn_compaction_budget()
 
-        # Only now resolve the session (resume offer / restore / fresh start),
-        # because all of that can consume input and can replace the id. The id
-        # line and the tip therefore come after it and show the id actually in
-        # use (the banner may have shown the provisional one).
-        self.start_session()
-        if self.tui_active:
-            self.console.set_summary(self._tui_header_lines())
-        else:
-            self._print_session_id()
-            self._emit_tip()
-
-        # The --prompt value is a one-shot initial turn: it is sent verbatim and
-        # then cleared, so later turns come from the user (manual mode) or are
-        # produced automatically by the loop (auto mode).
-        pending = initial_prompt
+        # Startup (including the resume offer, which may raise SystemExit) is
+        # inside the guarded region so the alternate screen is always restored.
         try:
+            self.print_announcements()
+            self._warn_compaction_budget()
+
+            # Only now resolve the session (resume offer / restore / fresh start),
+            # because all of that can consume input and can replace the id. The id
+            # line and the tip therefore come after it and show the id actually in
+            # use (the banner may have shown the provisional one).
+            self.start_session()
+            if self.tui_active:
+                self.console.set_summary(self._tui_header_lines())
+            else:
+                self._print_session_id()
+                self._emit_tip()
+
+            # The --prompt value is a one-shot initial turn: it is sent verbatim
+            # and then cleared, so later turns come from the user (manual mode) or
+            # are produced automatically by the loop (auto mode).
+            pending = initial_prompt
             while True:
                 user_input = pending if pending is not None else self._read_user_line()
                 if user_input is None or user_input.lower() in self.EXIT_COMMANDS:
@@ -1649,6 +1652,10 @@ class AgentSession:
             self.console.note(f"Exception {e}. Exiting...", "error")
             self.shutdown(farewell=False)
             return
+        finally:
+            if self.tui_active:
+                self.console.stop_tui()
+                self.tui_active = False
         self.shutdown()
 
     def _emit_tip(self):

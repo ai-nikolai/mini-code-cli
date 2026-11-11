@@ -26,9 +26,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import sys
 import textwrap
 import threading
+import unicodedata
 from collections import deque
 
 from .utils import oneline, plural
@@ -53,8 +55,23 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 # --- helpers ----------------------------------------------------------------
 
 def _visual_len(text):
-    """Length of *text* on screen, ignoring ANSI escape codes."""
-    return len(_ANSI_RE.sub("", text))
+    """Width of *text* in terminal columns, ignoring ANSI escape codes.
+
+    Wide East-Asian glyphs and emoji take two columns; combining/format marks
+    take none. This keeps boxes aligned for CJK text and emoji instead of
+    silently shifting every border by one column.
+    """
+    total = 0
+    for char in _ANSI_RE.sub("", str(text)):
+        if unicodedata.category(char) in ("Mn", "Me", "Cf"):
+            continue
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            total += 2
+        elif 0x1F000 <= ord(char) <= 0x1FAFF:
+            total += 2
+        else:
+            total += 1
+    return total
 
 
 def _pad_visual(text, width):
@@ -595,7 +612,6 @@ class Console:
                 self.emit(f"    {arrow} {self._oneline(first, 300)}")
 
     def tool_call_display(self, name, params=None, result=None, transient=True):
-        self._tool_history.append((name, params, result))
         """Render one attempted tool call.
 
         In verbose mode (``transient=False``) the full detail (name, parameters
@@ -605,6 +621,7 @@ class Console:
         line below -- rather than flashing the call in the live region and then
         clearing it away completely.
         """
+        self._tool_history.append((name, params, result))
         if not transient:
             self.tool_group(name, params, result)
             return
@@ -1221,6 +1238,7 @@ class TuiConsole(Console):
         self._input_cursor = 0
         self._input_active = False
         self._history_pos = 0
+        self._old_winch = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1231,14 +1249,30 @@ class TuiConsole(Console):
         except (AttributeError, OSError):
             return False
         self._active = True
+        if hasattr(signal, "SIGWINCH"):
+            try:
+                self._old_winch = signal.getsignal(signal.SIGWINCH)
+                signal.signal(signal.SIGWINCH, self._on_winch)
+            except (ValueError, OSError):
+                self._old_winch = None
         self._write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
         self.render()
         return True
+
+    def _on_winch(self, *_args):
+        if self._active:
+            self.render()
 
     def stop_tui(self):
         if not self._active:
             return
         self._active = False
+        if self._old_winch is not None and hasattr(signal, "SIGWINCH"):
+            try:
+                signal.signal(signal.SIGWINCH, self._old_winch)
+            except (ValueError, OSError):
+                pass
+            self._old_winch = None
         self._write("\x1b[?25h\x1b[r\x1b[?1049l")
 
     def _write(self, text):
@@ -1279,6 +1313,7 @@ class TuiConsole(Console):
         self.render()
 
     def tool_call_display(self, name, params=None, result=None, transient=True):
+        """Record the call and show it as a transient line in the fixed TUI."""
         self._tool_history.append((name, params, result))
         if not self._active:
             return super().tool_call_display(name, params, result,

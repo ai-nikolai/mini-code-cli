@@ -82,7 +82,7 @@ given a reference implementation.
 | `-s`, `--enable-shell` | off | allow shell execution (classifier always applies) |
 | `-g`, `--enable-subagents` | off | expose sub-agents as tools |
 | `--background` | off | enable background shell/sub-agent tasks and the `background` tool; needs `--enable-shell` or `--enable-subagents` |
-| `--tui` | off | richer interactive prompt: up/down history, cursor editing, Home/End, Ctrl-A/E/K/U/L; Shift+Enter still inserts a newline |
+| `--tui` | off | fixed full-screen dashboard (summary, last output, input box) plus up/down history, cursor editing, Home/End and Ctrl-A/E/K/U/L; Shift+Enter still inserts a newline |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
 | `--plan-strategy NAME` | `plan-verify-step` | `plan-verify-step`, `plan-verify` or `open-plan` (implies `--plan`) |
