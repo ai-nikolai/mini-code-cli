@@ -1276,7 +1276,9 @@ class TuiConsole(Console):
                 signal.signal(signal.SIGWINCH, self._on_winch)
             except (ValueError, OSError):
                 self._old_winch = None
-        self._write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
+        # Ask xterm-compatible terminals to distinguish modified Enter keys.
+        # Shift+Enter then arrives as CSI 27;2;13~ instead of a plain CR.
+        self._write("\x1b[>4;2m\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
         self.render()
         return True
 
@@ -1295,7 +1297,7 @@ class TuiConsole(Console):
             except (ValueError, OSError):
                 pass
             self._old_winch = None
-        self._write("\x1b[?25h\x1b[r\x1b[?1049l")
+        self._write("\x1b[>4;0m\x1b[?25h\x1b[r\x1b[?1049l")
 
     def _write(self, text):
         self.stream.write(text)
@@ -1806,12 +1808,31 @@ class TuiConsole(Console):
                     continue
                 if raw == b"\x1b":
                     seq = read_escape()
-                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~")
-                            or b"13;2" in seq or b";2;13" in seq):
+                    if (seq in (b"[13;2u", b"[13;2~", b"[27;2;13~",
+                                b"[13;2;13~", b"[27;2;13u")
+                            or b"13;2" in seq or b";2;13" in seq
+                            or seq == b"\r"):
                         buffer[cursor:cursor] = ["\n"]
                         cursor += 1
                         sync()
                         continue
+                    if seq in (b"[13u", b"[13;1u"):
+                        # kitty/CSI-u unmodified Enter, if the terminal reports it
+                        text = "".join(buffer)
+                        if text.strip() and (
+                                not self._input_history
+                                or self._input_history[-1] != text):
+                            self._input_history.append(text)
+                            if len(self._input_history) > 100:
+                                del self._input_history[0]
+                        buffer[:] = []
+                        cursor = 0
+                        self._input_active = False
+                        self._input_buffer = []
+                        self._input_cursor = 0
+                        self._notice_line = ""
+                        self.render()
+                        return text
                     if seq in (b"[1;2A", b"[a"):
                         self.scroll_body(1)
                         continue

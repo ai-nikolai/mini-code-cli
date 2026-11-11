@@ -81,7 +81,7 @@ sys.stdout.flush()
             time.sleep(0.15)
             os.write(master, b"abc\x1b[DX\r")
             time.sleep(0.15)
-            os.write(master, b"line1\x1b[13;2uline2\r")
+            os.write(master, b"line1\x1b[27;2;13~line2\r")
             deadline = time.time() + 10
             while b"RESULT:" not in output and time.time() < deadline:
                 drain(deadline)
@@ -407,7 +407,7 @@ sys.stdout.flush()
                 drain(deadline)
             self.assertIn(b"READY", output)
             time.sleep(0.3)
-            os.write(master, b"line1\x1b[13;2uline2\r")
+            os.write(master, b"line1\x1b[27;2;13~line2\r")
             time.sleep(0.25)
             os.write(master, b"\x1b[1;2A\r")
             deadline = time.time() + 10
