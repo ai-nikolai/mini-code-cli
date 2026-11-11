@@ -106,13 +106,13 @@ parameter a model does not need is defaulted, so omitting it keeps the previous 
 
 | Tool | What it does |
 | --- | --- |
-| `read_file` | read a file; `offset` (1-based line) and `limit` page through large files |
+| `read_file` | read a file; `offset` (1-based line) and `limit` page through large files. Output is capped at 100k characters, so page or narrow instead of relying on a whole-file read |
 | `write_file` | write/overwrite; `append` adds to the end, `create_dirs` creates parents |
 | `edit` | replace an **exact** string (`old_string` → `new_string`); refuses a missing or ambiguous match unless `replace_all` |
-| `grep` | regex search a file or directory; `recursive`, `include`, `ignore_case`, `line_numbers`, `max_results` (noise dirs skipped) |
-| `glob` | list files matching a glob (one per line, `**` supported), optionally against a `root` |
+| `grep` | regex search a file or directory; `recursive`, `include`, `ignore_case`, `line_numbers`, `max_results` (noise dirs skipped). Output is capped at 100k characters |
+| `glob` | list files matching a glob (one per line, `**` supported), optionally against a `root`; capped at 2000 matches / 100k characters |
 | `web_search` | best-effort lookup: related queries + a short Wikipedia extract. Never raises |
-| `read_website` | fetch raw text/HTML of a URL (bounded by `--tool-timeout`), `max_chars` caps size |
+| `read_website` | fetch raw text/HTML of an **http/https** URL (other schemes, including `file://`, are rejected); `max_chars` caps size |
 | `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported |
 | `background` | start/list/output/wait/cancel background **shell** tasks (needs `--background --enable-shell`) or **sub-agent** tasks (needs `--background --enable-subagents`); output is captured in a per-task log |
 
