@@ -1270,6 +1270,9 @@ class TuiConsole(Console):
         self._active = False
         self._summary_lines = []
         self._turns = deque(maxlen=40)
+        self._turn_id = 0
+        self._current_assistant = None
+        self._current_tool_entry = None
         self._last_user = ""
         self._last_assistant = ""
         self._info_provider = None
@@ -1353,15 +1356,21 @@ class TuiConsole(Console):
 
     def load_history(self, turns):
         """Populate the core view with user/assistant turns from a restored session."""
-        self._turns = deque(list(turns or [])[-40:], maxlen=40)
-        for role, content in reversed(self._turns):
+        self._turns.clear()
+        self._turn_id = 0
+        self._current_assistant = None
+        for role, content in list(turns or [])[-40:]:
+            if role == "You":
+                self._turn_id += 1
+            record = {"role": role, "content": content,
+                      "turn_id": self._turn_id,
+                      "tools": [], "background": []}
+            self._turns.append(record)
             if role == "You":
                 self._last_user = content
-                break
-        for role, content in reversed(self._turns):
-            if role == "Assistant":
+            elif role == "Assistant":
                 self._last_assistant = content
-                break
+                self._current_assistant = record
         self._scroll_offset = 0
         self.render()
 
@@ -1370,15 +1379,24 @@ class TuiConsole(Console):
             return super().turn(role, content, accent=accent, badge=badge)
         text = "" if content is None else str(content)
         if role == "You":
+            self._turn_id += 1
+            self._current_assistant = None
+            self._current_tool_entry = None
             self._last_user = text
-            self._turns.append((role, text))
+            self._turns.append({"role": role, "content": text,
+                                "turn_id": self._turn_id,
+                                "tools": [], "background": []})
             self._overlay_lines = []
             self._notice_line = ""
             self._notices = []
             self._scroll_offset = 0
         elif role == "Assistant":
+            record = {"role": role, "content": text,
+                      "turn_id": self._turn_id,
+                      "tools": [], "background": []}
             self._last_assistant = text
-            self._turns.append((role, text))
+            self._current_assistant = record
+            self._turns.append(record)
             self._overlay_lines = []
             self._scroll_offset = 0
         else:
@@ -1392,12 +1410,33 @@ class TuiConsole(Console):
         del self._notices[:-3]
         self.render()
 
+    def _ensure_assistant_record(self):
+        if self._current_assistant is None:
+            self._current_assistant = {
+                "role": "Assistant", "content": "",
+                "turn_id": self._turn_id, "tools": [], "background": []}
+            self._turns.append(self._current_assistant)
+        return self._current_assistant
+
     def tool_call_display(self, name, params=None, result=None, transient=True):
         """Record the call and show it as a transient line in the fixed TUI."""
         self._tool_history.append((name, params, result))
         if not self._active:
             return super().tool_call_display(name, params, result,
                                              transient=transient)
+        record = self._ensure_assistant_record()
+        entry = self._current_tool_entry
+        if entry is None or entry.get("name") != name:
+            entry = {"name": name, "background": ""}
+            record["tools"].append(entry)
+        entry["name"] = name
+        if name == "background" and str((params or {}).get("action", "")).lower() == "start":
+            label = ((params or {}).get("command")
+                     or (params or {}).get("subagent")
+                     or (params or {}).get("task") or "task")
+            entry["background"] = str(label)
+            record["background"].append(str(label))
+        self._current_tool_entry = None
         self._tool_line = f"tool {name}: {str(params)[:60]}"
         self.render()
 
@@ -1439,6 +1478,10 @@ class TuiConsole(Console):
     def start_tool_call(self, message="calling tool", tool_name=None):
         if not self._active:
             return super().start_tool_call(message, tool_name=tool_name)
+        record = self._ensure_assistant_record()
+        entry = {"name": tool_name or "tool", "background": ""}
+        record["tools"].append(entry)
+        self._current_tool_entry = entry
         self._tool_line = f"… {message}: {tool_name or ''}".strip()
         self.render()
 
@@ -1517,7 +1560,9 @@ class TuiConsole(Console):
         """Append a labelled block (e.g. a generated plan) to the core view."""
         if not self._active:
             return
-        self._turns.append((str(label), str(text)))
+        self._turns.append({"role": str(label), "content": str(text),
+                            "turn_id": self._turn_id,
+                            "tools": [], "background": []})
         self._overlay_lines = []
         self._scroll_offset = 0
         self.render()
@@ -1608,7 +1653,14 @@ class TuiConsole(Console):
         if self._overlay_lines:
             return [self._fit(line, width) for line in self._overlay_lines]
         lines = []
-        for role, content in self._turns:
+        assistant_counts = {}
+        for record in self._turns:
+            if record.get("role") == "Assistant":
+                turn = record.get("turn_id")
+                assistant_counts[turn] = assistant_counts.get(turn, 0) + 1
+        for record in self._turns:
+            role = record.get("role", "?")
+            content = record.get("content", "")
             if role == "You":
                 role_color = "cyan"
             elif role == "Assistant":
@@ -1619,6 +1671,17 @@ class TuiConsole(Console):
                 role_color = "magenta"
             lines.append(self.style(f"{self.glyph('role')} {role}",
                                     fg=role_color, bold=True))
+            if role == "Assistant":
+                tool_names = [entry.get("name", "?")
+                              for entry in record.get("tools", [])]
+                background = [label for label in record.get("background", [])
+                              if label]
+                tools_text = ", ".join(tool_names) if tool_names else "none"
+                bg_text = ", ".join(background) if background else "none"
+                messages = assistant_counts.get(record.get("turn_id"), 1)
+                lines.append(self.style(
+                    f"  ↳ tools: {tools_text} · background: {bg_text} · "
+                    f"messages: {messages}", dim=True))
             lines.extend("  " + line for line in self._wrap(content, width))
             lines.append(self.style(self.glyph("h") * max(width, 1), dim=True))
         if lines and self._turns:

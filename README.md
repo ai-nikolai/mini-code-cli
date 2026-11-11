@@ -219,8 +219,10 @@ time and show `(lines scrolled / total)`; `Esc` returns to the bottom or closes
 command output (`/help`, `/history`, ...). Info/warnings sit below a small
 separator at the bottom of the body. The dashboard is coloured when the
 terminal supports it; info/warnings/errors are shown as coloured
-`ℹ`/`⚠`/`✖`/`✔` lines. Questions (resume/permission) use a yellow "Question
-to User" box just above the input. Restored sessions load their history into
+`ℹ`/`⚠`/`✖`/`✔` lines. Each assistant block also carries a dim line with
+that turn's tool calls, background tasks and assistant-message count.
+Questions (resume/permission) use a yellow "Question to User" box just above
+the input. Restored sessions load their history into
 the core view and mark the summary as `[restored]`; generated plans append to
 the core view. Tool details can be expanded with `/expand [n]`.
 

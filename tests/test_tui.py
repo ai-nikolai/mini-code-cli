@@ -214,6 +214,31 @@ class TuiConsoleTest(unittest.TestCase):
             self.assertTrue(console._question_active)
             console.stop_tui()
 
+    def test_assistant_blocks_show_turn_tool_and_background_counts(self):
+        console = self.console()
+        with mock.patch.object(
+                ui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((70, 22))):
+            console.start_tui()
+            console.turn("You", "inspect and test")
+            console.turn("Assistant", "reading the file")
+            console.start_tool_call(tool_name="read_file")
+            console.tool_call_display("read_file", {"file_path": "x"}, "body")
+            console.stop_tool_call()
+            console.start_tool_call(tool_name="background")
+            console.tool_call_display(
+                "background", {"action": "start", "command": "pytest -q"},
+                "started bg-1")
+            console.stop_tool_call()
+            console.turn("Assistant", "done")
+            last_screen = "\n".join(
+                ui._ANSI_RE.sub("", line)
+                for line in console._last_frame_lines)
+            console.stop_tui()
+        self.assertIn("tools: read_file, background", last_screen)
+        self.assertIn("background: pytest -q", last_screen)
+        self.assertIn("messages: 2", last_screen)
+
     def test_core_view_keeps_multiple_turns_with_separators(self):
         console = self.console()
         with mock.patch.object(
