@@ -1498,12 +1498,26 @@ class AgentSession:
     def _tui_info_line(self):
         """A one-line session summary for the fixed dashboard."""
         usage = getattr(self, "total_usage", {}) or {}
-        tasks = self.background_tasks.list() if hasattr(self, "background_tasks") else []
+        tasks = (self.background_tasks.list()
+                 if hasattr(self, "background_tasks") else [])
+
+        def count(key):
+            # The dashboard refreshes on every turn: a display detail must
+            # never raise, even if a server reported a null/odd usage value.
+            try:
+                return int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
         running = sum(1 for task in tasks
                       if task.get("status") in ("running", "cancelling"))
-        return (f"tools {usage.get('tool_calls', 0)} · "
-                f"llm {usage.get('llm_calls', 0)} · "
-                f"background {running} running / {len(tasks)}")
+        if tasks:
+            background = (f"{running} of "
+                          f"{plural(len(tasks), 'background task')} running")
+        else:
+            background = "no background tasks"
+        return (f"{plural(count('tool_calls'), 'tool call')} · "
+                f"{plural(count('llm_calls'), 'LLM call')} · {background}")
 
     def _tui_header_lines(self):
         """The fixed dashboard content for --tui."""

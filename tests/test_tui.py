@@ -262,6 +262,31 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertEqual(row, top + 2 + 9)
         self.assertLess(row, 20)
 
+    def test_dashboard_info_line_is_readable(self):
+        session = object.__new__(AgentSession)
+        session.total_usage = {"tool_calls": 189, "llm_calls": 138}
+        session.background_tasks = mock.Mock()
+        session.background_tasks.list.return_value = []
+
+        self.assertEqual(
+            session._tui_info_line(),
+            "189 tool calls · 138 LLM calls · no background tasks")
+
+        session.background_tasks.list.return_value = [
+            {"status": "running"}, {"status": "done"},
+            {"status": "cancelling"}, {"status": "cancelled"},
+        ]
+        self.assertEqual(
+            session._tui_info_line(),
+            "189 tool calls · 138 LLM calls · "
+            "2 of 4 background tasks running")
+
+        session.total_usage = {"tool_calls": 1, "llm_calls": 1}
+        session.background_tasks.list.return_value = [{"status": "done"}]
+        self.assertEqual(
+            session._tui_info_line(),
+            "1 tool call · 1 LLM call · 0 of 1 background task running")
+
     def test_tui_on_falls_back_on_an_unsupported_terminal(self):
         with tempfile.TemporaryDirectory() as workdir, \
                 tempfile.TemporaryDirectory() as cache:
