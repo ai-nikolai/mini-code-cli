@@ -71,6 +71,28 @@ class ReadFileRangeTest(ToolTestCase):
         self.assertIn("no such file", tools.read_file(self.path("nope")))
         self.assertIn("is a directory", tools.read_file(self.directory))
 
+    def test_whole_file_read_is_bounded(self):
+        path = self.write("x" * (tools.DEFAULT_MAX_TOOL_OUTPUT_CHARS + 1_000))
+        result = tools.read_file(path)
+        self.assertLessEqual(len(result),
+                             tools.DEFAULT_MAX_TOOL_OUTPUT_CHARS + 200)
+        self.assertIn("truncated", result)
+        self.assertIn("offset/limit", result)
+
+    def test_large_paged_read_does_not_scan_for_the_total(self):
+        path = self.write(("line\n") * 100)
+        with mock.patch.object(tools, "MAX_LINE_COUNT_SCAN_BYTES", 10):
+            result = tools.read_file(path, offset=1, limit=1)
+        self.assertTrue(result.startswith("[lines 1-1]"))
+        self.assertIn("total line count not read", result)
+
+    def test_paged_read_is_bounded(self):
+        path = self.write(("x" * 1_000 + "\n") * 200)
+        result = tools.read_file(path, offset=1)
+        self.assertLessEqual(len(result),
+                             tools.DEFAULT_MAX_TOOL_OUTPUT_CHARS + 200)
+        self.assertIn("truncated", result)
+
 
 class AtomicWriteTest(ToolTestCase):
 
@@ -118,6 +140,34 @@ class AtomicWriteTest(ToolTestCase):
         self.assertIn("replaced 2", tools.edit(path, "x", "y", replace_all=True))
 
 
+class ToolOutputBoundsTest(ToolTestCase):
+    def test_grep_streams_long_lines(self):
+        path = self.path("long.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("x" * (tools.MAX_GREP_LINE_CHARS * 3) + "\nmatch\n")
+        result = tools.grep("x+", path)
+        self.assertIn("[line truncated]", result)
+        self.assertIn("match", tools.grep("match", path))
+
+    def test_grep_output_is_bounded_even_with_unlimited_results(self):
+        path = self.path("many.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("match\n" * 40_000)
+        result = tools.grep("match", path, max_results=0)
+        self.assertLessEqual(len(result),
+                             tools.DEFAULT_MAX_TOOL_OUTPUT_CHARS + 300)
+        self.assertIn("truncated", result)
+
+    def test_glob_output_is_bounded(self):
+        fake = (f"/tmp/file-{index}.py"
+                for index in range(tools.MAX_GLOB_RESULTS + 10))
+        with mock.patch.object(tools.glob_module, "iglob", return_value=fake):
+            result = tools.glob("*.py")
+        self.assertIn("truncated", result)
+        self.assertLessEqual(len(result.splitlines()),
+                             tools.MAX_GLOB_RESULTS + 2)
+
+
 class FetchCapTest(unittest.TestCase):
 
     def test_read_website_caps_the_download_to_the_requested_size(self):
@@ -131,6 +181,13 @@ class FetchCapTest(unittest.TestCase):
             tools.read_website("http://example.invalid", max_chars=1000)
         # Four bytes per requested character (UTF-8's worst case).
         self.assertEqual(calls["max_bytes"], 4_000)
+
+    def test_read_website_rejects_non_http_schemes(self):
+        result = tools.read_website("file:///etc/passwd")
+        self.assertIn("unsupported URL scheme", result)
+        self.assertNotIn("root:", result)
+        with self.assertRaises(ValueError):
+            tools._fetch("file:///etc/passwd")
 
     def test_read_website_never_exceeds_the_hard_fetch_ceiling(self):
         calls = {}

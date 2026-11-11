@@ -19,9 +19,11 @@ import fnmatch
 import functools
 import glob as glob_module
 import inspect
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import urllib.parse
@@ -43,9 +45,32 @@ DEFAULT_MAX_WEBPAGE_CHARS = 100_000
 # most four bytes per character) and bounded by this ceiling.
 DEFAULT_MAX_FETCH_BYTES = 10_000_000
 
+# Every filesystem tool returns a bounded amount of text. The model can page
+# (`read_file` offset/limit) or narrow (`grep` max_results) if it needs more;
+# one unbounded tool result must not be able to fill the context window.
+DEFAULT_MAX_TOOL_OUTPUT_CHARS = 100_000
+
 # Matched grep lines longer than this are truncated (a minified JS/CSS file is
 # one line, and echoing it whole would drown the conversation).
 MAX_GREP_LINE_CHARS = 1_000
+
+# `glob` can match an enormous tree; cap both entries and total characters.
+MAX_GLOB_RESULTS = 2_000
+
+# Counting the total lines of a paged read is only useful for normal files. For
+# a larger file, stop after the requested page instead of scanning the whole
+# thing just to print "of N".
+MAX_LINE_COUNT_SCAN_BYTES = 10_000_000
+
+
+def _cap_output(text, hint="use a more specific query or page the result"):
+    """Bound one tool result, keeping its most useful prefix."""
+    text = str(text or "")
+    if len(text) <= DEFAULT_MAX_TOOL_OUTPUT_CHARS:
+        return text
+    return (text[:DEFAULT_MAX_TOOL_OUTPUT_CHARS]
+            + f"\n...[truncated: showing {DEFAULT_MAX_TOOL_OUTPUT_CHARS} "
+              f"of {len(text)} characters; {hint}]")
 
 # Directories that are never worth recursively searching: noise, huge, or
 # generated. Only used by grep's recursive walk.
@@ -124,6 +149,54 @@ def _coerce_text(value):
     return str(value)
 
 
+def _validate_http_url(url):
+    """Reject non-HTTP(S) URLs before urllib gets a chance to open them.
+
+    ``read_website`` is network-facing and deliberately outside the
+    ``--allowed-dir`` sandbox; without this check a ``file:///...`` URL turns it
+    into an arbitrary local-file reader that bypasses the filesystem sandbox
+    and the shell-safety classifier.
+    """
+    parsed = urllib.parse.urlparse(str(url))
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"unsupported URL scheme {scheme or '(none)'!r}; only http/https "
+            f"are allowed")
+    if not parsed.netloc or not parsed.hostname:
+        raise ValueError("URL must include a host")
+    if os.environ.get("MINI_CODE_ALLOW_PRIVATE_URLS", "").strip().lower() \
+            in ("1", "true", "yes", "on"):
+        return str(url)
+    try:
+        infos = socket.getaddrinfo(
+            parsed.hostname, parsed.port or (443 if scheme == "https" else 80),
+            type=socket.SOCK_STREAM)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not resolve URL host {parsed.hostname!r}: {exc}")
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if not address.is_global:
+            raise ValueError(
+                f"refusing URL {url!r}: it resolves to non-public address "
+                f"{address} (set MINI_CODE_ALLOW_PRIVATE_URLS=1 to override)")
+    return str(url)
+
+
+class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect that leaves HTTP(S) (e.g. an http -> file redirect)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_http_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_HTTP_OPENER = urllib.request.build_opener(_HttpOnlyRedirectHandler)
+
+
 def _fetch(url, timeout=DEFAULT_TOOL_TIMEOUT, max_bytes=DEFAULT_MAX_FETCH_BYTES):
     """GET `url` and return its decoded body, sending a browser User-Agent.
 
@@ -132,9 +205,10 @@ def _fetch(url, timeout=DEFAULT_TOOL_TIMEOUT, max_bytes=DEFAULT_MAX_FETCH_BYTES)
     bytes are replaced rather than raising, so a page with a stray non-UTF-8
     byte is still readable instead of failing the whole fetch.
     """
+    _validate_http_url(url)
     request = urllib.request.Request(
         url, headers={"User-Agent": _USER_AGENT, "Accept": "*/*"})
-    with urllib.request.urlopen(request, timeout=_coerce_timeout(timeout)) as response:
+    with _HTTP_OPENER.open(request, timeout=_coerce_timeout(timeout)) as response:
         limit = max(_coerce_int(max_bytes, 0), 0)
         body = response.read(limit) if limit else response.read()
     return body.decode("utf-8", errors="replace")
@@ -189,23 +263,50 @@ def read_file(file_path, offset: int = 0, limit: int = 0, *args, **kwargs):
 
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            # The common whole-file read is already bounded by what the caller
-            # asked for; no need to pay for the streaming path.
+            # The common whole-file read is bounded here rather than trusted
+            # to the caller: a huge file must not become a huge tool result.
             if not offset and not limit:
-                return f.read()
+                content = f.read(DEFAULT_MAX_TOOL_OUTPUT_CHARS + 1)
+                if len(content) > DEFAULT_MAX_TOOL_OUTPUT_CHARS:
+                    return (content[:DEFAULT_MAX_TOOL_OUTPUT_CHARS]
+                            + "\n...[truncated: file is larger; use offset/limit "
+                              "to page through it]")
+                return content
 
             start = max(offset - 1, 0) if offset else 0
             selected = []
+            selected_chars = 0
+            page_truncated = False
             total = 0
+            complete = True
+            try:
+                file_size = os.path.getsize(file_path)
+            except OSError:
+                file_size = 0
+            count_total = file_size <= MAX_LINE_COUNT_SCAN_BYTES
             for number, line in enumerate(f, start=1):
                 total = number
                 if number <= start:
                     continue
                 if limit and number > start + limit:
+                    if not count_total:
+                        complete = False
+                        break
                     # Keep iterating purely to count the file's lines for the
                     # header, but do not hold the remaining content in memory.
                     continue
+                room = DEFAULT_MAX_TOOL_OUTPUT_CHARS - selected_chars
+                if room <= 0:
+                    page_truncated = True
+                    if not count_total:
+                        complete = False
+                        break
+                    continue
+                if len(line) > room:
+                    line = line[:room]
+                    page_truncated = True
                 selected.append(line)
+                selected_chars += len(line)
     except FileNotFoundError:
         return f"Error: no such file: {file_path}"
     except IsADirectoryError:
@@ -218,8 +319,16 @@ def read_file(file_path, offset: int = 0, limit: int = 0, *args, **kwargs):
         return (f"Error: offset {offset} is past the end of {file_path} "
                 f"({total} line(s)).")
     end = start + len(selected)
-    header = f"[lines {start + 1}-{end} of {total}]\n"
-    return header + "".join(selected)
+    total_suffix = f" of {total}" if complete or count_total else ""
+    header = f"[lines {start + 1}-{end}{total_suffix}]\n"
+    text = header + "".join(selected)
+    if not (complete or count_total):
+        text += ("\n...[total line count not read for a large file; "
+                 "use offset/limit to page]")
+    if page_truncated:
+        text += ("\n...[truncated: output capped; use a smaller limit or "
+                 "page with offset]")
+    return text
 
 
 def write_file(file_path, content, append: bool = False, create_dirs: bool = True,
@@ -335,6 +444,44 @@ def _grep_files(path, recursive, include):
                 yield full
 
 
+def _iter_file_lines(path, max_chars=MAX_GREP_LINE_CHARS):
+    """Yield ``(line_number, text, truncated)`` without loading the whole file.
+
+    A line longer than ``max_chars`` is yielded truncated and its remainder is
+    consumed in bounded chunks, so one minified/JSON file cannot exhaust memory
+    just because a regex search asked to inspect it.
+    """
+    try:
+        handle = open(path, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with handle:
+        try:
+            prefix = handle.read(4096)
+        except (OSError, UnicodeError):
+            return
+        if "\0" in prefix:
+            return
+        handle.seek(0)
+        number = 0
+        while True:
+            try:
+                line = handle.readline(max_chars + 1)
+            except (OSError, UnicodeError):
+                return
+            if not line:
+                return
+            number += 1
+            truncated = len(line) > max_chars
+            if truncated:
+                # Drain the rest of this physical line in bounded chunks.
+                while True:
+                    chunk = handle.readline(max_chars + 1)
+                    if not chunk or chunk.endswith("\n"):
+                        break
+            yield number, line[:max_chars].rstrip("\r\n"), truncated
+
+
 def grep(pattern, file_path, recursive: bool = False, include=None,
          ignore_case: bool = False, line_numbers: bool = True,
          max_results: int = 200, *args, **kwargs):
@@ -377,29 +524,26 @@ def grep(pattern, file_path, recursive: bool = False, include=None,
 
     matches = []
     truncated = False
+    total_chars = 0
     for current in files:
-        try:
-            with open(current, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except (OSError, UnicodeError):
-            continue
-        if "\0" in text[:4096]:        # a binary file: not greppable
-            continue
-        for line_number, line in enumerate(text.splitlines(), start=1):
+        for line_number, line, line_truncated in _iter_file_lines(current):
             if not regex.search(line):
                 continue
             if max_results and len(matches) >= max_results:
                 truncated = True
                 break
-            shown = line
-            if len(shown) > MAX_GREP_LINE_CHARS:
-                shown = shown[:MAX_GREP_LINE_CHARS] + "...[line truncated]"
+            shown = line + ("...[line truncated]" if line_truncated else "")
             prefix = ""
             if multiple:
                 prefix += f"{current}:"
             if line_numbers:
                 prefix += f"{line_number}:"
-            matches.append(prefix + shown)
+            entry = prefix + shown
+            if total_chars + len(entry) + 1 > DEFAULT_MAX_TOOL_OUTPUT_CHARS:
+                truncated = True
+                break
+            matches.append(entry)
+            total_chars += len(entry) + 1
         if truncated:
             break
 
@@ -407,8 +551,12 @@ def grep(pattern, file_path, recursive: bool = False, include=None,
         scope = "recursively " if (recursive and os.path.isdir(path)) else ""
         return f"No matches for {pattern!r} {scope}in {path}."
     if truncated:
-        matches.append(f"...[stopped after {max_results} matching lines; "
-                       f"raise max_results to see more]")
+        if max_results and len(matches) >= max_results:
+            matches.append(f"...[stopped after {max_results} matching lines; "
+                           f"raise max_results to see more]")
+        else:
+            matches.append("...[truncated: output capped; narrow the pattern "
+                           "or use max_results]")
     return "\n".join(matches)
 
 
@@ -427,14 +575,30 @@ def glob(pattern, root=None, *args, **kwargs):
         full = pattern
         if root and not os.path.isabs(pattern):
             full = os.path.join(root, pattern)
-        matches = sorted(glob_module.glob(full, recursive=True))
+        # iglob does not materialise the whole tree first; stop as soon as the
+        # result cap is reached rather than after an enormous directory walk.
+        matches = []
+        for match in glob_module.iglob(full, recursive=True):
+            matches.append(match)
+            if len(matches) > MAX_GLOB_RESULTS:
+                break
+        matches.sort()
     except Exception as e:
         return f"Error: {e}"
 
     if not matches:
         where = f" under {root}" if root else ""
         return f"No files matched {pattern!r}{where}."
-    return "\n".join(matches)
+    truncated = len(matches) > MAX_GLOB_RESULTS
+    if truncated:
+        matches = matches[:MAX_GLOB_RESULTS]
+    text = "\n".join(matches)
+    if truncated or len(text) > DEFAULT_MAX_TOOL_OUTPUT_CHARS:
+        text = _cap_output(text, "use a narrower pattern or a root")
+        if truncated:
+            text += (f"\n...[truncated: showing first {MAX_GLOB_RESULTS} "
+                     f"matches]")
+    return text
 
 
 # ---------------------------------------------------------------------------
