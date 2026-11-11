@@ -31,6 +31,7 @@ and nothing else, so a difference in success rate can be attributed to it:
                         (``plan-verify-step``)
 ``swe-plan-verify``     ``swe`` + ``--plan --plan-strategy plan-verify``
 ``swe-open-plan``       ``swe`` + ``--plan --plan-strategy open-plan``
+``swe-background``      ``swe`` + ``--background`` (background shell tasks)
 ======================  ====================================================
 
 Every preset is also recorded in the run manifest, so a report can say which
@@ -97,6 +98,8 @@ class MiniCodeAgent(AgentAdapter):
         "swe-open-plan": dict(
             _SWE, flags=_SWE["flags"] + ["--plan"],
             plan_strategy="open-plan"),
+        "swe-background": dict(
+            _SWE, flags=_SWE["flags"] + ["--background"]),
     }
 
     def argv(self, prompt, model, workspace=None, container=False):

@@ -292,8 +292,8 @@ Config layout (all keys are validated; a typo is an error, not a silent default)
 ### mini-code strategy presets
 
 The benchmark configs list several mini-code settings. The `swe` setting is the
-baseline used for real runs; the four strategy presets change exactly one
-compaction or planning choice on top of it:
+baseline used for real runs; the strategy presets change exactly one
+compaction, planning or background choice on top of it:
 
 | Setting | Extra choice |
 | --- | --- |
@@ -303,8 +303,9 @@ compaction or planning choice on top of it:
 | `swe-plan` | `--plan` (default `plan-verify-step`) |
 | `swe-plan-verify` | `--plan --plan-strategy plan-verify` |
 | `swe-open-plan` | `--plan --plan-strategy open-plan` |
+| `swe-background` | `--background` (background shell tasks) |
 
-All five are present in `terminal_bench_21.json`, `ornith_30b.json` and
+All six are present in `terminal_bench_21.json`, `ornith_30b.json` and
 `mini_code_settings.json`. The Slurm launchers default to the `swe` baseline only;
 select more with a space-separated `MINI_CODE_SETTINGS`:
 

@@ -159,6 +159,10 @@ class MiniCodeAdapterTests(unittest.TestCase):
         self.assertIn("--plan", argv)
         self.assertNotIn("--plan-strategy", argv)
 
+        argv = self.adapter("swe-background").argv("p", local_model())
+        self.assertIn("--background", argv)
+        self.assertIn("--enable-shell", argv)
+
         cases = (
             ("swe-compaction-predict-files",
              "--compaction-strategy", "predict-files"),
