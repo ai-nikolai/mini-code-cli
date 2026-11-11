@@ -4,7 +4,7 @@
 > [README.md](../README.md); the developer guide (setup, tests, CI, releasing) is in
 > [README_DEV.md](README_DEV.md).
 
-A small, dependency-free (stdlib-only) CLI that drives an interactive loop over an
+A small, dependency-light CLI that drives an interactive loop over an
 OpenAI-compatible LLM server (vLLM / SGLang / etc.). The agent reads user input, calls the
 model, runs any tool calls the model asks for, persists the conversation, and repeats.
 
@@ -24,7 +24,7 @@ suite.
 | `agent_loop.py` | CLI entry point (`main`, `parse_args`), the `AgentSession` loop, history compaction, plan-mode hooks, sub-agent delegation wiring. Re-exports a few helpers through `__all__` for the test suite. |
 | `config.py` | Process-wide defaults (cache location, model URL, timeouts) plus the model context-window table and the token-based compaction budget (`compaction_budget`). History compaction is triggered by tokens only -- there is no message-count limit. Shared by every module to avoid import cycles. |
 | `prompts.py` | Builds the system prompt (tool list, allowed-dir note, plan-mode / open-plan / scratchpad instructions) and the compaction / plan / strategy prompts. |
-| `tools.py` | The tool *functions* the model can call (`read_file`, `write_file`, `edit`, `grep`, `glob`, `web_search`, `read_website`, `run_shell_command`) plus `util_get_tools` / `util_get_tools_dict` which introspect their signatures into an OpenAI-style tool schema. Filesystem tool results are bounded (100k chars; glob also 2000 matches), and `read_website` accepts only http/https URLs (no `file://`). Every tool returns a string and never raises; optional parameters (a line range for `read_file`, `recursive`/`include` for `grep`, `root` for `glob`, `replace_all` for `edit`, `cwd` for the shell, ...) all have safe defaults, and the schema type is inferred from a parameter's annotation *or* its default so integer/boolean knobs are not advertised as strings. |
+| `tools.py` | The tool *functions* the model can call (`read_file`, `write_file`, `edit`, `grep`, `glob`, `web_search`, `read_website`, `run_shell_command`) plus `util_get_tools` / `util_get_tools_dict` which introspect their signatures into an OpenAI-style tool schema. Filesystem tool results are bounded (100k chars; glob also 2000 matches), and `read_website` accepts only public http/https URLs (no `file://` or private/link-local hosts unless `MINI_CODE_ALLOW_PRIVATE_URLS=1`). Every tool returns a string and never raises; optional parameters (a line range for `read_file`, `recursive`/`include` for `grep`, `root` for `glob`, `replace_all` for `edit`, `cwd` for the shell, ...) all have safe defaults, and the schema type is inferred from a parameter's annotation *or* its default so integer/boolean knobs are not advertised as strings. |
 | `persistence.py` | Everything about session histories on disk: `history_{n}.json` segments, the flat `summary_history.json` recorder, per-segment `usage_{n}.json` + `total_usage.json`, atomic JSON writes, segment listing/cleanup (`history_segment_indices`, `delete_segments_above`) and the restore/`find_last_session` helpers. The loaders never raise (they report `None`/zeros), and a restore accepts *only* the layout described below. |
 | `sandbox.py` | The `--allowed-dir` filesystem sandbox (`is_within_allowed_dir`, `tool_paths_are_allowed`), using `os.path.realpath` to defeat symlinks / `..`. |
 | `permissions.py` | Pure "does this tool call need a prompt?" helpers (`needs_permission`, `shell_forces_ask_permission`, `sudo_disables_prompts`). |
@@ -132,7 +132,7 @@ classifier, the `--allowed-dir` sandbox, history compaction and `--plan` mode.
 | File | Role |
 | --- | --- |
 | `subagents/base.py` | The `SubAgent` base class every sub-agent implements. Owns the tool schema, the nested system prompt, the child `arg` namespace and the `run()` that drives the nested session to completion. |
-| `subagents/builtin.py` | Two worked examples: `ResearchSubAgent` and `PlanSubAgent`. They are registered on import and double as documentation ("a sub-agent is just a small class configuring a name, a description, and a few knobs"). |
+| `subagents/builtin.py` | Four built-in examples: `ResearchSubAgent`, `PlanSubAgent`, `SoftwareEngineeringSubAgent` and `GenericSubAgent`. They are registered on import and double as documentation ("a sub-agent is just a small class configuring a name, a description, and a few knobs"). |
 | `subagents/__init__.py` | The pluggable registry: `register`, `unregister`, `get_registry`, `clear_registry` (plus the `SubAgent` re-export). |
 
 ### 2.2 How a sub-agent becomes a tool
