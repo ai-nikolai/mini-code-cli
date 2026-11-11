@@ -4,9 +4,10 @@ Sub-agents are pluggable: each one is a :class:`~mini_code_cli.subagents.base.Su
 instance. :func:`register` adds one; :func:`get_registry` returns the live dict
 that the agent loop turns into extra tools when ``--enable-subagents`` is set.
 
-Two worked examples live in :mod:`mini_code_cli.subagents.builtin`
-(:class:`ResearchSubAgent`, :class:`PlanSubAgent`); import them here or write
-your own and register it.
+The worked examples live in :mod:`mini_code_cli.subagents.builtin`
+(:class:`ResearchSubAgent`, :class:`PlanSubAgent`,
+:class:`SoftwareEngineeringSubAgent`, :class:`GenericSubAgent`); import one or
+write your own and register it.
 """
 from .base import SubAgent  # noqa: F401  (public re-export)
 

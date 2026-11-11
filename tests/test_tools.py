@@ -149,6 +149,23 @@ class ToolOutputBoundsTest(ToolTestCase):
         self.assertIn("[line truncated]", result)
         self.assertIn("match", tools.grep("match", path))
 
+    def test_grep_does_not_skip_the_line_after_an_exact_cap_line(self):
+        path = self.path("exact.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("x" * tools.MAX_GREP_LINE_CHARS + "\nneedle\n")
+        # The cap-width line was complete, so the next line must still be read.
+        self.assertIn("2:needle", tools.grep("needle", path))
+        # ... and the complete line must not claim it was truncated.
+        self.assertNotIn("[line truncated]", tools.grep("^x+$", path))
+
+    def test_grep_matches_past_the_display_cap(self):
+        path = self.path("one-line.js")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("x" * (tools.MAX_GREP_LINE_CHARS * 4) + "needle\n")
+        result = tools.grep("needle", path)
+        self.assertIn("1:", result)
+        self.assertIn("match at column", result)
+
     def test_grep_output_is_bounded_even_with_unlimited_results(self):
         path = self.path("many.txt")
         with open(path, "w", encoding="utf-8") as handle:

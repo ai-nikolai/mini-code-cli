@@ -54,6 +54,12 @@ DEFAULT_MAX_TOOL_OUTPUT_CHARS = 100_000
 # one line, and echoing it whole would drown the conversation).
 MAX_GREP_LINE_CHARS = 1_000
 
+# Matching happens over a much wider window than the display cap: a needle can
+# sit past column 1000 in a minified file. The window is still bounded so one
+# pathological line cannot exhaust memory; anything past it is drained and not
+# searched (the result says the line was truncated).
+MAX_GREP_MATCH_CHARS = 1_000_000
+
 # `glob` can match an enormous tree; cap both entries and total characters.
 MAX_GLOB_RESULTS = 2_000
 
@@ -444,10 +450,16 @@ def _grep_files(path, recursive, include):
                 yield full
 
 
-def _iter_file_lines(path, max_chars=MAX_GREP_LINE_CHARS):
-    """Yield ``(line_number, text, truncated)`` without loading the whole file.
+def _iter_file_lines(path, display_chars=MAX_GREP_LINE_CHARS,
+                     scan_chars=MAX_GREP_MATCH_CHARS):
+    """Yield ``(line_number, text, display_truncated)`` without reading it all.
 
-    A line longer than ``max_chars`` is yielded truncated and its remainder is
+    ``text`` is the line up to the (wide) scan window, so a regex can match
+    anywhere in it. ``display_truncated`` says the narrower ``display_chars``
+    prefix that callers print does not contain the whole line, either because
+    the line is longer than that cap or because it exceeded ``scan_chars``.
+
+    A line longer than ``scan_chars`` is yielded truncated and its remainder is
     consumed in bounded chunks, so one minified/JSON file cannot exhaust memory
     just because a regex search asked to inspect it.
     """
@@ -466,20 +478,29 @@ def _iter_file_lines(path, max_chars=MAX_GREP_LINE_CHARS):
         number = 0
         while True:
             try:
-                line = handle.readline(max_chars + 1)
+                line = handle.readline(scan_chars + 1)
             except (OSError, UnicodeError):
                 return
             if not line:
                 return
             number += 1
-            truncated = len(line) > max_chars
-            if truncated:
+            # ``readline`` only stopped early if it hit the size limit mid-line;
+            # a line that ends in "\n" was read completely even when it is
+            # longer than display_chars. Testing len(line) alone used to treat
+            # a line of exactly display_chars + "\n" as truncated and then
+            # swallow the following line while draining a remainder that did
+            # not exist.
+            scan_truncated = (not line.endswith("\n")
+                              and len(line) > scan_chars)
+            if scan_truncated:
                 # Drain the rest of this physical line in bounded chunks.
                 while True:
-                    chunk = handle.readline(max_chars + 1)
+                    chunk = handle.readline(scan_chars + 1)
                     if not chunk or chunk.endswith("\n"):
                         break
-            yield number, line[:max_chars].rstrip("\r\n"), truncated
+            text = line[:scan_chars].rstrip("\r\n")
+            yield (number, text,
+                   scan_truncated or len(text) > display_chars)
 
 
 def grep(pattern, file_path, recursive: bool = False, include=None,
@@ -527,12 +548,19 @@ def grep(pattern, file_path, recursive: bool = False, include=None,
     total_chars = 0
     for current in files:
         for line_number, line, line_truncated in _iter_file_lines(current):
-            if not regex.search(line):
+            match = regex.search(line)
+            if not match:
                 continue
             if max_results and len(matches) >= max_results:
                 truncated = True
                 break
-            shown = line + ("...[line truncated]" if line_truncated else "")
+            shown = line[:MAX_GREP_LINE_CHARS]
+            if line_truncated:
+                if match.start() >= MAX_GREP_LINE_CHARS:
+                    shown += (f"...[line truncated; match at column "
+                              f"{match.start() + 1}]")
+                else:
+                    shown += "...[line truncated]"
             prefix = ""
             if multiple:
                 prefix += f"{current}:"

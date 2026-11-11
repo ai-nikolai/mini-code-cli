@@ -133,7 +133,8 @@ def _retryable_request_failure(response):
 
 
 def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="default",
-                       server_url=None, api_key=None, tools=None, timeout=300):
+                       server_url=None, api_key=None, tools=None, timeout=300,
+                       console=None):
     """Query an OpenAI-compatible server (local or remote) using ``requests``.
 
     Supports authentication via API key if provided.
@@ -141,6 +142,10 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
     ``timeout`` is the number of seconds before the HTTP request is aborted.
     Reasoning models can take a while to produce a response, so the default is
     deliberately high.
+
+    ``console`` is the renderer that receives failure notes. The agent loop
+    passes the session's console so a sub-agent's errors stay on its own screen
+    (or redirected stream); when omitted, the module-level console is used.
 
     Returns ``(content, tool_calls, usage, reasoning_content)``. On any failure
     it prints a diagnostic and returns ``(None, None, None, None)`` so the
@@ -241,19 +246,25 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
                 continue
             break
         except (json.JSONDecodeError, KeyError, IndexError) as e:
-            _report(f"Error processing the model's response: {e}")
+            _report(f"Error processing the model's response: {e}",
+                    console=console)
             return None, None, None, None
         except Exception as e:  # noqa: BLE001 -- a network/parse hiccup must not crash the loop
-            _report(f"Unexpected error calling the model server: {e}")
+            _report(f"Unexpected error calling the model server: {e}",
+                    console=console)
             return None, None, None, None
 
     if last_error is not None:
-        _report_request_failure(last_error, last_response)
+        _report_request_failure(last_error, last_response, console=console)
     return None, None, None, None
 
 
-def _report(message, level="error"):
+def _report(message, level="error", console=None):
     """Report a request failure through the console, never straight to stderr.
+
+    ``console`` defaults to the module-level renderer for callers that have no
+    session (and for backward compatibility). The agent loop passes its own so
+    sub-agent failures do not leak onto the user's terminal.
 
     ``ui`` imports :func:`oneline` from this module, so the console is imported
     lazily here to keep the import graph acyclic. A single note -- rather than a
@@ -261,11 +272,13 @@ def _report(message, level="error"):
     while the "… thinking" spinner owns the bottom line, and writing multi-line
     text underneath it left the screen mangled.
     """
-    from . import ui  # local: ui imports oneline from here
-    ui.console.note(oneline(message, 300), level)
+    if console is None:
+        from . import ui  # local: ui imports oneline from here
+        console = ui.console
+    console.note(oneline(message, 300), level)
 
 
-def _report_request_failure(error, response):
+def _report_request_failure(error, response, console=None):
     """Explain an HTTP failure, folding the server's own words into one line.
 
     Only the response is inspected more closely when there *is* one: a
@@ -275,7 +288,8 @@ def _report_request_failure(error, response):
     truncated -- instead of dumping the whole payload into the terminal.
     """
     if response is None:
-        _report(f"HTTP error talking to the model server: {error}")
+        _report(f"HTTP error talking to the model server: {error}",
+                console=console)
         return
     status = getattr(response, "status_code", "?")
     detail = ""
@@ -289,4 +303,5 @@ def _report_request_failure(error, response):
             detail = f": {oneline(body, 200)}"
     except Exception as e:  # a broken response must not break the report
         detail = f" (and the error body was unreadable: {e})"
-    _report(f"HTTP {status} from the model server: {error}{detail}")
+    _report(f"HTTP {status} from the model server: {error}{detail}",
+            console=console)
