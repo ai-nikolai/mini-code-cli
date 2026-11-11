@@ -80,6 +80,8 @@ class TuiConsole(Console):
         self._active = False
         # Up/down prompt history for this full-screen console.
         self._input_history = []
+        self._scroll_stop = None
+        self._scroll_thread = None
         self._summary_lines = []
         self._turns = deque(maxlen=40)
         self._turn_id = 0
@@ -126,11 +128,12 @@ class TuiConsole(Console):
                 signal.signal(signal.SIGWINCH, self._on_winch)
             except (ValueError, OSError):
                 self._old_winch = None
-        # Ask xterm-compatible terminals to distinguish modified Enter keys.
-        # Shift+Enter then arrives as CSI 27;2;13~ instead of a plain CR.
-        self._write("\x1b[?1049h\x1b[2J\x1b[H"
-                    "\x1b[>4;2m\x1b[>1u\x1b[?25l")
+        # Enter the alternate screen and hide the cursor while we own the
+        # terminal. The enhanced keyboard protocols are enabled only around
+        # prompt input (see _read_tui_input) so Ctrl+C stays a signal.
+        self._write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
         self.render()
+        self.start_scroll_listener()
         return True
 
     def _on_winch(self, *_args):
@@ -140,6 +143,7 @@ class TuiConsole(Console):
     def stop_tui(self):
         if not self._active:
             return
+        self.stop_scroll_listener()
         self.stop_thinking()
         self._active = False
         self._last_frame_lines = []
@@ -556,6 +560,81 @@ class TuiConsole(Console):
         """Set a callable returning a one-line session summary for the header."""
         self._info_provider = provider
 
+    # -- scroll keys while the agent is busy -------------------------------
+
+    def start_scroll_listener(self):
+        """Read scroll/Escape keys while the model or a tool is working.
+
+        The prompt editor owns stdin during input. Between prompts this small
+        listener keeps only the scrolling keys alive, so the middle pane can be
+        browsed while a long LLM/tool call is running. It enables no enhanced
+        keyboard protocol, so Ctrl+C still reaches the process as SIGINT.
+        """
+        if (self._scroll_thread is not None or not self._active
+                or not sys.stdin.isatty()):
+            return
+        stop = threading.Event()
+
+        def listen():
+            import select
+            try:
+                import termios
+            except ImportError:  # pragma: no cover - Windows
+                return
+            try:
+                fd = sys.stdin.fileno()
+                previous = termios.tcgetattr(fd)
+            except (AttributeError, OSError, ValueError, termios.error):
+                return
+            attrs = termios.tcgetattr(fd)
+            attrs[3] &= ~(termios.ICANON | termios.ECHO)
+            attrs[6][termios.VMIN] = 1
+            attrs[6][termios.VTIME] = 0
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+                while not stop.is_set():
+                    ready, _w, _x = select.select([fd], [], [], 0.1)
+                    if not ready:
+                        continue
+                    raw = os.read(fd, 1)
+                    if not raw:
+                        break
+                    if raw != b"\x1b":
+                        continue
+                    seq = _read_escape_sequence(
+                        fd, lambda: os.read(fd, 1), [], select)
+                    if seq in (b"[1;2A", b"[a"):
+                        self.scroll_body(1)
+                    elif seq in (b"[1;2B", b"[b"):
+                        self.scroll_body(-1)
+                    elif seq in (b"[5~",):
+                        self.scroll_page(1)
+                    elif seq in (b"[6~",):
+                        self.scroll_page(-1)
+                    elif not seq:
+                        self.dismiss_overlay()
+            except (OSError, ValueError, termios.error):
+                pass
+            finally:
+                try:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+                except (OSError, ValueError, termios.error):
+                    pass
+
+        self._scroll_stop = stop
+        self._scroll_thread = threading.Thread(target=listen, daemon=True)
+        self._scroll_thread.start()
+
+    def stop_scroll_listener(self):
+        stop = self._scroll_stop
+        thread = self._scroll_thread
+        self._scroll_stop = None
+        self._scroll_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
     def render(self):
         if not self._active:
             return
@@ -700,6 +779,11 @@ class TuiConsole(Console):
             return text
 
         try:
+            # Enable the enhanced keyboard protocols only while the prompt is
+            # reading. Keeping them on during an LLM/tool call would encode
+            # Ctrl+C as CSI-u and stop the terminal from sending SIGINT, so
+            # Ctrl+C could not interrupt a thinking request.
+            self._write("\x1b[>4;2m\x1b[>1u")
             termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
             # Discard keys typed while the agent was busy; otherwise an arrow
             # pressed during an LLM/tool call replays at the next prompt and
@@ -894,6 +978,7 @@ class TuiConsole(Console):
                         cursor += 1
                     sync()
         finally:
+            self._write("\x1b[<u\x1b[>4;0m")
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, previous)
             except (OSError, ValueError, termios.error):
@@ -902,6 +987,7 @@ class TuiConsole(Console):
     def read_line(self, prompt_text="", multiline=False, tui=False):
         if not self._active:
             return super().read_line(prompt_text, multiline=multiline, tui=tui)
+        self.stop_scroll_listener()
         try:
             return self._read_tui_input(prompt_text)
         except (EOFError, KeyboardInterrupt):
@@ -912,3 +998,5 @@ class TuiConsole(Console):
                 self._question_active = False
                 self._question_lines = []
                 self.render()
+            if self._active:
+                self.start_scroll_listener()

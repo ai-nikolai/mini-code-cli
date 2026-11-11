@@ -4,6 +4,7 @@ import io
 import os
 import pty
 import select
+import signal
 import subprocess
 import sys
 import tempfile
@@ -338,6 +339,134 @@ class TuiConsoleTest(unittest.TestCase):
 
 
 class TuiConsolePtyTest(unittest.TestCase):
+    def test_scroll_keys_work_while_the_agent_is_busy(self):
+        child = r"""
+import sys, time
+from mini_code_cli.tui import TuiConsole
+c = TuiConsole(stream=sys.stdout, color=False, unicode=False)
+c.start_tui()
+c.turn("Assistant", "\n".join("line %d" % i for i in range(60)))
+c.render()
+sys.stderr.write("READY\n")
+sys.stderr.flush()
+time.sleep(1.0)
+offset = c._scroll_offset
+c.stop_tui()
+sys.stdout.write("\nRESULT:%d\n" % offset)
+sys.stdout.flush()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            time.sleep(0.3)
+            os.write(master, b"\x1b[1;2A")
+            deadline = time.time() + 10
+            while b"RESULT:" not in output and time.time() < deadline:
+                drain(deadline)
+            self.assertIn(b"RESULT:1", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
+    def test_ctrl_c_during_llm_exits_gracefully(self):
+        child = r"""
+import argparse, sys, tempfile, time
+from unittest import mock
+from mini_code_cli import agent_loop, tui, ui, utils
+
+args = argparse.Namespace(
+    url="http://localhost:1", max_tokens=None, temperature=1.0,
+    model="test-model", api_key=None, cache_dir=tempfile.mkdtemp(),
+    restore_session=None, load_last_session=False, system_prompt=None,
+    auto_mode=True, agent_md=None, prompt=None, ask_permission=False,
+    sudo=False, allowed_dir=tempfile.mkdtemp(), enable_shell=False,
+    enable_subagents=False, skills=False, llm_timeout=30, tool_timeout=30,
+    max_context_tokens=None, plan=False, verbose=False, scratchpad=False,
+    background=False, compaction_strategy="summarise", plan_strategy=None,
+    tui="on")
+
+def slow(messages, *a, **k):
+    time.sleep(30)
+    return ("never", [], None, None)
+
+with mock.patch.object(utils, "call_openai_server", new=slow), \
+        mock.patch.object(utils, "determine_vllm_model", return_value=None):
+    console = tui.TuiConsole(stream=sys.stdout, color=False, unicode=False)
+    session = agent_loop.AgentSession(args, console=console)
+    sys.stderr.write("READY\n")
+    sys.stderr.flush()
+    session.run()
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, "-c", child], stdin=slave,
+                                stdout=slave, stderr=slave, cwd=root,
+                                close_fds=True)
+        os.close(slave)
+        output = b""
+
+        def drain(deadline):
+            nonlocal output
+            while time.time() < deadline:
+                ready, _w, _x = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return False
+                    if not chunk:
+                        return False
+                    output += chunk
+                    return True
+            return False
+
+        try:
+            deadline = time.time() + 10
+            while b"READY" not in output and time.time() < deadline:
+                drain(deadline)
+            time.sleep(0.5)
+            os.write(master, b"hello\r")
+            time.sleep(0.5)
+            proc.send_signal(signal.SIGINT)
+            deadline = time.time() + 10
+            while proc.poll() is None and time.time() < deadline:
+                drain(deadline)
+            self.assertIsNotNone(proc.poll(), "session did not exit on Ctrl+C")
+            drain(time.time() + 1)
+            self.assertIn(b"Interrupting", output)
+            self.assertIn(b"\x1b[?1049l", output)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(master)
+
     def test_full_session_turn_and_quit_in_a_pty(self):
         child = r"""
 import argparse, sys, tempfile
