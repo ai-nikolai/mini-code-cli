@@ -211,7 +211,7 @@ class SubAgent:
         """Location the nested agent should write its report to."""
         return os.path.join(self._child_cache_dir(parent), "report.md")
 
-    def run(self, task, parent, max_steps=None, **options):
+    def run(self, task, parent, max_steps=None, should_stop=None, **options):
         """Run the nested agent for ``task`` inside ``parent`` and return text.
 
         Spins up a child :class:`AgentSession` (reusing all the normal loop
@@ -282,7 +282,8 @@ class SubAgent:
             # path the system prompt (built at system_prompt() time) told the
             # child to write to, so the two always agree.
             report_path = self._report_path(parent)
-            final_text = child._drive_auto(task, max_steps=max_steps)
+            final_text = child._drive_auto(
+                task, max_steps=max_steps, should_stop=should_stop)
             return self._build_result(child, final_text, report_path)
         except Exception as e:
             # Turn any failure into an Error string the parent loop feeds back

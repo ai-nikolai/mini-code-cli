@@ -25,8 +25,10 @@ without the tests reaching into every module.
 
 import os
 import json
+import time
 import argparse
 
+from . import background as background_mod
 from . import prompts
 from . import shell_safety_utils
 from . import tools
@@ -164,9 +166,10 @@ def parse_args():
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
                         help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
+    parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
 
-    parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo")
-    parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --load-last-session")
+    parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
+    parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
 
     # Output verbosity
     parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
@@ -180,6 +183,7 @@ def parse_args():
         args.sudo = True
         args.auto_mode = True
         args.enable_skills = True
+        args.background = True
 
     if args.all_last:
         args.load_last_session = True
@@ -212,6 +216,7 @@ def print_help(args):
         ("/history last", "...for the most recent turn"),
         ("/plan", "show the current goal + plan (plan mode only)"),
         ("/context", "show how the context window is used (tokens + percentages)"),
+        ("/background [id]", "show foreground activity + background tasks (or one task's output)"),
         ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
         ("", "a bare /reset only re-saves the current state (no data loss)"),
@@ -600,6 +605,18 @@ class AgentSession:
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
         self.model = self._resolve_model(args)
 
+        # Background task registry. It is independent of the foreground loop;
+        # tools and /background read snapshots from it.
+        self.background_tasks = background_mod.BackgroundTaskManager(
+            os.path.join(self.session_dir, "background"))
+
+        # What the foreground loop is doing *right now* (or last did), for
+        # /background. The loop is synchronous, so this is most useful when
+        # read between steps; it is updated at every blocking boundary.
+        self._activity_label = None
+        self._activity_started = None
+        self._last_activity = None
+
         self._register_tools(args)
 
         # report_path is set on a *sub-agent child* session (by
@@ -768,6 +785,8 @@ class AgentSession:
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
+        self.background_tasks.set_log_dir(
+            os.path.join(self.session_dir, "background"))
         self._prepare_agent_files()
 
         self.history_index = 0
@@ -849,6 +868,8 @@ class AgentSession:
             self.session_dir = restore_directory
             self.plan_manager = plan_utils.PlanManager(
                 self.session_dir, enabled=self.plan_mode)
+            self.background_tasks.set_log_dir(
+                os.path.join(self.session_dir, "background"))
             self._prepare_agent_files()
             self.messages = restored
             self.summary = records
@@ -971,6 +992,18 @@ class AgentSession:
             self.llm_tools.extend(skills.get_skills_tools(self.allowed_dir))
             self.tools_dict.update(skills.get_skills_file_tools_dict(self.allowed_dir))
             self.llm_tools.extend(skills.get_skills_file_tools(self.allowed_dir))
+
+        # Background tasks are opt-in: --background (or --all) plus shell
+        # execution or sub-agents. A background session (a sub-agent child)
+        # never gets its own task list.
+        self.enable_background = (
+            bool(getattr(args, "background", False))
+            and not getattr(self, "background_mode", False)
+            and (shell_execution_enabled(args) or self.enable_subagents))
+        if self.enable_background:
+            self.tools_dict.update(background_mod.background_tools_dict(
+                self.background_tasks, self._run_background_subagent))
+            self.llm_tools.extend(background_mod.background_tools())
 
 
     def _prepare_agent_files(self):
@@ -1126,6 +1159,29 @@ class AgentSession:
         window = self.compaction_budget.context_window
         danger = min(max(self.compaction_budget.token_limit / float(window), 0.0), 1.0)
         return self.console.context_bar(fraction, warn=danger * 0.85, danger=danger)
+
+    # -- foreground activity (for /background) -----------------------------
+
+    def _begin_activity(self, label):
+        self._activity_label = str(label)
+        self._activity_started = time.monotonic()
+
+    def _end_activity(self):
+        if self._activity_label is None:
+            return
+        elapsed = max(time.monotonic() - (self._activity_started or time.monotonic()), 0.0)
+        self._last_activity = (self._activity_label, elapsed)
+        self._activity_label = None
+        self._activity_started = None
+
+    def _activity_summary(self):
+        if self._activity_label:
+            elapsed = max(time.monotonic() - (self._activity_started or time.monotonic()), 0.0)
+            return f"{self._activity_label} ({elapsed:.1f}s)"
+        if self._last_activity:
+            label, elapsed = self._last_activity
+            return f"waiting for your input (last: {label}, {elapsed:.1f}s)"
+        return "waiting for your input"
 
     def _bill_compaction(self, segment_before):
         """Carry the compaction call's spend over into the session total.
@@ -1666,7 +1722,7 @@ class AgentSession:
 
     # -- autonomous drive (used by sub-agents) ------------------------------
 
-    def _drive_auto(self, initial_task, max_steps=None):
+    def _drive_auto(self, initial_task, max_steps=None, should_stop=None):
         """Run unattended to completion and return the final assistant answer.
 
         Appends ``initial_task`` as a user turn, then keeps stepping until the
@@ -1695,6 +1751,10 @@ class AgentSession:
         self.steps_taken = 0
         try:
             while True:
+                if should_stop is not None and should_stop():
+                    self.console.note("Sub-agent task cancelled; stopping.", "warn")
+                    self.stop_reason = "cancelled"
+                    break
                 should_continue = self._step()
                 self._persist()
                 steps += 1
@@ -1735,6 +1795,7 @@ class AgentSession:
         """
         plan_prompt_text = prompts.plan_prompt(self.messages, current_instruction)
         plan_text = ""
+        self._begin_activity("generating plan")
         try:
             self.console.note("Generating a plan for the current goal...", "info")
             self.console.start_thinking("planning")
@@ -1755,7 +1816,6 @@ class AgentSession:
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
                 ))
-            self.console.stop_thinking()
 
             self._record_usage(usage)
             # The plan prompt is one message holding a flattened copy of the whole
@@ -1766,6 +1826,9 @@ class AgentSession:
             plan_text = response or ""
         except Exception as exc:
             self.console.note(f"Could not generate a plan: {exc}", "warn")
+        finally:
+            self.console.stop_thinking()
+            self._end_activity()
 
         self.plan_manager.write_plan(plan_text)
         if plan_text and plan_text.strip():
@@ -1791,6 +1854,7 @@ class AgentSession:
         plan_prompt_text = prompts.plan_review_prompt(
             self.messages, self.plan_manager.goal or "")
         summary = ""
+        self._begin_activity("reviewing plan")
         try:
             self.console.note("Reviewing the current plan...", "info")
             self.console.start_thinking("reviewing plan")
@@ -1804,12 +1868,14 @@ class AgentSession:
                     api_key=self.api_key,
                     timeout=self.args.llm_timeout,
                 ))
-            self.console.stop_thinking()
             self._record_usage(usage)
             self._note_prompt_size(usage, len(self.messages))
             summary = response or ""
         except Exception as exc:
             self.console.note(f"Could not review the plan: {exc}", "warn")
+        finally:
+            self.console.stop_thinking()
+            self._end_activity()
 
         # Persist the review summary to the plan document and re-inject it so
         # the model works from the review result.
@@ -2088,6 +2154,8 @@ class AgentSession:
                              (plan mode only)
           /context           show how the context window is used, by category
                              (tokens and percentages)
+          /background [id]   show what the loop is doing and the background
+                             tasks (or the output of one task)
           /skip-plan <text>  send <text> without generating or reviewing a plan
           /clear             clear the screen (keeps the conversation)
           /help              show the command help
@@ -2122,6 +2190,9 @@ class AgentSession:
             return True
         if cmd == "context":
             self._show_context()
+            return True
+        if cmd in ("background", "bg", "tasks"):
+            self._show_background(arg)
             return True
         if cmd in ("skip-plan", "skip_plan", "skipplan"):
             self._run_skipped_plan(arg)
@@ -2265,6 +2336,68 @@ class AgentSession:
         self.console.status_box(lines, title="Context usage",
                                 fg="green", dim=True)
 
+    def _show_background(self, arg=""):
+        """Show background tasks and the foreground activity (``/background``).
+
+        ``/background`` renders a table of tasks; ``/background bg-1`` renders
+        that task's state and output tail. The foreground line is the loop's
+        last/current blocking step (LLM call, tool, plan, ...). Because the
+        loop is synchronous this is read between steps, but it tells the user
+        what the LLM was waiting on for the last operation.
+        """
+        requested = (arg or "").strip()
+        self.console.rule(title="Background", char="═", fg="cyan")
+        if requested:
+            snapshot = self.background_tasks.get(requested)
+            if snapshot is None:
+                self.console.note(
+                    f"No background task {requested!r}. Use /background to list them.",
+                    "warn")
+                return
+            snapshot = snapshot.snapshot()
+            lines = [
+                f"id       : {snapshot['id']}",
+                f"kind     : {snapshot['kind']}",
+                f"status   : {snapshot['status']}",
+                f"age      : {snapshot['age_seconds']:.1f}s",
+                f"label    : {oneline(snapshot['label'], 100)}",
+                f"pid      : {snapshot['pid'] if snapshot['pid'] is not None else '-'}",
+                f"exit code: {snapshot['exit_code'] if snapshot['exit_code'] is not None else '-'}",
+                f"log file : {snapshot['log_path']}",
+            ]
+            if snapshot.get("result"):
+                lines += ["", "result:", oneline(snapshot["result"], 400)]
+            if snapshot.get("error"):
+                lines += ["", "error:", oneline(snapshot["error"], 400)]
+            output = self.background_tasks.tail(requested, 60)
+            if output:
+                lines += ["", "output (tail):"]
+                lines.extend(output.rstrip().splitlines())
+            self.console.status_box(
+                lines, title=f"Background task {snapshot['id']}",
+                fg="cyan", dim=True)
+            return
+
+        lines = [f"Foreground : {self._activity_summary()}", ""]
+        snapshots = self.background_tasks.list()
+        if not snapshots:
+            lines.append("Background : none")
+        else:
+            running = sum(1 for item in snapshots
+                          if item["status"] in ("running", "cancelling"))
+            lines.append(f"Background : {running} running, {len(snapshots)} total")
+            lines.append(
+                f"  {'id':<6} {'state':<10} {'age':>7}  {'kind':<8} label")
+            for item in snapshots:
+                lines.append(
+                    f"  {item['id']:<6} {item['status']:<10} "
+                    f"{item['age_seconds']:>6.1f}s  {item['kind']:<8} "
+                    f"{oneline(item['label'], 48)}")
+            lines.append("")
+            lines.append("Use /background <id> for the output tail.")
+        self.console.status_box(lines, title="Background tasks",
+                                fg="cyan", dim=True)
+
     def _clear_and_show_last(self):
         """Handle /clear: wipe the screen and re-print the last turn.
 
@@ -2298,7 +2431,12 @@ class AgentSession:
 
         try:
             for call in tool_calls:
-                self._run_one_tool_call(call)
+                name = ((call or {}).get("function") or {}).get("name", "?")
+                self._begin_activity(f"running tool {name}")
+                try:
+                    self._run_one_tool_call(call)
+                finally:
+                    self._end_activity()
         finally:
             self.console.stop_tool_call()
 
@@ -2361,8 +2499,37 @@ class AgentSession:
             return
 
         # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
+        background_action = (str(tool_params.get("action", "")).lower()
+                             if name == "background" else "")
+        background_kind = (str(tool_params.get("kind", background_mod.SHELL)).lower()
+                           if name == "background" else background_mod.SHELL)
+        background_shell = (name == "background"
+                            and background_action == "start"
+                            and background_kind == background_mod.SHELL)
+        background_subagent = (name == "background"
+                               and background_action == "start"
+                               and background_kind == background_mod.SUBAGENT)
+        if background_subagent and not self.enable_subagents:
+            self.console.note("Background sub-agent requested but sub-agents are disabled.", "error")
+            self._append_tool_result(call_id,
+                "Error: sub-agents are not enabled in this session.")
+            return
+        if background_shell and not shell_execution_enabled(self.args):
+            self.console.note("Background shell requested but shell execution is disabled.", "error")
+            self._append_tool_result(call_id,
+                "Error: shell execution is disabled in this session.")
+            return
+
         shell_cmd = None
         if name == "run_shell_command":
+            shell_cmd = str(tool_params.get("command", ""))
+            tier, reason = shell_safety_utils.classify_command(shell_cmd)
+            if shell_safety_utils.is_deny(tier):
+                self.console.note(f"Refusing to run dangerous command: {shell_cmd!r} ({reason})", "error")
+                self._append_tool_result(call_id,
+                    f"Command refused for safety reasons ({reason}): {shell_cmd!r}. Please choose a safer command.")
+                return
+        elif background_shell:
             shell_cmd = str(tool_params.get("command", ""))
             tier, reason = shell_safety_utils.classify_command(shell_cmd)
             if shell_safety_utils.is_deny(tier):
@@ -2405,6 +2572,17 @@ class AgentSession:
 
         self.console.tool_call_display(name, tool_params, result, transient=transient)
         self._append_tool_result(call_id, str(result))
+
+    def _run_background_subagent(self, name, task, max_steps, should_stop):
+        """Worker for a background sub-agent task (called from its thread)."""
+        subagent = self.subagents_registry.get(name)
+        if subagent is None:
+            return f"Error: unknown sub-agent {name!r}."
+        try:
+            return subagent.run(task, parent=self, max_steps=max_steps,
+                                should_stop=should_stop)
+        except Exception as e:  # noqa: BLE001 - reported as the task result
+            return f"Error: sub-agent {name!r} failed: {e}"
 
     def _run_subagent(self, name, tool_params):
         """Run a sub-agent for ``task`` and return the text to feed back."""
@@ -2492,6 +2670,7 @@ class AgentSession:
         the wrong note, and the state it would recap is the state that just
         failed.
         """
+        self.background_tasks.shutdown()
         self._persist()
         segments = history_segment_indices(self.session_dir)
         # List what is really on disk. The old message claimed
@@ -2644,18 +2823,24 @@ class AgentSession:
         # many messages the reported prompt_tokens describe.
         sent_message_count = len(self.messages)
         self.console.start_thinking()
-        response_text, tool_calls, usage, reasoning_content = utils.unpack_llm_result(
-            utils.call_openai_server(
-                self.messages,
-                max_tokens=self.args.max_tokens,
-                temperature=self.args.temperature,
-                model=self.model,
-                server_url=self.server_url,
-                tools=self.llm_tools,
-                api_key=self.api_key,
-                timeout=self.args.llm_timeout,
-            ))
-        self.console.stop_thinking()
+        self._begin_activity(
+            f"waiting for LLM response ({self.model or 'model'})")
+        try:
+            response_text, tool_calls, usage, reasoning_content = \
+                utils.unpack_llm_result(
+                    utils.call_openai_server(
+                        self.messages,
+                        max_tokens=self.args.max_tokens,
+                        temperature=self.args.temperature,
+                        model=self.model,
+                        server_url=self.server_url,
+                        tools=self.llm_tools,
+                        api_key=self.api_key,
+                        timeout=self.args.llm_timeout,
+                    ))
+        finally:
+            self.console.stop_thinking()
+            self._end_activity()
 
         # A failed LLM call returns (None, None, None, None): treat it as "nothing
         # happened this step" so the loop degrades gracefully (records a note

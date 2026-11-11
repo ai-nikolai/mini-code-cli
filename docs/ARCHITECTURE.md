@@ -32,6 +32,7 @@ suite.
 | `shell_safety_utils.py` | Heuristic classifier that sorts shell commands into DENY / ASK / ALLOW tiers. |
 | `plan.py` | Plan-mode bookkeeping: reads/writes `CURRENT_GOAL.md` and `CURRENT_PLAN.md`. Every method is a no-op when disabled. |
 | `planning.py` | The planning-strategy names (`plan-verify-step`, `plan-verify`, `open-plan`) shared by the CLI and the loop. |
+| `background.py` | Thread-safe background-task registry for shell commands and sub-agent tasks: process groups, log/output tails, wait/cancel, and the `background` tool schema. |
 | `compaction.py` | The compaction-strategy registry (`summarise`, `predict-files`, `predict-messages`), the index parser/selector used by `predict-messages`, and the char cap that stops a strategy refilling the context. |
 | `agent_files.py` | Agent-owned files under `--allowed-dir/.mini`: the optional scratch-pad (`SCRATCHPAD.md`) and the `open-plan` document (`PLAN.md`). Created best-effort; the normal file tools reach them through the sandbox. |
 | `ui.py` | The whole terminal renderer (banner, turns, notes, permission box, the "… thinking" spinner, transient/non-scrolling tool-call region, history views). Stdlib only; degrades gracefully to ASCII / no-colour. |
