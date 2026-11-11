@@ -63,7 +63,8 @@
         "swe-compaction-predict-messages",
         "swe-plan",
         "swe-plan-verify",
-        "swe-open-plan"
+        "swe-open-plan",
+        "swe-background"
       ],
       "models": [
         "ornith-35b-a3b"
