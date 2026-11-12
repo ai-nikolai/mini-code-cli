@@ -105,6 +105,7 @@
           "cancel-async-tasks"
         ],
         "sif_build_timeout_sec": 3600,
+        "override_memory_mb": 16384,
         "agent_timeout_sec": 3600,
         "test_timeout_sec": 3600,
         "harbor_bin": "~/miniconda3/envs/hb/bin/harbor",
