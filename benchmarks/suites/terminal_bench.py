@@ -370,6 +370,14 @@ class TerminalBenchSuite(Suite):
             argv += ["--env", str(env_backend)]
         for kwarg in options.get("environment_kwargs") or ():
             argv += ["--environment-kwarg", str(kwarg)]
+        # A task's own memory limit (often 2G) is meant for the *task*, but
+        # harbor enforces it on the whole container: the agent runtime and its
+        # Python/Node process count too, so a 2G task gets OOM-killed mid-run.
+        # Override it explicitly when configured (the launcher's 16G docker
+        # default is a sensible floor) without touching the task checksum.
+        if options.get("override_memory_mb"):
+            argv += ["--environment-kwarg",
+                     f"override_memory_mb={int(options['override_memory_mb'])}"]
         # A 2.1 task budgets 600 s for its environment, which is the image build
         # on Docker but the *start* on Apptainer (SIF extract + the agent runtime
         # going in). That is not enough on a network filesystem: the trial dies

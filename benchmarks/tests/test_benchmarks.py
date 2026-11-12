@@ -398,6 +398,18 @@ class TerminalBenchSuiteTests(unittest.TestCase):
         self.assertIn("{instruction}", template)
         self.assertIn("--sudo", template)
 
+    def test_harbor_can_raise_the_container_memory_limit(self):
+        trial = minimal_config(
+            suites=[{"name": "terminal-bench", "dataset": "terminal-bench",
+                     "version": "2.1", "limit": 1,
+                     "options": {"override_memory_mb": 16384}}],
+            agents=[{"name": "mini-code", "settings": ["swe"]}]).trials()[0]
+        argv = get_suite(trial.suite).commands(
+            trial, "/tmp/work", "/tmp/run", get_adapter(trial.agent))[0].argv
+        kwargs = [argv[i + 1] for i, item in enumerate(argv)
+                  if item == "--environment-kwarg"]
+        self.assertIn("override_memory_mb=16384", kwargs)
+
     def test_claude_code_harbor_selection_passes_no_retired_kwargs(self):
         adapter = get_adapter(AgentSpec(name="claude-code"))
         model = ModelSpec(name="c", model="m",
