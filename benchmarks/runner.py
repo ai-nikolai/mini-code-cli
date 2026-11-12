@@ -42,6 +42,7 @@ from . import docker as docker_module
 from . import forks as forks_module
 from . import metrics as metrics_module
 from . import runtime as runtime_module
+from . import vllm_metrics
 from .agents import get_adapter
 from .results import read_results, summarise, write_results, write_summary
 from .suites import get_suite
@@ -171,6 +172,7 @@ class Runner:
 
         outcomes_by_trial = {}
         failures_by_trial = {}
+        token_usage_by_trial = {}
         metric_rows = []
         for index, trial in enumerate(trials, 1):
             self.say(f"[{index}/{len(trials)}] {trial.run_id}")
@@ -180,7 +182,7 @@ class Runner:
                 # patch must not be captured again as if this agent produced it.
                 shutil.rmtree(trial_dir, ignore_errors=True)
             self._reuse_prepared_inputs(trial, trial_dir)
-            outcomes, failures = self._run_trial(trial, trial_dir)
+            outcomes, failures, token_usage = self._run_trial(trial, trial_dir)
             if not self.dry_run:
                 try:
                     metrics_module.enrich_outcomes(trial_dir, outcomes)
@@ -191,6 +193,7 @@ class Runner:
                                    for o in outcomes)
             outcomes_by_trial[trial.run_id] = outcomes
             failures_by_trial[trial.run_id] = failures
+            token_usage_by_trial[trial.run_id] = token_usage
             if not self.dry_run:
                 write_results(os.path.join(trial_dir, "results.jsonl"), outcomes)
 
@@ -199,7 +202,8 @@ class Runner:
             _trial_record(t, self._trial_status(
                               outcomes_by_trial, failures_by_trial, t),
                           failures_by_trial.get(t.run_id, []),
-                          git_sha_value=manifest["git_sha"])
+                          git_sha_value=manifest["git_sha"],
+                          token_usage=token_usage_by_trial.get(t.run_id))
             for t in trials]
         self._write_manifest(run_dir, manifest)
         if not self.dry_run:
@@ -287,7 +291,8 @@ class Runner:
             if stored and stored == identity:
                 self.say("   (already done; keeping recorded results)")
                 return (read_results(os.path.join(trial_dir, "results.jsonl")),
-                        recorded.get("failed_commands", []))
+                        recorded.get("failed_commands", []),
+                        recorded.get("token_usage"))
             why = ("no identity recorded" if not stored
                    else "for a different trial identity")
             self.say(f"   (DONE marker is {why}; rerunning)")
@@ -317,7 +322,7 @@ class Runner:
                 })
             self.say(f"   ! cannot expand this trial: {e}")
             return [], [{"label": f"expand trial: {e}", "status": "error",
-                         "log": None}]
+                         "log": None}], None
 
         _write_json(os.path.join(trial_dir, "trial.json"), {
             "run_id": trial.run_id,
@@ -331,6 +336,7 @@ class Runner:
             "commands": [_command_record(c) for c in commands],
         })
 
+        tokens_before = self._token_snapshot(trial)
         failures = []
         for number, command in enumerate(commands, 1):
             log_path = os.path.join(trial_dir, "logs",
@@ -349,6 +355,8 @@ class Runner:
                 failures.append({"label": command.label, "status": status,
                                  "log": os.path.relpath(log_path, trial_dir)})
 
+        token_usage = vllm_metrics.delta(tokens_before,
+                                         self._token_snapshot(trial))
         outcomes = []
         if not self.dry_run:
             try:
@@ -368,6 +376,7 @@ class Runner:
                     detail="a harness command hit its timeout")]
             record = _read_json(os.path.join(trial_dir, "trial.json"), {})
             record["failed_commands"] = failures
+            record["token_usage"] = token_usage
             # DONE means "a verdict exists": a failed command, an unparsed
             # report, or an empty outcome list must be retried, not skipped.
             completed = not failures and bool(outcomes)
@@ -383,7 +392,17 @@ class Runner:
                 self.say(
                     f"   ! trial left without DONE ({record['incomplete_reason']}); "
                     f"a later run will retry it")
-        return outcomes, failures
+        return outcomes, failures, token_usage
+
+    def _token_snapshot(self, trial):
+        """vLLM's cumulative counters, for local model servers only."""
+        base_url = str((trial.model.base_url or "")).strip()
+        if not base_url:
+            return None
+        host = base_url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        if host not in ("127.0.0.1", "localhost", "0.0.0.0"):
+            return None
+        return vllm_metrics.scrape(base_url)
 
     def _with_config_env(self, commands):
         """Merge the config's ``env`` block into every command's environment.
@@ -470,7 +489,8 @@ def _suite_dataset(suite_spec):
             "split": suite_spec.split}
 
 
-def _trial_record(trial, status, failures=None, git_sha_value=None):
+def _trial_record(trial, status, failures=None, git_sha_value=None,
+                  token_usage=None):
     return {
         "run_id": trial.run_id,
         "identity": trial.identity(git_sha_value),
@@ -483,6 +503,7 @@ def _trial_record(trial, status, failures=None, git_sha_value=None):
         "limit": trial.limit,
         "status": status,
         "failed_commands": [f["label"] for f in (failures or [])],
+        "token_usage": token_usage,
     }
 
 

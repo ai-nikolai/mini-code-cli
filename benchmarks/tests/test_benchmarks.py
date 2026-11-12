@@ -1254,3 +1254,68 @@ class HarnessTimeoutTest(unittest.TestCase):
         self.assertEqual(
             tb_module._harness_timeout(trial, options, trial.timeouts),
             12345)
+
+
+class VllmMetricsTest(unittest.TestCase):
+    """The server-side token counters that make agents comparable."""
+
+    class Response:
+        def __init__(self, text):
+            self.text = text
+
+        def read(self):
+            return self.text.encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def scrape(self, text):
+        from benchmarks import vllm_metrics
+        with unittest.mock.patch("urllib.request.urlopen",
+                                 return_value=self.Response(text)):
+            return vllm_metrics.scrape("http://127.0.0.1:31100")
+
+    def test_sums_counters_across_labels_and_ignores_histograms(self):
+        text = "\n".join([
+            '# HELP vllm:prompt_tokens_total',
+            'vllm:prompt_tokens_total{model_name="a"} 100.0',
+            'vllm:prompt_tokens_total{model_name="b"} 2.5e2',
+            'vllm:generation_tokens_total{model_name="a"} 40.0',
+            'vllm:request_success_total{finished_reason="stop"} 7.0',
+            'vllm:request_success_total{finished_reason="length"} 3.0',
+            'vllm:prompt_tokens_bucket{le="1"} 999.0',
+        ])
+        totals = self.scrape(text)
+        self.assertEqual(totals["prompt_tokens"], 350.0)
+        self.assertEqual(totals["generation_tokens"], 40.0)
+        self.assertEqual(totals["requests"], 10.0)
+
+    def test_delta_is_per_trial_and_clamped(self):
+        from benchmarks import vllm_metrics
+        before = {"prompt_tokens": 100.0, "generation_tokens": 10.0,
+                  "requests": 1.0}
+        after = {"prompt_tokens": 175.0, "generation_tokens": 28.0,
+                 "requests": 4.0}
+        self.assertEqual(vllm_metrics.delta(before, after), {
+            "prompt_tokens_delta": 75,
+            "generation_tokens_delta": 18,
+            "requests_delta": 3,
+        })
+        self.assertIsNone(vllm_metrics.delta(None, after))
+        self.assertEqual(
+            vllm_metrics.delta(after, before)["prompt_tokens_delta"], 0)
+
+    def test_v1_suffix_is_not_part_of_the_metrics_path(self):
+        from benchmarks import vllm_metrics
+        self.assertEqual(
+            vllm_metrics.metrics_url("http://127.0.0.1:31100/v1/"),
+            "http://127.0.0.1:31100/metrics")
+
+    def test_an_unreachable_server_is_not_an_error(self):
+        from benchmarks import vllm_metrics
+        with unittest.mock.patch("urllib.request.urlopen",
+                                 side_effect=OSError("refused")):
+            self.assertIsNone(vllm_metrics.scrape("http://127.0.0.1:1"))
