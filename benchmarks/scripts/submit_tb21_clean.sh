@@ -28,11 +28,11 @@ N_CONCURRENT="${N_CONCURRENT:-2}"
 WALLTIME="${WALLTIME:-72:00:00}"
 SBATCH_CPUS="${SBATCH_CPUS:-16}"
 SBATCH_MEM="${SBATCH_MEM:-128G}"
-# Node-local scratch. /tmp and /var/tmp are 1 GB on these nodes; NFS scratch
-# stalled the first campaign on folio I/O. /dev/shm is node-local and large.
-# The literal $SLURM_JOB_ID is expanded by the generated job, keeping each job's
-# overlay/tmp directories separate when two jobs share a node.
-SCRATCH_DIR="${SCRATCH_DIR:-/dev/shm/nr1713-\$SLURM_JOB_ID}"
+# SLURM scratch is private per job and exposed as $TMPDIR. Request 100 GB of
+# NVMe for Apptainer's unpack/overlay work; without --gres=scratch a job is
+# capped at 1 GB of local storage.
+SCRATCH_GRES="${SCRATCH_GRES:-100g}"
+SCRATCH_DIR="${SCRATCH_DIR:-\${TMPDIR:-/tmp}}"
 
 # Two settings per mini-code job keeps the number of GPU allocations (and the
 # fairshare cost) down while still finishing each pair inside 72h.
@@ -56,7 +56,7 @@ for cell in "${CELLS[@]}"; do
   WALLTIME="$WALLTIME" PARTITION=gpu \
   SBATCH_CPUS="$SBATCH_CPUS" SBATCH_MEM="$SBATCH_MEM" \
   TB_USE_STAGED=1 TB_STAGED=experiments/tb-staged \
-  SCRATCH_DIR="$SCRATCH_DIR" \
+  SCRATCH_GRES="$SCRATCH_GRES" SCRATCH_DIR="$SCRATCH_DIR" \
   VERSION="$name" RUN_PREFIX="$name" \
   SUBMIT="$SUBMIT" \
   benchmarks/scripts/submit_benchmark_slurm.sh
