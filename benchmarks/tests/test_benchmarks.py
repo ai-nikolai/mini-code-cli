@@ -410,6 +410,20 @@ class TerminalBenchSuiteTests(unittest.TestCase):
                   if item == "--environment-kwarg"]
         self.assertIn("override_memory_mb=16384", kwargs)
 
+    def test_harbor_passes_verifier_timeout_and_exclusions(self):
+        trial = minimal_config(
+            suites=[{"name": "terminal-bench", "dataset": "terminal-bench",
+                     "version": "2.1", "limit": 1,
+                     "options": {"verifier_timeout_multiplier": 2,
+                                 "exclude_tasks": ["qemu-startup"]}}],
+            agents=[{"name": "mini-code", "settings": ["swe"]}]).trials()[0]
+        argv = get_suite(trial.suite).commands(
+            trial, "/tmp/work", "/tmp/run", get_adapter(trial.agent))[0].argv
+        self.assertEqual(
+            argv[argv.index("--verifier-timeout-multiplier") + 1], "2.0")
+        self.assertEqual(
+            argv[argv.index("--exclude-task-name") + 1], "qemu-startup")
+
     def test_claude_code_harbor_selection_passes_no_retired_kwargs(self):
         adapter = get_adapter(AgentSpec(name="claude-code"))
         model = ModelSpec(name="c", model="m",
