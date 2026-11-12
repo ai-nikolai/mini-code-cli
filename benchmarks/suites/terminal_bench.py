@@ -397,6 +397,17 @@ class TerminalBenchSuite(Suite):
         if options.get("agent_timeout_multiplier"):
             argv += ["--agent-timeout-multiplier",
                      str(float(options["agent_timeout_multiplier"]))]
+        if options.get("verifier_timeout_multiplier"):
+            argv += ["--verifier-timeout-multiplier",
+                     str(float(options["verifier_timeout_multiplier"]))]
+        # Some task images (the qemu ones) are musl/Alpine and have no
+        # /.singularity.d/libs/fakeroot, so harbor's unconditional
+        # `exec --fakeroot` dies before the server starts. Excluding them is
+        # preferable to silently counting a runtime incompatibility as an agent
+        # failure; the list is configurable so a Docker-capable host can keep
+        # them.
+        for name in options.get("exclude_tasks") or ():
+            argv += ["--exclude-task-name", str(name)]
         if env_backend == "singularity" and not options.get("environment_kwargs"):
             cache = options.get("singularity_image_cache_dir") or _default_sif_cache()
             argv += ["--environment-kwarg",

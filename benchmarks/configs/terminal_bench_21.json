@@ -106,10 +106,12 @@
         ],
         "sif_build_timeout_sec": 3600,
         "override_memory_mb": 16384,
+        "exclude_tasks": ["qemu-startup", "qemu-alpine-ssh"],
+        "verifier_timeout_multiplier": 2,
         "agent_timeout_sec": 3600,
         "test_timeout_sec": 3600,
         "harbor_bin": "~/miniconda3/envs/hb/bin/harbor",
-        "environment_build_timeout_multiplier": 6,
+        "environment_build_timeout_multiplier": 12,
         "agent_setup_timeout_multiplier": 12,
         "agent_timeout_multiplier": 6
       }
