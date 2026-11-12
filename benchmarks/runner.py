@@ -392,7 +392,11 @@ class Runner:
                     detail="a harness command hit its timeout")]
             record = _read_json(os.path.join(trial_dir, "trial.json"), {})
             record["failed_commands"] = failures
-            record["token_usage"] = token_usage
+            # A partial retry only sees the counters for the tasks it reruns.
+            # Keep the totals from earlier completed segments so the reported
+            # vLLM usage stays cumulative rather than shrinking after a retry.
+            record["token_usage"] = _merge_token_usage(
+                record.get("token_usage"), token_usage)
             # DONE means "a verdict exists": a failed command, an unparsed
             # report, or an empty outcome list must be retried, not skipped.
             completed = not failures and bool(outcomes)
@@ -503,6 +507,17 @@ class Runner:
 def _suite_dataset(suite_spec):
     return {"dataset": suite_spec.dataset, "version": suite_spec.version,
             "split": suite_spec.split}
+
+
+def _merge_token_usage(previous, current):
+    """Add a retry's vLLM deltas to the earlier trial totals."""
+    if not current:
+        return previous
+    if not previous:
+        return current
+    keys = set(previous) | set(current)
+    return {key: int(previous.get(key, 0) or 0) + int(current.get(key, 0) or 0)
+            for key in keys}
 
 
 def _trial_record(trial, status, failures=None, git_sha_value=None,
