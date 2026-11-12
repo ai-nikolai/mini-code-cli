@@ -176,6 +176,22 @@ class Runner:
         metric_rows = []
         for index, trial in enumerate(trials, 1):
             self.say(f"[{index}/{len(trials)}] {trial.run_id}")
+            if not self.dry_run:
+                # The server is started once per Slurm job, but a trial (one
+                # setting) can take hours. If vLLM died between settings, the
+                # next trial would otherwise execute every task against a dead
+                # endpoint and record 0/0 as if the agent had tried. Check
+                # before each trial and record a harness failure instead.
+                try:
+                    self._check_endpoints([trial])
+                except SuiteError as e:
+                    self.say(f"   ! {e}")
+                    outcomes_by_trial[trial.run_id] = []
+                    failures_by_trial[trial.run_id] = [{
+                        "label": f"endpoint health: {e}",
+                        "status": "error", "log": None}]
+                    token_usage_by_trial[trial.run_id] = None
+                    continue
             trial_dir = os.path.join(run_dir, "trials", trial.run_id)
             if not self.resume and os.path.isdir(trial_dir):
                 # A non-resumed attempt starts clean: a previous workspace or
