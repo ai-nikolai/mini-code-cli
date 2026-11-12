@@ -146,6 +146,7 @@ def _row(trial, outcomes):
 
     tool_names = sorted({name for o in outcomes
                          for name in (outcome_metrics(o).get("tool_names") or [])})
+    usage = trial.get("token_usage") or {}
     return {
         "dataset": trial.get("dataset"),
         "suite": trial.get("suite"),
@@ -173,6 +174,11 @@ def _row(trial, outcomes):
         "mean_turns": mean_metric("turns"),
         "mean_cost_usd": mean_metric("cost_usd"),
         "tool_names": ";".join(tool_names),
+        # Agent-neutral totals scraped from vLLM's /metrics. The agent's own
+        # per-instance means above are useful, but several agents report none.
+        "vllm_prompt_tokens": usage.get("prompt_tokens_delta"),
+        "vllm_generation_tokens": usage.get("generation_tokens_delta"),
+        "vllm_requests": usage.get("requests_delta"),
     }
 
 
@@ -184,6 +190,7 @@ CSV_COLUMNS = (
     "rate", "mean_seconds", "dataset", "mean_prompt_tokens",
     "mean_completion_tokens", "mean_llm_calls", "mean_tool_calls",
     "mean_turns", "mean_cost_usd", "tool_names",
+    "vllm_prompt_tokens", "vllm_generation_tokens", "vllm_requests",
 )
 
 #: Where a CSV goes when the caller does not name one. Untracked (``.gitignore``):
@@ -225,7 +232,8 @@ def read_csv(path):
         for record in csv.DictReader(handle):
             row = dict(record)
             for key in ("n", "resolved", "unresolved", "errors", "timeouts",
-                        "command_errors"):
+                        "command_errors", "vllm_prompt_tokens",
+                        "vllm_generation_tokens", "vllm_requests"):
                 row[key] = _as_int(row.get(key))
             for key in ("rate", "mean_seconds"):
                 row[key] = _as_float(row.get(key))
