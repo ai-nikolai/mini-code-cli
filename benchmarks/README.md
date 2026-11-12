@@ -17,7 +17,7 @@ reader for the results (`python -m benchmarks.analyze`).
 | What | Why | Install |
 | --- | --- | --- |
 | Python ≥ 3.12 | the harness, `harbor`, and mini-code itself all run on one interpreter | — |
-| `harbor` (Python ≥ 3.12) | executes Terminal-Bench 2.x | `pip install -r benchmarks/requirements.txt` (our fork's branch) |
+| `harbor` (Python ≥ 3.12) | executes Terminal-Bench 2.x | `pip install -r benchmarks/requirements.txt` (our fork: `ai-nikolai/harbor`, branch `mini-code/apptainer`) |
 | `swebench` ≥ 5 | grades SWE-bench predictions | `pip install 'swebench>=5'` |
 | `datasets` | materialises the SWE-bench instance list | `pip install datasets` |
 | **a container runtime** | every task/instance runs in a container | Docker (with a daemon) **or** Apptainer (`apptainer`, formerly Singularity) |
@@ -30,6 +30,13 @@ The benchmark dependencies are deliberately *not* part of the CLI install:
 python -m pip install -r benchmarks/requirements.txt   # harbor, terminal-bench, swebench, vllm, litellm
 benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 tasks: data, not a package (§13.1)
 ```
+
+The fork's `mini-code/apptainer` branch carries the Apptainer/Singularity
+fixes this cluster needs: a wall-clock server-start window, no artificial
+600 s exec cap, a fallback for images without the fakeroot library, and
+root commands that are not wrapped in `su` (some task images have no usable
+setuid `su`). Install it from the local `external_repos/harbor` checkout when
+preparing a run.
 
 **One environment is enough.** `harbor` requires Python ≥ 3.12 and mini-code supports
 3.10+, so a single 3.12 environment holds the CLI, the harness and the dependencies:
