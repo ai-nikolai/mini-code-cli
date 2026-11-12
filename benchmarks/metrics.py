@@ -27,6 +27,12 @@ _GOODBYE_CALLS = re.compile(r"calls\s*:\s*(\d+)\s+LLM,\s*(\d+)\s+tool")
 _EXIT = re.compile(r"\[exit\s+\d+\s+in\s+([0-9.]+)s\]")
 _TOOL_NAME = re.compile(r"\n\s*tool\s*\n\s+([A-Za-z_][A-Za-z0-9_]*)\s*:")
 
+# Agent histories can be hundreds of MB (Claude Code's stream-json output).
+# Parsing the whole file is both unnecessary -- the final usage line is at the
+# end -- and pathologically slow (millions of json.loads calls). Read a bounded
+# tail instead.
+MAX_METRICS_LOG_BYTES = 5_000_000
+
 
 def _int(value):
     try:
@@ -193,7 +199,10 @@ def enrich_outcomes(trial_dir, outcomes):
         metrics = {}
         for path in _log_candidates(trial_dir, outcome.instance_id, suite):
             try:
+                size = os.path.getsize(path)
                 with open(path, encoding="utf-8", errors="replace") as handle:
+                    if size > MAX_METRICS_LOG_BYTES:
+                        handle.seek(size - MAX_METRICS_LOG_BYTES)
                     text = handle.read()
             except OSError:
                 continue

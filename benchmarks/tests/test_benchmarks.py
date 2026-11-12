@@ -1292,6 +1292,21 @@ class HarnessTimeoutTest(unittest.TestCase):
             12345)
 
 
+class MetricsLogBoundsTest(unittest.TestCase):
+    def test_large_agent_logs_are_read_from_the_tail(self):
+        from benchmarks import metrics
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "big.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("x" * (metrics.MAX_METRICS_LOG_BYTES + 1000))
+                handle.write("\ntokens: input=7 output=3 toolcalls=1 total=10\n")
+            outcome = TrialOutcome("terminal-bench", "task",
+                                   TrialOutcome.UNRESOLVED)
+            with unittest.mock.patch.object(metrics, "_log_candidates",
+                                            return_value=[path]):
+                metrics.enrich_outcomes(tmp, [outcome])
+            self.assertEqual(outcome.extra["metrics"]["prompt_tokens"], 7)
+
 class TokenUsageMergeTest(unittest.TestCase):
     def test_retry_deltas_are_added_to_earlier_totals(self):
         from benchmarks.runner import _merge_token_usage
