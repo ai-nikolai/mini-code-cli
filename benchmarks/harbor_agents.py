@@ -28,6 +28,7 @@ make the harness a hard dependency.
 import json
 import os
 import shlex
+from pathlib import Path
 
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
@@ -130,14 +131,42 @@ class CommandAgent(BaseInstalledAgent):
             f"{key}={shlex.quote(value)}" for key, value in self._env().items())
         command = f"env {assignments} {shlex.join(argv)}" if assignments \
             else shlex.join(argv)
-        await self.exec_as_agent(environment, command=command,
-                                 timeout_sec=self._exec_timeout_sec)
+        result = await self.exec_as_agent(environment, command=command,
+                                           timeout_sec=self._exec_timeout_sec)
+        self._write_agent_output(result)
         if hasattr(context, "metadata") and isinstance(context.metadata, dict):
             context.metadata.setdefault("agent", self._agent_name)
             if self._model:
                 context.metadata.setdefault("model", str(self._model))
 
     # -- helpers ---------------------------------------------------------
+
+    def _write_agent_output(self, result):
+        """Persist the agent's stdout for the metrics parser.
+
+        mini-code prints its per-turn ``tokens: input=...`` line and a final
+        goodbye summary, but harbor only keeps the trial log; without this file
+        the per-task token/turn columns are empty for the command bridge. Keep
+        the tail (the last usage line is the authoritative total) so a long
+        reasoning transcript cannot fill the results tree.
+        """
+        if result is None:
+            return
+        text = "".join(str(part or "") for part in (
+            getattr(result, "stdout", ""), getattr(result, "stderr", "")))
+        if not text:
+            return
+        logs_dir = getattr(self, "logs_dir", None)
+        if logs_dir is None:
+            return
+        try:
+            logs_dir = Path(logs_dir)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (logs_dir / "mini-code-output.txt").write_text(
+                text[-2_000_000:], encoding="utf-8")
+        except OSError:
+            # Metrics are best effort; a read-only log dir must not fail a trial.
+            pass
 
     def _env(self):
         env = {str(key): _resolve(str(value))

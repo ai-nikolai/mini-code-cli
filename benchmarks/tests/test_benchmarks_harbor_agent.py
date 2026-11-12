@@ -122,6 +122,22 @@ class HarborCommandAgentTests(unittest.TestCase):
         command, _ = self.run_agent(agent, "go")
         self.assertEqual(shlex.split(command), ["claude", "-p", "go"])
 
+    def test_agent_output_is_persisted_for_usage_parsing(self):
+        import tempfile
+        from pathlib import Path
+
+        class Result:
+            stdout = ("assistant text\n"
+                      "tokens: input=123 output=45 toolcalls=2 total=168 | 3 LLM calls\n")
+            stderr = ""
+
+        agent = self.build()
+        agent.logs_dir = Path(tempfile.mkdtemp())
+        agent._write_agent_output(Result())
+
+        text = (agent.logs_dir / "mini-code-output.txt").read_text()
+        self.assertIn("tokens: input=123 output=45", text)
+
     def test_template_without_placeholder_is_rejected(self):
         with self.assertRaises(ValueError) as caught:
             self.module.CommandAgent(argv_template=["true"])
