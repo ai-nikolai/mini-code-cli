@@ -97,13 +97,16 @@ def aggregate(rows):
                 "run_id": row.get("run_id"),
                 "n": 0, "resolved": 0, "unresolved": 0, "errors": 0,
                 "timeouts": 0, "command_errors": 0,
+                "vllm_prompt_tokens": 0, "vllm_generation_tokens": 0,
+                "vllm_requests": 0,
                 "_duration_total": 0.0, "_duration_n": 0, "_runs": 0,
             }
             order.append(key)
         cell = merged[key]
         cell["_runs"] += 1
         for field in ("n", "resolved", "unresolved", "errors", "timeouts",
-                      "command_errors"):
+                      "command_errors", "vllm_prompt_tokens",
+                      "vllm_generation_tokens", "vllm_requests"):
             cell[field] += int(row.get(field) or 0)
         mean = row.get("mean_seconds")
         count = int(row.get("n") or 0)
@@ -142,6 +145,11 @@ def totals(rows):
         "errors": sum(int(r.get("errors") or 0) for r in rows),
         "timeouts": sum(int(r.get("timeouts") or 0) for r in rows),
         "command_errors": sum(int(r.get("command_errors") or 0) for r in rows),
+        "vllm_prompt_tokens": sum(int(r.get("vllm_prompt_tokens") or 0)
+                                  for r in rows),
+        "vllm_generation_tokens": sum(int(r.get("vllm_generation_tokens") or 0)
+                                      for r in rows),
+        "vllm_requests": sum(int(r.get("vllm_requests") or 0) for r in rows),
         "rate": round(resolved / n, 4) if n else None,
         "mean_seconds": round(duration_total / duration_n, 2)
         if duration_n else None,
@@ -153,7 +161,7 @@ def totals(rows):
 # ---------------------------------------------------------------------------
 
 HEADER = ("suite", "agent", "setting", "model", "n", "ok", "rate", "err",
-          "to", "cmdfail", "mean s")
+          "to", "cmdfail", "mean s", "tok in", "tok out", "req")
 
 
 def _cells(row):
@@ -164,7 +172,10 @@ def _cells(row):
             str(row.get("setting") or ""), str(row.get("model") or ""),
             str(row.get("n", 0)), str(row.get("resolved", 0)), rate,
             str(row.get("errors", 0)), str(row.get("timeouts", 0)),
-            str(row.get("command_errors", 0)), mean)
+            str(row.get("command_errors", 0)), mean,
+            f"{int(row.get('vllm_prompt_tokens') or 0):,}",
+            f"{int(row.get('vllm_generation_tokens') or 0):,}",
+            f"{int(row.get('vllm_requests') or 0):,}")
 
 
 def render_table(rows, include_total=True):

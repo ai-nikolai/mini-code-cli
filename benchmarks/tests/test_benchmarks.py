@@ -1111,6 +1111,28 @@ class ReportingKeyTests(unittest.TestCase):
         total = totals(aggregate(rows))
         self.assertEqual(total["mean_seconds"], 10.0)
 
+    def test_analyze_sums_vllm_token_counters(self):
+        from benchmarks.analyze import aggregate, totals
+
+        rows = [
+            {"dataset": "d", "suite": "s", "agent": "a", "setting": "x",
+             "model": "m", "n": 2, "resolved": 1, "unresolved": 1,
+             "errors": 0, "timeouts": 0, "command_errors": 0,
+             "vllm_prompt_tokens": 100, "vllm_generation_tokens": 10,
+             "vllm_requests": 3},
+            {"dataset": "d", "suite": "s", "agent": "a", "setting": "x",
+             "model": "m", "n": 3, "resolved": 2, "unresolved": 1,
+             "errors": 0, "timeouts": 0, "command_errors": 0,
+             "vllm_prompt_tokens": 50, "vllm_generation_tokens": 5,
+             "vllm_requests": 2},
+        ]
+        merged = aggregate(rows)
+        self.assertEqual(merged[0]["vllm_prompt_tokens"], 150)
+        self.assertEqual(merged[0]["vllm_generation_tokens"], 15)
+        self.assertEqual(merged[0]["vllm_requests"], 5)
+        total = totals(merged)
+        self.assertEqual(total["vllm_prompt_tokens"], 150)
+
     def test_summary_csv_has_errors_and_timeouts_columns(self):
         from benchmarks.summary import SUMMARY_COLUMNS, row_for
 
