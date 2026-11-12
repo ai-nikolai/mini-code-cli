@@ -1292,6 +1292,22 @@ class HarnessTimeoutTest(unittest.TestCase):
             12345)
 
 
+class TokenUsageMergeTest(unittest.TestCase):
+    def test_retry_deltas_are_added_to_earlier_totals(self):
+        from benchmarks.runner import _merge_token_usage
+        previous = {"prompt_tokens_delta": 100, "generation_tokens_delta": 10,
+                    "requests_delta": 2}
+        current = {"prompt_tokens_delta": 50, "generation_tokens_delta": 5,
+                   "requests_delta": 1}
+        self.assertEqual(_merge_token_usage(previous, current), {
+            "prompt_tokens_delta": 150,
+            "generation_tokens_delta": 15,
+            "requests_delta": 3,
+        })
+        self.assertIs(_merge_token_usage(previous, None), previous)
+        self.assertIs(_merge_token_usage(None, current), current)
+
+
 class VllmMetricsTest(unittest.TestCase):
     """The server-side token counters that make agents comparable."""
 
