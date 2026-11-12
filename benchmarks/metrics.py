@@ -197,21 +197,27 @@ def enrich_outcomes(trial_dir, outcomes):
     for outcome in outcomes:
         suite = getattr(outcome, "suite", "")
         metrics = {}
-        for path in _log_candidates(trial_dir, outcome.instance_id, suite):
-            try:
-                size = os.path.getsize(path)
-                with open(path, encoding="utf-8", errors="replace") as handle:
-                    if size > MAX_METRICS_LOG_BYTES:
-                        handle.seek(size - MAX_METRICS_LOG_BYTES)
-                    text = handle.read()
-            except OSError:
-                continue
-            metrics.update(parse_text(text))
         if suite == "terminal-bench":
             for result_path in glob.glob(os.path.join(
                     trial_dir, "harbor", "*", f"{outcome.instance_id}*",
                     "result.json")):
                 metrics.update(_harbor_trial_metrics(result_path))
+        # A harness agent (Pi/Claude) already reports token usage in
+        # result.json. Only fall back to the agent logs when it does not;
+        # Claude's stream-json log can be >100 MB per task.
+        has_tokens = (metrics.get("prompt_tokens") is not None
+                      and metrics.get("completion_tokens") is not None)
+        if not has_tokens:
+            for path in _log_candidates(trial_dir, outcome.instance_id, suite):
+                try:
+                    size = os.path.getsize(path)
+                    with open(path, encoding="utf-8", errors="replace") as handle:
+                        if size > MAX_METRICS_LOG_BYTES:
+                            handle.seek(size - MAX_METRICS_LOG_BYTES)
+                        text = handle.read()
+                except OSError:
+                    continue
+                metrics.update(parse_text(text))
         if metrics.get("duration_seconds") is not None:
             outcome.duration_seconds = metrics["duration_seconds"]
         if metrics:
