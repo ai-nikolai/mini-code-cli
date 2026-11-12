@@ -27,7 +27,7 @@ VERSION_PREFIX="${VERSION_PREFIX:-tb21-clean1}"
 N_CONCURRENT="${N_CONCURRENT:-2}"
 WALLTIME="${WALLTIME:-72:00:00}"
 SBATCH_CPUS="${SBATCH_CPUS:-16}"
-SBATCH_MEM="${SBATCH_MEM:-128G}"
+SBATCH_MEM="${SBATCH_MEM:-256G}"
 # SLURM scratch is private per job and exposed as $TMPDIR. Request 100 GB of
 # NVMe for Apptainer's unpack/overlay work; without --gres=scratch a job is
 # capped at 1 GB of local storage.
