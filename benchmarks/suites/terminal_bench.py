@@ -408,6 +408,10 @@ class TerminalBenchSuite(Suite):
         # them.
         for name in options.get("exclude_tasks") or ():
             argv += ["--exclude-task-name", str(name)]
+        # An include list lets a retry target only the failed tasks without
+        # changing the staged dataset or the task checksums.
+        for name in options.get("include_tasks") or ():
+            argv += ["--include-task-name", str(name)]
         if env_backend == "singularity" and not options.get("environment_kwargs"):
             cache = options.get("singularity_image_cache_dir") or _default_sif_cache()
             argv += ["--environment-kwarg",

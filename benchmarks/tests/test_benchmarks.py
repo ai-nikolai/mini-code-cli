@@ -424,6 +424,17 @@ class TerminalBenchSuiteTests(unittest.TestCase):
         self.assertEqual(
             argv[argv.index("--exclude-task-name") + 1], "qemu-startup")
 
+    def test_harbor_can_include_only_selected_tasks(self):
+        trial = minimal_config(
+            suites=[{"name": "terminal-bench", "dataset": "terminal-bench",
+                     "version": "2.1", "limit": 1,
+                     "options": {"include_tasks": ["mailman"]}}],
+            agents=[{"name": "mini-code", "settings": ["swe"]}]).trials()[0]
+        argv = get_suite(trial.suite).commands(
+            trial, "/tmp/work", "/tmp/run", get_adapter(trial.agent))[0].argv
+        self.assertEqual(
+            argv[argv.index("--include-task-name") + 1], "mailman")
+
     def test_claude_code_harbor_selection_passes_no_retired_kwargs(self):
         adapter = get_adapter(AgentSpec(name="claude-code"))
         model = ModelSpec(name="c", model="m",
