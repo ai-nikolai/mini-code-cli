@@ -1291,6 +1291,11 @@ class AgentSession:
             "history_file": history_index,
             "index": max(len(messages) - 1, 0),
         })
+        # The context bar lives in the header, which is otherwise set once at
+        # startup. Refresh it after each recorded turn so it tracks the
+        # transcript instead of freezing at the initial value.
+        if self.tui_active:
+            self.console.set_summary(self._tui_header_lines())
 
     def _show_history(self):
         """Print the high-level recorder as a numbered list of turns."""
