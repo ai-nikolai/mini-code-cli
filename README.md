@@ -11,6 +11,8 @@
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)](LICENSE)
 [![Cite](https://img.shields.io/badge/cite-BibTeX-blueviolet?style=flat-square&logo=latex&logoColor=white)](#citation)
 
+![mini-code in a terminal](https://raw.githubusercontent.com/ai-nikolai/mini-code-cli/9337471d2848cfc59cc1ddd256239efd389cf3c4/docs/assets/mini-code-demo.gif)
+
 **Purpose:** a no-bloat, minimal coding CLI to enjoy experimenting and researching!
 
 **Install** · [Quick start](#quick-start) · [Modes &amp; safety](#modes--safety) · [Options](#command-line-options) · [Tools](#available-tools) · [Sub-agents](#sub-agents) · [In-session commands](#in-session-commands) · [Development](#development) · [Docs](#documentation) · [Citation](#citation)

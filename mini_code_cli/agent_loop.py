@@ -1530,20 +1530,25 @@ class AgentSession:
             permission = "auto"
         shell = "on" if shell_execution_enabled(self.args) else "off"
         planning = self.plan_strategy if self.plan_mode else "off"
-        session_line = f"version {version}   session {self.unique_id}"
+        sep = f" {self.console.glyph('v')} "
+        session_line = sep.join((
+            f"version: {version}",
+            f"session: {self.unique_id}",
+        ))
         if self.restored_session:
-            session_line += "   [restored]"
+            session_line += f"{sep}[restored]"
         lines = [
             session_line,
-            f"model   {oneline(self.model or '(auto)', 56)}",
-            f"server  {oneline(self.server_url, 56)}",
-            f"dir     {oneline(self.allowed_dir, 56)}",
-            f"perm    {permission}   shell {shell}",
-            f"compact {self.compaction_strategy}   planning {planning}",
+            f"model: {oneline(self.model or '(auto)', 56)}",
+            f"server: {oneline(self.server_url, 56)}",
+            f"dir: {oneline(self.allowed_dir, 56)}",
+            sep.join((f"permissions: {permission}", f"shell: {shell}")),
+            sep.join((f"compaction: {self.compaction_strategy}",
+                      f"planning: {planning}")),
         ]
         badge = self._context_badge()
         if badge:
-            lines.append(f"context {badge}")
+            lines.append(f"context: {badge}")
         return lines
 
     def _tui_history_turns(self):
