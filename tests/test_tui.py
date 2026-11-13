@@ -1034,6 +1034,25 @@ class TuiClearTest(unittest.TestCase):
             self.assertEqual(console._last_assistant, "")
 
 
+class TuiDashboardLayoutTest(unittest.TestCase):
+    def test_settings_have_labels_and_vertical_separators(self):
+        with tempfile.TemporaryDirectory() as work, \
+                tempfile.TemporaryDirectory() as cache:
+            console = tui.TuiConsole(stream=_FakeTty(), color=False,
+                                     unicode=False)
+            args = make_args(work, cache)
+            args.tui = True
+            session = AgentSession(args, console=console)
+            header = "\n".join(session._tui_header_lines())
+
+        for label in ("version:", "session:", "permissions:", "shell:",
+                      "compaction:", "planning:"):
+            self.assertIn(label, header)
+        # ASCII console: the unicode vertical bar falls back to |.
+        self.assertIn(" | ", header)
+        self.assertNotIn("compact summarise", header)
+
+
 class TuiInfoAndColorTest(unittest.TestCase):
     def test_an_untitled_rule_does_not_clear_command_output(self):
         console = tui.TuiConsole(stream=_FakeTty(), color=False, unicode=False)

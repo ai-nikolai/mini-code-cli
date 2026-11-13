@@ -651,7 +651,7 @@ class TuiConsole(Console):
         # The fixed view replaces the scrolling welcome banner, so show the
         # same mark at the top of the dashboard when the terminal is big
         # enough. On a short/narrow terminal the information lines win.
-        if (rows >= 20 and cols >= max(len(line) for line in LOGO) + 4):
+        if (rows >= 24 and cols >= max(len(line) for line in LOGO) + 4):
             summary = [self.style(line, fg="cyan", bold=True)
                        for line in LOGO] + summary
         if self._info_provider is not None:
@@ -661,7 +661,15 @@ class TuiConsole(Console):
                 info = ""
             if info:
                 summary.append(self.style(info, dim=True))
-        header = self._box("Mini-Code", summary[:max(rows // 3, 3)], cols,
+        # The dashboard is not only decoration: keep enough lines for the
+        # workload settings and the live usage line. The old rows//3 cap
+        # truncated them after the logo was added.
+        max_summary = max(rows // 3, 3)
+        if rows >= 24:
+            max_summary = max(max_summary, 12)
+        elif rows >= 20:
+            max_summary = max(max_summary, 8)
+        header = self._box("Mini-Code", summary[:max_summary], cols,
                            fg="cyan")
 
         input_lines = self._input_lines()
