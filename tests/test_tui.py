@@ -1053,6 +1053,41 @@ class TuiDashboardLayoutTest(unittest.TestCase):
         self.assertNotIn("compact summarise", header)
 
 
+class TuiHeaderRefreshTest(unittest.TestCase):
+    def test_context_bar_updates_after_a_recorded_turn(self):
+        with tempfile.TemporaryDirectory() as work, \
+                tempfile.TemporaryDirectory() as cache:
+            console = tui.TuiConsole(stream=_FakeTty(), color=False,
+                                     unicode=False)
+            args = make_args(work, cache)
+            args.tui = True
+            session = AgentSession(args, console=console)
+            session.start_new_session()
+            with mock.patch.object(
+                    tui.shutil, "get_terminal_size",
+                    return_value=os.terminal_size((80, 24))), \
+                    mock.patch.object(tui.TuiConsole,
+                                      "start_scroll_listener"):
+                console.start_tui()
+                console.set_summary(session._tui_header_lines())
+                before = "\n".join(console._summary_lines)
+
+                session.messages.append(
+                    {"role": "user", "content": "x" * 20_000})
+                session._record_turn("user", session.messages)
+                after = "\n".join(console._summary_lines)
+                console.stop_tui()
+
+        self.assertIn("context:", before)
+        self.assertIn("context:", after)
+        self.assertNotEqual(
+            next(line for line in before.splitlines()
+                 if line.startswith("context:")),
+            next(line for line in after.splitlines()
+                 if line.startswith("context:")),
+        )
+
+
 class TuiInfoAndColorTest(unittest.TestCase):
     def test_an_untitled_rule_does_not_clear_command_output(self):
         console = tui.TuiConsole(stream=_FakeTty(), color=False, unicode=False)
