@@ -20,7 +20,7 @@
 > `localhost:30000`, or `MINI_CODE_API_KEY` + `--url`), and run `mini-code`. Everything else
 > is optional.
 
-![mini-code in a terminal](https://raw.githubusercontent.com/ai-nikolai/mini-code-cli/main/docs/assets/mini-code-demo.png)
+![mini-code in a terminal](https://raw.githubusercontent.com/ai-nikolai/mini-code-cli/main/docs/assets/mini-code-demo.gif)
 
 ## Install
 

@@ -199,22 +199,22 @@ def _svg(text: str) -> str:
     return "\n".join(parts) + "\n"
 
 
-def _png(text: str) -> bool:
-    """Render the same capture as a PNG, when Pillow is available."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        return False
+def render_image(text: str, min_lines: int = 0, min_cols: int = 0):
+    """Render a captured console string to a Pillow image (optional dep)."""
+    from PIL import Image, ImageDraw, ImageFont
 
     lines = text.rstrip("\n").split("\n")
+    line_count = max(len(lines), min_lines)
     font = ImageFont.truetype(FONT, 14)
     bold = ImageFont.truetype(FONT_BOLD, 14)
     title_font = ImageFont.truetype(FONT, 12)
     pad_x, header, line_h = 26, 34, 20
     body_w = max((font.getlength(ui._ANSI_RE.sub("", line))
                   for line in lines), default=1)
+    if min_cols:
+        body_w = max(body_w, font.getlength("M") * min_cols)
     width = int(body_w + pad_x * 2)
-    height = int(header + len(lines) * line_h + 18)
+    height = int(header + line_count * line_h + 18)
 
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -249,11 +249,18 @@ def _png(text: str) -> bool:
             draw.text((x, y), run, font=use, fill=fill)
             x += font.getlength(run)
         y += line_h
-    OUT_PNG = ROOT / "docs" / "assets" / "mini-code-demo.png"
+    return image
+
+
+def _png(text: str) -> bool:
+    """Render the same capture as a PNG, when Pillow is available."""
+    try:
+        image = render_image(text)
+    except ImportError:
+        return False
     image.save(OUT_PNG)
     print(f"wrote {OUT_PNG.relative_to(ROOT)}")
     return True
-
 
 def main() -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
