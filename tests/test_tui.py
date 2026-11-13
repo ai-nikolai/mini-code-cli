@@ -354,6 +354,19 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertIn("abc", output)
         self.assertIn("Enter send", output)
 
+    def test_dashboard_shows_the_ascii_mark(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((80, 24))):
+            console.start_tui()
+            console.set_summary(["version 1.0", "model test"])
+            console.render()
+            content = "\n".join(console._last_frame_lines)
+            console.stop_tui()
+        self.assertIn("__  __", content)
+        self.assertIn("version 1.0", content)
+
     def test_the_middle_pane_scrolls(self):
         console = self.console()
         with mock.patch.object(

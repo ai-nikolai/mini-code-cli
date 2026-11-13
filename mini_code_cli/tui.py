@@ -16,7 +16,7 @@ import textwrap
 import threading
 from collections import deque
 
-from .ui import (Console, _ANSI_RE, _pad_visual, _read_escape_sequence,
+from .ui import (Console, LOGO, _ANSI_RE, _pad_visual, _read_escape_sequence,
                  _visual_len)
 
 
@@ -648,6 +648,12 @@ class TuiConsole(Console):
         cols, rows = self._size()
         summary = [str(line) for line in (self._summary_lines
                                           or ["Mini-Code"])]
+        # The fixed view replaces the scrolling welcome banner, so show the
+        # same mark at the top of the dashboard when the terminal is big
+        # enough. On a short/narrow terminal the information lines win.
+        if (rows >= 20 and cols >= max(len(line) for line in LOGO) + 4):
+            summary = [self.style(line, fg="cyan", bold=True)
+                       for line in LOGO] + summary
         if self._info_provider is not None:
             try:
                 info = self._info_provider()
