@@ -55,10 +55,8 @@ def screen(chars=None, phase="done"):
 
     console.rule(title="turn 1", char="═", fg="cyan")
     console.turn("You", PROMPT, accent="cyan")
-    if phase in ("thinking", "assistant", "tools", "done"):
-        dots = {"thinking": ".", "assistant": "..", "tools": "...",
-                "done": ""}.get(phase, "")
-        console.emit(console.style(f"… Thinking{dots}", dim=True, fg="cyan"))
+    if phase == "thinking":
+        console.emit(console.style("… Thinking", dim=True, fg="cyan"))
     if phase in ("assistant", "tools", "done"):
         console.turn("Assistant", ASSISTANT, accent="green")
     if phase in ("tools", "done"):
