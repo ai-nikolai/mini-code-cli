@@ -472,6 +472,42 @@ class ToolGatingTest(unittest.TestCase):
 # scenario 6 -- history compaction
 # ---------------------------------------------------------------------------
 
+class TruncatedReplyNudgeTest(unittest.TestCase):
+    """The "continue" nudge must be a string, not a one-item tuple.
+
+    A ``finish_reason == "length"`` reply with no text/tool call is followed by a
+    user message asking the model to continue. A stray trailing comma once made
+    that ``content`` a tuple, which JSON-encodes as an array; vLLM rejects the
+    next request with HTTP 400 (``ChatCompletionContentPartTextParam``), ending
+    the trial with an empty patch.
+    """
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp()
+        self.cache_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.cache_dir, ignore_errors=True)
+
+    def test_the_continue_nudge_is_a_plain_string(self):
+        args = make_args(self.workdir, self.cache_dir)
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+        session.messages.append({"role": "user", "content": "do the thing"})
+
+        length_usage = dict(USAGE, finish_reason="length")
+        stub = StubLLM([("", [], length_usage)])
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            should_continue = session._step()
+
+        self.assertTrue(should_continue)
+        nudge = session.messages[-1]
+        self.assertEqual(nudge["role"], "user")
+        self.assertIsInstance(nudge["content"], str)
+        self.assertIn("output-token limit", nudge["content"])
+        # What the server actually sees: a JSON string, never an array.
+        self.assertTrue(json.dumps(nudge["content"]).startswith('"'))
+
+
 class CompactionTest(unittest.TestCase):
     """The module-level compaction helper that keeps the context window bounded."""
 

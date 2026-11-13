@@ -4,7 +4,7 @@ on: [push, pull_request]
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -14,9 +14,9 @@ jobs:
         # the regex fallbacks in ``__init__`` and ``scripts/push_version_tag.py``.
         python-version: ["3.10", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -26,18 +26,28 @@ jobs:
       - name: Lint
         run: python scripts/lint.py
 
-      - name: Test
+      - name: Test the CLI
         run: python -m unittest discover -s tests -p "test_*.py"
+
+      # The benchmark harness is a separate, dependency-free package: its tests
+      # need neither a dataset nor a container, so CI runs them like the CLI's.
+      - name: Test the benchmark harness
+        run: python -m unittest discover -s benchmarks/tests -t . -p "test_*.py"
+
+      # The renamed entry point is the command the docs promise; --help proves it
+      # imports (and therefore that nothing it needs was left behind in the move).
+      - name: Smoke-test the benchmark entry point
+        run: python benchmarks/run_benchmarks.py --help
 
   packaging:
     # Build the distributions on every push so a packaging break (a module left
     # out of the wheel, broken metadata, a missing asset) shows up here rather
     # than in the release workflow, i.e. after the tag already exists.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 

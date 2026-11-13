@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Pi provider definition for the local H200 endpoint.",
+    "Copy to ~/.pi/agent/models.json (see pi.dev docs: models.md) or point",
+    "PI_CODING_AGENT_DIR at a directory containing it. `apiKey` may interpolate",
+    "the environment ($NAME / ${NAME}), and a dummy value is fine for vLLM.",
+    "",
+    "The `local` provider name is what `--provider local --model <id>` selects in",
+    "benchmarks/agents/pi.py; set options.provider to change it.",
+    "'api': 'openai-completions' is the OpenAI-compatible Chat Completions surface",
+    "that vLLM/SGLang/Ollama/LM Studio expose."
+  ],
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "local": {
+      "baseUrl": "$PI_BENCH_BASE_URL/v1",
+      "api": "openai-completions",
+      "apiKey": "sk-no-key-required",
+      "models": [
+        {
+          "id": "ornith-ai/Ornith-1.5-35B-A3B",
+          "name": "Ornith 1.5 35B A3B (H200)",
+          "input": ["text"],
+          "contextWindow": 131072
+        }
+      ]
+    }
+  }
+}

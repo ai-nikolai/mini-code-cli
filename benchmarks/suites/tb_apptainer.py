@@ -1,0 +1,395 @@
+"""Prepare Terminal-Bench tasks for Apptainer: one derived ``.sif`` per task.
+
+Harbor's Apptainer backend (``harbor run --env singularity``) can run a task whose
+``task.toml`` points at an image, but Terminal-Bench images are *bare*: they have
+no ``/usr/bin/python3`` and no writable ``/opt``, while harbor's backend needs a
+Python RPC server inside the container (``/opt/harbor-server`` with
+uvicorn/fastapi). Converting the published image as-is fails at
+``FATAL: cannot install /usr/bin/python3``.
+
+So each task image is converted **once**, into a derived SIF that already carries
+harbor's prerequisites:
+
+    Bootstrap: docker
+    From: alexgshaw/<task>:20251031          # the image task.toml names
+    %post                                    # python3 + venv + harbor server
+    %environment                             # PYTHONPATH for mini-code
+
+The task directory is then copied with ``docker_image`` rewritten to the SIF path,
+and harbor runs the *local dataset* (``-p``) instead of pulling the registry copy.
+Nothing in harbor or Terminal-Bench is modified: this is a preparation step, and
+``plan``/``validate`` report it like any other.
+
+Two Apptainer details are load-bearing and encoded here:
+
+* the SIF cache must live on a filesystem with room for GB-sized images (``/tmp``
+  is routinely a few GB);
+* harbor's default ``singularity_no_mount=home,tmp,bind-paths`` suppresses the
+  ``/etc/resolv.conf`` bind, so the container loses DNS — the suite passes
+  ``singularity_no_mount=home,tmp`` instead (see ``terminal_bench.py``).
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+#: Where the derived images go when a run does not name a cache.
+DEFAULT_SIF_CACHE = os.path.join("benchmarks", ".cache", "sif")
+
+_DOCKER_IMAGE_RE = re.compile(r'^\s*docker_image\s*=\s*["\']([^"\']+)["\']',
+                              re.MULTILINE)
+
+#: Packages harbor's backend shells out to, plus what a coding agent typically
+#: needs. One apt call, because each `apt-get update` in a fresh layer is slow.
+POST_INSTALL = (
+    "python3", "python3-venv", "python3-pip", "curl", "ca-certificates", "git",
+    "tmux", "asciinema", "procps",
+)
+
+#: Python packages the baked-in agent needs at runtime. mini-code is not
+#: dependency-free after all: it imports ``requests`` for its HTTP client.
+PIP_FOR_AGENT = ("requests",)
+
+
+def render_def(image, mini_code_dir=None):
+    """The Apptainer definition that turns a task image into a runnable SIF."""
+    lines = [f"Bootstrap: docker", f"From: {image}", ""]
+    if mini_code_dir:
+        # The bridge starts `python3 -m mini_code_cli` inside the container; the
+        # package is dependency-free, so copying the directory is enough.
+        lines += ["%files",
+                  f"    {mini_code_dir} /opt/mini-code/mini_code_cli", ""]
+    lines += [
+        "%post",
+        "    export DEBIAN_FRONTEND=noninteractive",
+        "    if command -v apt-get >/dev/null 2>&1; then",
+        # APT::Sandbox::User=root matters under --fakeroot: apt otherwise drops
+        # to the _apt user, which fakeroot cannot switch to, and the build hangs
+        # on the first `apt-get update` (observed: a 35-minute stall).
+        # ForceIPv4: the CPU nodes resolve archive.ubuntu.com to IPv6 first, the
+        # route is unavailable, and apt then cannot install python3 at all.
+        "        APT_OPTS='-o APT::Sandbox::User=root -o Acquire::ForceIPv4=true "
+        "-o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "
+        "-o Acquire::Retries=3'",
+        "        apt-get $APT_OPTS update -qq || true",
+        f"        apt-get $APT_OPTS install -y -qq {' '.join(POST_INSTALL)} || {{",
+        "            # Old Debian releases (bullseye/buster) were moved to the",
+        "            # archive; the live mirror 404s every pinned package.",
+        "            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do",
+        "                [ -f \"$f\" ] || continue",
+        "                sed -i 's|deb.debian.org/debian-security|archive.debian.org/debian-security|g; s|deb.debian.org/debian|archive.debian.org/debian|g' \"$f\"",
+        "            done",
+        "            APT_OPTS=\"$APT_OPTS -o Acquire::Check-Valid-Until=false\"",
+        "            apt-get $APT_OPTS update -qq || true",
+        f"            apt-get $APT_OPTS install -y -qq {' '.join(POST_INSTALL)} || true",
+        "        }",
+        "    elif command -v apk >/dev/null 2>&1; then",
+        "        apk add --no-cache python3 py3-pip py3-virtualenv bash curl git tmux || true",
+        "        /usr/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || true",
+        "    fi",
+        "    # harbor's singularity backend wants a ready server venv here; the SIF",
+        "    # is read-only, and its --writable-tmpfs layer does not survive the",
+        "    # agent setup step, so the venv has to be baked in.",
+        "    if [ -x /usr/bin/python3 ]; then",
+        # agent runtime deps into the *system* interpreter (the bridge starts
+        # `python3 -m mini_code_cli`); --break-system-packages for PEP 668 images.
+        "        /usr/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || true",
+        f"        /usr/bin/python3 -m pip install -q --break-system-packages "
+        f"{' '.join(PIP_FOR_AGENT)} 2>/dev/null || "
+        f"/usr/bin/python3 -m pip install -q {' '.join(PIP_FOR_AGENT)} || true",
+        "        if [ ! -x /opt/harbor-server/bin/pip ]; then",
+        "            rm -rf /opt/harbor-server",
+        "            /usr/bin/python3 -m venv /opt/harbor-server || "
+        "(command -v virtualenv >/dev/null && "
+        "virtualenv -p /usr/bin/python3 /opt/harbor-server) || true",
+        "            /opt/harbor-server/bin/python -m ensurepip --upgrade "
+        ">/dev/null 2>&1 || true",
+        "        fi",
+        "        /opt/harbor-server/bin/pip install -q --upgrade pip || true",
+        "        /opt/harbor-server/bin/pip install -q uvicorn fastapi || true",
+        "    fi",
+        "",
+    ]
+    if mini_code_dir:
+        lines += ["%environment",
+                  "    export PYTHONPATH=/opt/mini-code:${PYTHONPATH:-}", ""]
+    lines += ["%test",
+              "    /opt/harbor-server/bin/python -c 'import uvicorn, fastapi' "
+              "|| exit 1", ""]
+    return "\n".join(lines)
+
+
+def task_image(task_dir):
+    """The ``docker_image`` named by a task's ``task.toml`` (or ``None``)."""
+    path = os.path.join(task_dir, "task.toml")
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        match = _DOCKER_IMAGE_RE.search(handle.read())
+    return match.group(1) if match else None
+
+
+def point_task_at_sif(task_dir, sif_path):
+    """Rewrite ``docker_image`` in a copy of the task so harbor uses the SIF."""
+    path = os.path.join(task_dir, "task.toml")
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    text = _DOCKER_IMAGE_RE.sub(f'docker_image = "{os.path.abspath(sif_path)}"',
+                                text, count=1)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return path
+
+
+def sif_name(dataset, task_name):
+    """A flat, collision-free file name for a task's derived image."""
+    clean = f"{dataset}__{task_name}".replace("/", "_").replace(":", "_")
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", clean) + ".sif"
+
+
+def cache_key(image, definition_text, mini_code_dir=None):
+    """Content hash for a derived SIF (source image + definition + baked code)."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    digest.update(str(image).encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(str(definition_text).encode("utf-8"))
+    if mini_code_dir:
+        root = os.path.abspath(str(mini_code_dir))
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                try:
+                    with open(path, "rb") as handle:
+                        digest.update(name.encode("utf-8"))
+                        digest.update(handle.read())
+                except OSError:
+                    continue
+    return digest.hexdigest()
+
+
+def build_sif(apptainer, definition, sif_path, log_path, env=None, force=False,
+              timeout=10_800):
+    """``apptainer build --fakeroot`` one definition; returns ``(ok, message)``.
+
+    ``timeout`` is deliberately generous: a few Terminal-Bench images spend over
+    an hour in apt/build. If the failure is Apptainer's own fakeroot command
+    (common with Alpine/musl images), retry once with
+    ``--ignore-fakeroot-command``; that uses only the root-mapped namespace.
+    """
+    if os.path.isfile(sif_path) and not force:
+        return True, "cached"
+    os.makedirs(os.path.dirname(os.path.abspath(sif_path)) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(log_path)) or ".", exist_ok=True)
+
+    def run(argv, mode):
+        with open(log_path, mode, encoding="utf-8") as handle:
+            handle.write(f"$ {' '.join(argv)}\n")
+            handle.flush()
+            try:
+                return subprocess.run(argv, stdout=handle,
+                                      stderr=subprocess.STDOUT, env=env,
+                                      timeout=timeout)
+            except (OSError, subprocess.SubprocessError) as e:
+                return e
+
+    argv = [apptainer, "build", "--fakeroot"]
+    if force:
+        argv.append("--force")            # apptainer refuses to clobber otherwise
+    argv += [sif_path, definition]
+    result = run(argv, "w")
+    if isinstance(result, Exception):
+        return False, f"apptainer build failed: {result}"
+
+    if result.returncode != 0:
+        try:
+            with open(log_path, encoding="utf-8") as handle:
+                text = handle.read().lower()
+        except OSError:
+            text = ""
+        if "fakeroot failed" in text or "ignore-fakeroot-command" in text:
+            retry = [apptainer, "build", "--fakeroot",
+                     "--ignore-fakeroot-command", "--force", sif_path, definition]
+            result = run(retry, "a")
+            if isinstance(result, Exception):
+                return False, f"apptainer build failed: {result}"
+        if result.returncode != 0:
+            return False, f"apptainer build exited {result.returncode} (see {log_path})"
+    return True, "built"
+
+
+def prepare(dataset_dir, out_dir, sif_cache, limit=None, task_ids=(),
+            mini_code_dir=None, jobs=1, force=False, log_dir=None, env=None,
+            build_timeout=10_800):
+    """Derive one SIF per task and stage a local dataset harbor can run.
+
+    Returns ``{"tasks": [...], "failed": [...], "out_dir": ...}``. Every task
+    keeps its own status, because "one image would not build" must not hide the
+    tasks that did.
+    """
+    apptainer = shutil.which("apptainer") or shutil.which("singularity")
+    if apptainer is None:
+        raise SystemExit("tb_apptainer: no apptainer/singularity binary on PATH")
+    names = sorted(name for name in os.listdir(dataset_dir)
+                   if os.path.isdir(os.path.join(dataset_dir, name)))
+    if task_ids:
+        wanted = {str(t) for t in task_ids}
+        names = [name for name in names if name in wanted]
+    if limit and not task_ids:
+        names = names[:int(limit)]
+    if not names:
+        raise SystemExit(f"tb_apptainer: no tasks under {dataset_dir!r}")
+
+    log_dir = log_dir or os.path.join(out_dir, "_logs")
+    os.makedirs(out_dir, exist_ok=True)
+
+    def one(name):
+        source = os.path.join(dataset_dir, name)
+        image = task_image(source)
+        if not image:
+            return {"task": name, "status": "skipped",
+                    "reason": "task.toml names no docker_image"}
+        sif = os.path.join(sif_cache, sif_name(name, name))
+        target = os.path.join(out_dir, name)
+        definition = os.path.join(log_dir, f"{name}.def")
+        os.makedirs(log_dir, exist_ok=True)
+        rendered = render_def(image, mini_code_dir)
+        key = cache_key(image, rendered, mini_code_dir)
+        key_path = f"{sif}.key"
+        try:
+            with open(key_path, encoding="utf-8") as handle:
+                cached_key = handle.read().strip()
+        except OSError:
+            cached_key = None
+        if os.path.isdir(os.path.join(target, "task.toml")) and \
+                os.path.isfile(sif) and cached_key == key and not force:
+            return {"task": name, "status": "cached", "sif": sif,
+                    "dir": target, "image": image}
+        with open(definition, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+        ok, message = build_sif(
+            apptainer, definition, sif,
+            os.path.join(log_dir, f"{name}.build.log"), env=env,
+            force=force or (os.path.isfile(sif) and cached_key != key),
+            timeout=build_timeout)
+        if not ok:
+            return {"task": name, "status": "failed", "reason": message,
+                    "image": image}
+        try:
+            with open(key_path, "w", encoding="utf-8") as handle:
+                handle.write(key + "\n")
+        except OSError:
+            pass
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+        point_task_at_sif(target, sif)
+        return {"task": name, "status": "ready", "sif": sif, "dir": target,
+                "image": image}
+
+    with ThreadPoolExecutor(max_workers=max(int(jobs), 1)) as pool:
+        results = list(pool.map(one, names))
+    failed = [r for r in results if r["status"] == "failed"]
+    manifest = {"out_dir": out_dir, "sif_cache": sif_cache,
+                "tasks": results, "failed": failed}
+    with open(os.path.join(out_dir, "prepared.json"), "w", encoding="utf-8") as h:
+        json.dump(manifest, h, indent=2, sort_keys=True)
+        h.write("\n")
+    return manifest
+
+
+def download_tasks(dataset, download_dir, harbor=None):
+    """``harbor download <dataset> --export`` -- the only way to get task files."""
+    harbor = harbor or shutil.which("harbor")
+    if not harbor:
+        raise SystemExit("tb_apptainer: harbor is not on PATH; cannot download "
+                         f"{dataset} (pip install harbor)")
+    os.makedirs(download_dir, exist_ok=True)
+    argv = [harbor, "download", dataset, "--export", "-o", download_dir]
+    print(f"$ {' '.join(argv)}")
+    result = subprocess.run(argv, env=dict(os.environ))
+    if result.returncode != 0:
+        raise SystemExit(f"tb_apptainer: harbor download failed "
+                         f"(exit {result.returncode})")
+    # The export lands as <download-dir>/<dataset-name>/<task>/
+    name = str(dataset).split("@")[0].replace("/", "_")
+    candidate = os.path.join(download_dir, name)
+    return candidate if os.path.isdir(candidate) else download_dir
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "prepare":
+        tasks_dir = args.tasks_dir
+        if not tasks_dir:
+            if not args.dataset:
+                raise SystemExit("tb_apptainer: pass --tasks-dir or --dataset")
+            tasks_dir = download_tasks(
+                args.dataset, args.download_dir or os.path.join(args.out, "_export"))
+        manifest = prepare(
+            dataset_dir=tasks_dir, out_dir=args.out,
+            sif_cache=args.sif_cache, limit=args.limit,
+            task_ids=args.task_id or (), mini_code_dir=args.mini_code,
+            jobs=args.jobs, force=args.force, env=dict(os.environ),
+            build_timeout=args.build_timeout)
+        for task in manifest["tasks"]:
+            detail = task.get("reason") or task.get("sif") or ""
+            print(f"{task['task']:<40} {task['status']:<8} {detail}")
+        if manifest["failed"]:
+            print(f"tb_apptainer: {len(manifest['failed'])} task(s) failed",
+                  file=sys.stderr)
+            return 1
+        print(f"tb_apptainer: {len(manifest['tasks'])} task(s) ready in "
+              f"{os.path.abspath(args.out)}")
+        return 0
+    print(json.dumps(prepare_status(args.out), indent=2))
+    return 0
+
+
+def prepare_status(out_dir):
+    path = os.path.join(out_dir, "prepared.json")
+    if not os.path.isfile(path):
+        return {"out_dir": out_dir, "prepared": False}
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="python -m benchmarks.suites.tb_apptainer",
+        description="Derive Apptainer images for Terminal-Bench tasks.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    prep = sub.add_parser("prepare", help="build SIFs and stage a local dataset")
+    prep.add_argument("--tasks-dir", default=None,
+                      help="an exported dataset: <dir>/<task>/task.toml")
+    prep.add_argument("--dataset", default=None,
+                      help="dataset label to download with `harbor download` "
+                           "(e.g. terminal-bench@2.0) when --tasks-dir is absent")
+    prep.add_argument("--download-dir", default=None,
+                      help="where the export lands (default: alongside --out)")
+    prep.add_argument("--out", required=True, help="where the staged dataset goes")
+    prep.add_argument("--sif-cache", default=DEFAULT_SIF_CACHE,
+                      help="where the .sif files are cached (needs GBs)")
+    prep.add_argument("--limit", type=int, default=None)
+    prep.add_argument("--task-id", action="append", default=None)
+    prep.add_argument("--jobs", type=int, default=1)
+    prep.add_argument("--force", action="store_true")
+    prep.add_argument("--build-timeout", type=int, default=10_800,
+                      help="seconds before one apptainer build is killed "
+                           "(default: 10800 = 3 h)")
+    prep.add_argument("--mini-code", default=None,
+                      help="path to the mini_code_cli package to bake in")
+    status = sub.add_parser("status", help="what has been prepared so far")
+    status.add_argument("--out", required=True)
+    return parser
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through the CLI
+    sys.exit(main())

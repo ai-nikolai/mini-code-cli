@@ -5,6 +5,7 @@ pypi_upload.sh
 __pycache__
 *.egg-info
 dist
+build/
 
 history.json
 tools*.json
@@ -18,3 +19,37 @@ CURRENT_PLAN.md
 
 vllm.log
 .mini_tests/
+
+# --- upstream checkouts (our forks) -------------------------------------------
+# The two repositories the benchmark builds on (harbor, the Terminal-Bench 2 task
+# set) are cloned, never vendored into this history: their branches on
+# github.com/ai-nikolai are the source of truth, and `benchmarks/requirements.txt`
+# installs harbor straight from its branch. `benchmarks/scripts/setup_external_repos.sh`
+# puts local development checkouts in external_repos/.
+/external_repos/
+# Rooted at the repository on purpose: an unanchored `harbor/` would also swallow
+# any directory of that name anywhere below (e.g. a task named `harbor` inside
+# benchmarks/datasets/).
+/harbor/
+/SWE-bench/
+/terminal-bench-2-1/
+/vendor/
+# A nested checkout has its own history; keep its packed objects out regardless.
+/harbor/.git/
+/SWE-bench/.git/
+/terminal-bench-2-1/.git/
+
+# --- benchmarks ---------------------------------------------------------------
+# Run artifacts, cached datasets, container build contexts and generated
+# predictions are large or machine-specific; nothing here belongs in the repo.
+benchmarks/runs/
+# Summary CSVs / analyser output: machine-specific numbers belong next to the run
+# that produced them, not in the repository (the *method* is what is tracked).
+benchmarks/results/
+results/
+benchmarks/datasets/
+benchmarks/.cache/
+benchmarks/**/build_context/
+*.predictions.jsonl
+predictions.jsonl
+runs/
