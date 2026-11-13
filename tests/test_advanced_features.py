@@ -437,6 +437,11 @@ class WelcomeBannerTest(_AdvancedCase):
         self.assertIn("compaction  : summarise", out)
         self.assertIn("planning    : plan-verify-step (plan mode off)", out)
 
+    def test_welcome_shows_the_ascii_mark(self):
+        out = self._welcome()
+        self.assertIn("a minimal coding agent CLI", out)
+        self.assertIn("__  __", out)
+
 
 class ParseArgsTest(unittest.TestCase):
     def test_new_flags_have_the_expected_defaults(self):
