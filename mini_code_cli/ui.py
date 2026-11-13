@@ -49,6 +49,16 @@ _BG = {
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
+#: Startup mark. Kept deliberately small so it fits an 80-column terminal and
+#: still leaves the information box below it readable.
+LOGO = (
+    r"  __  __ ___ _  _ ___    ___ ___  ___  ___",
+    r" |  \/  |_ _| \| |_ _|  / __/ _ \|   \| __|",
+    r" | |\/| || || .` || |  | (_| (_) | |) | _|",
+    r" |_|  |_|___|_|\_|___|  \___\___/|___/|___|",
+)
+TAGLINE = "a minimal coding agent CLI"
+
 
 # --- helpers ----------------------------------------------------------------
 
@@ -813,7 +823,24 @@ class Console:
             f"compaction  : {compaction_strategy or 'summarise'}",
             f"planning    : {planning}",
         ]
+        self._print_logo()
         self.banner(f"MiniCodeCLI v{version}", lines, fg="cyan")
+
+    def _print_logo(self):
+        """Print the ASCII mark above the welcome box.
+
+        The art is skipped on very narrow terminals; wrapping a logo is worse
+        than omitting it. Colour is optional, so piped logs still show the
+        plain mark.
+        """
+        art_width = max(len(line) for line in LOGO)
+        if self.width < art_width + 4:
+            return
+        pad = " " * max((self.width - art_width) // 2, 0)
+        for line in LOGO:
+            self.emit(pad + self.style(line, fg="cyan", bold=True))
+        self.emit(pad + self.style(TAGLINE, dim=True))
+        self.emit()
 
     def farewell(self, version, rows, sign_off=None):
         """Render the exit banner: a sign-off plus a summary of the session state.
