@@ -62,6 +62,14 @@ TAGLINE = "a minimal coding agent CLI"
 
 # --- helpers ----------------------------------------------------------------
 
+def _stop_thread(stop, thread):
+    """Signal a background thread and join it briefly, if it is running."""
+    if stop is not None:
+        stop.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=1.0)
+
+
 def _visual_len(text):
     """Width of *text* in terminal columns, ignoring ANSI escape codes.
 
@@ -542,7 +550,11 @@ class Console:
         self._thinking_thread.start()
 
     def _spin(self, message):
-        """Animation loop: rewrite the single transient line every frame.
+        """Animation loop for the "thinking" spinner."""
+        self._spin_loop(self._thinking_stop, message, "cyan")
+
+    def _spin_loop(self, stop, message, fg):
+        """Rewrite one transient line every frame until ``stop`` is set.
 
         Reuses the transient-region machinery (:meth:`emit_transient`) so the
         cursor math (move up, overwrite, no scroll) is handled for us and stays
@@ -550,13 +562,12 @@ class Console:
         leading ellipsis dots grow with the frame counter to make the wait feel
         dynamic (… then … … then … … …, and back to …).
         """
-        stop = self._thinking_stop
         i = 0
         while not stop.is_set():
             # Grow the leading dots: 1, 2, then 3, and hold.
             dots = "… " * min((i % 3) + 1, 3)
             i += 1
-            self.emit_transient(self.style(f"{dots}{message}", fg="cyan", dim=True))
+            self.emit_transient(self.style(f"{dots}{message}", fg=fg, dim=True))
             stop.wait(0.3)
         # Replace the spinner line with a blank so the following real output
         # lands cleanly. The blank stays tracked as the transient block and is
@@ -573,10 +584,7 @@ class Console:
         thread = self._thinking_thread
         self._thinking_stop = None
         self._thinking_thread = None
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
+        _stop_thread(stop, thread)
 
     def start_tool_call(self, message="calling tool", tool_name=None):
         """Start a background "… calling tool" spinner (non-scrolling).
@@ -600,17 +608,7 @@ class Console:
 
     def _spin_tool_call(self, message):
         """Animation loop for the tool-call spinner (mirror of :meth:`_spin`)."""
-        stop = self._tool_call_stop
-        i = 0
-        while not stop.is_set():
-            dots = "\u2026 " * min((i % 3) + 1, 3)
-            i += 1
-            self.emit_transient(self.style(f"{dots}{message}", fg="magenta", dim=True))
-            stop.wait(0.3)
-        # Replace the spinner line with a blank so the following real output
-        # lands cleanly; the blank stays tracked as the transient block and is
-        # cleared by the next :meth:`emit` (e.g. the next assistant turn).
-        self.emit_transient(None)
+        self._spin_loop(self._tool_call_stop, message, "magenta")
 
     def stop_tool_call(self):
         """Stop the "… calling tool" spinner started by :meth:`start_tool_call`.
@@ -622,10 +620,7 @@ class Console:
         thread = self._tool_call_thread
         self._tool_call_stop = None
         self._tool_call_thread = None
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
+        _stop_thread(stop, thread)
 
     def tool_group(self, name, params=None, result=None, status="ran"):
         """Render one attempted tool call: its name, parameters and result."""

@@ -9,15 +9,12 @@ The compaction/planning strategies are exercised at two levels:
 """
 
 import io
-import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import agent_files, agent_loop, compaction, planning, prompts, ui, utils
+from mini_code_cli import agent_files, agent_loop, compaction, prompts, ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
 
 from test_e2e_agent_loop import (

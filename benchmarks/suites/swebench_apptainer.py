@@ -146,7 +146,6 @@ def run_one(apptainer, instance, patch_text, work_dir, timeout, env=None,
     so nothing is copied into a container that may be read-only -- the same
     contract the upstream runner gets from ``copy_to_container``.
     """
-    instance_id = instance["instance_id"]
     os.makedirs(work_dir, exist_ok=True)
     patch_path = os.path.join(work_dir, "patch.diff")
     eval_path = os.path.join(work_dir, "eval.sh")

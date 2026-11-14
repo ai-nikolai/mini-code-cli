@@ -137,10 +137,6 @@ def is_ask(tier):
     return tier == ASK
 
 
-def is_allow(tier):
-    return tier == ALLOW
-
-
 if __name__ == "__main__":
     # Tiny manual smoke-test when run directly.
     examples = [

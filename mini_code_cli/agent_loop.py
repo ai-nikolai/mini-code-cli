@@ -33,7 +33,7 @@ from . import prompts
 from . import shell_safety_utils
 from . import tools
 from . import utils
-from .utils import oneline, plural
+from .utils import oneline, plural, usage_int
 from . import ui
 from . import tui as tui_mod
 from . import subagents
@@ -1134,7 +1134,7 @@ class AgentSession:
         """
         if not usage:
             return
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        prompt_tokens = usage_int(usage, "prompt_tokens")
         if prompt_tokens <= 0:
             return
         if message_count is None:
@@ -1513,14 +1513,6 @@ class AgentSession:
         tasks = (self.background_tasks.list()
                  if hasattr(self, "background_tasks") else [])
 
-        def count(key):
-            # The dashboard refreshes on every turn: a display detail must
-            # never raise, even if a server reported a null/odd usage value.
-            try:
-                return int(usage.get(key) or 0)
-            except (TypeError, ValueError):
-                return 0
-
         running = sum(1 for task in tasks
                       if task.get("status") in ("running", "cancelling"))
         if tasks:
@@ -1528,8 +1520,9 @@ class AgentSession:
                           f"{plural(len(tasks), 'background task')} running")
         else:
             background = "no background tasks"
-        return (f"{plural(count('tool_calls'), 'tool call')} · "
-                f"{plural(count('llm_calls'), 'LLM call')} · {background}")
+        return (f"{plural(usage_int(usage, 'tool_calls'), 'tool call')} · "
+                f"{plural(usage_int(usage, 'llm_calls'), 'LLM call')} · "
+                f"{background}")
 
     def _tui_header_lines(self):
         """The fixed dashboard content for --tui."""
@@ -2905,15 +2898,6 @@ class AgentSession:
         turns = len(self.summary)
         usage = self.total_usage or {}
 
-        def count(key):
-            # A display detail on the exit path must never raise: a server that
-            # reported ``null`` usage leaves a None here, and crashing while
-            # saying goodbye would be the worst possible time to fail.
-            try:
-                return int(usage.get(key) or 0)
-            except (TypeError, ValueError):
-                return 0
-
         elapsed = max(time.monotonic() - getattr(self, "started_at",
                                                   time.monotonic()), 0.0)
         hours, remainder = divmod(int(elapsed), 3600)
@@ -2929,11 +2913,11 @@ class AgentSession:
                         f"{plural(len(self.messages), 'message')}"),
             ("conversation", plural(turns, "recorded turn")),
             ("duration", duration),
-            ("tokens", f"{count('prompt_tokens'):,} in / "
-                       f"{count('completion_tokens'):,} out "
-                       f"({count('total_tokens'):,} total)"),
-            ("calls", f"{count('llm_calls'):,} LLM, "
-                      f"{count('tool_calls'):,} tool"),
+            ("tokens", f"{usage_int(usage, 'prompt_tokens'):,} in / "
+                       f"{usage_int(usage, 'completion_tokens'):,} out "
+                       f"({usage_int(usage, 'total_tokens'):,} total)"),
+            ("calls", f"{usage_int(usage, 'llm_calls'):,} LLM, "
+                      f"{usage_int(usage, 'tool_calls'):,} tool"),
             ("background", (f"{plural(cancelled, 'task')} cancelled on exit"
                             if cancelled else "none running")),
             ("resume", "mini-code --load-last-session"),
@@ -3059,8 +3043,7 @@ class AgentSession:
             self.token_stats["tool_calls"] += len(tool_calls)
             self.total_usage["tool_calls"] += len(tool_calls)
             # The model predicted more tool calls: once the work settles down a
-            # completion review is due again (finalized_plan).
-            self.finalized_plan = True
+            # completion review is due again.
 
         if response_text:
             self._print_assistant(response_text)

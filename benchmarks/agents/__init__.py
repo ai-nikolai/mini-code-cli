@@ -4,8 +4,6 @@ Adding an agent means adding one module and one line here (or a ``command`` entr
 in the config); nothing in the suites needs to know about it, which is what keeps
 the benchmark side agent-agnostic.
 """
-import os
-
 from .preamble import AGENT_MD, load_agent_preamble
 from .base import AgentAdapter, AgentError
 from .claude_code import ClaudeCodeAgent

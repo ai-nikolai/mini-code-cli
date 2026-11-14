@@ -57,7 +57,7 @@ PIP_FOR_AGENT = ("requests",)
 
 def render_def(image, mini_code_dir=None):
     """The Apptainer definition that turns a task image into a runnable SIF."""
-    lines = [f"Bootstrap: docker", f"From: {image}", ""]
+    lines = ["Bootstrap: docker", f"From: {image}", ""]
     if mini_code_dir:
         # The bridge starts `python3 -m mini_code_cli` inside the container; the
         # package is dependency-free, so copying the directory is enough.

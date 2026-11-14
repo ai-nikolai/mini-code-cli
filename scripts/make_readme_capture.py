@@ -185,7 +185,7 @@ def _svg(text: str) -> str:
                 if style.get("bg"):
                     # SVG has no per-tspan background; a faint underline is a
                     # readable hint without changing the monospace grid.
-                    attrs.append(f'text-decoration="underline"')
+                    attrs.append('text-decoration="underline"')
                     attrs.append(
                         f'style="text-decoration-color:'
                         f'{BG.get(style["bg"], "#30363d")}"')

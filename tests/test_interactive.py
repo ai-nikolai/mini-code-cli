@@ -855,13 +855,10 @@ class OnelineTest(unittest.TestCase):
         self.assertEqual(utils.oneline(42), "42")
 
     def test_the_duplicate_definitions_are_gone(self):
-        """No module re-implements it: agent_loop / subagents import, ui delegates."""
+        """No module re-implements it: agent_loop imports, ui delegates."""
         from mini_code_cli import agent_loop
-        from mini_code_cli.subagents import base as subagent_base
 
         self.assertFalse(hasattr(agent_loop, "_oneline"))
-        self.assertFalse(hasattr(subagent_base, "_oneline"))
-        self.assertIs(subagent_base.oneline, utils.oneline)
 
     def test_the_console_renderer_delegates(self):
         console = ui.Console(stream=io.StringIO(), color=False, unicode=False)

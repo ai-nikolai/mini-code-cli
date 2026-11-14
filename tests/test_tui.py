@@ -1028,10 +1028,16 @@ class TuiClearTest(unittest.TestCase):
                     {"role": "user", "content": "hi"},
                     {"role": "assistant", "content": "hello"},
                 ]
+                console._overlay_lines = ["stale command output"]
+                console._notice_line = "stale notice"
+                console._scroll_offset = 5
+                turns_before = len(console._turns)
                 session._clear_and_show_last()
                 console.stop_tui()
-            self.assertEqual(console._last_user, "")
-            self.assertEqual(console._last_assistant, "")
+            self.assertEqual(console._overlay_lines, [])
+            self.assertEqual(console._notice_line, "")
+            self.assertEqual(console._scroll_offset, 0)
+            self.assertEqual(len(console._turns), turns_before)
 
 
 class TuiDashboardLayoutTest(unittest.TestCase):

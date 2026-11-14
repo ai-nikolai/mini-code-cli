@@ -17,7 +17,7 @@ import threading
 from collections import deque
 
 from .ui import (Console, LOGO, _ANSI_RE, _pad_visual, _read_escape_sequence,
-                 _visual_len)
+                 _stop_thread, _visual_len)
 
 
 def tui_mode(value):
@@ -51,14 +51,12 @@ class TuiConsole(Console):
     finishes. The alternate screen is restored on exit.
     """
 
-    is_fixed = True
-
     @property
     def active(self):
         return self._active
 
-    @classmethod
-    def supported(cls):
+    @staticmethod
+    def supported():
         """Whether the current terminal is a sensible default for the TUI."""
         try:
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -87,8 +85,6 @@ class TuiConsole(Console):
         self._turn_id = 0
         self._current_assistant = None
         self._current_tool_entry = None
-        self._last_user = ""
-        self._last_assistant = ""
         self._info_provider = None
         self._render_lock = threading.RLock()
         self._thinking_stop = None
@@ -182,10 +178,7 @@ class TuiConsole(Console):
                       "turn_id": self._turn_id,
                       "tools": [], "background": []}
             self._turns.append(record)
-            if role == "You":
-                self._last_user = content
-            elif role == "Assistant":
-                self._last_assistant = content
+            if role == "Assistant":
                 self._current_assistant = record
         self._scroll_offset = 0
         self.render()
@@ -198,7 +191,6 @@ class TuiConsole(Console):
             self._turn_id += 1
             self._current_assistant = None
             self._current_tool_entry = None
-            self._last_user = text
             self._turns.append({"role": role, "content": text,
                                 "turn_id": self._turn_id,
                                 "tools": [], "background": []})
@@ -210,7 +202,6 @@ class TuiConsole(Console):
             record = {"role": role, "content": text,
                       "turn_id": self._turn_id,
                       "tools": [], "background": []}
-            self._last_assistant = text
             self._current_assistant = record
             self._turns.append(record)
             self._overlay_lines = []
@@ -284,10 +275,7 @@ class TuiConsole(Console):
         thread = self._thinking_thread
         self._thinking_stop = None
         self._thinking_thread = None
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
+        _stop_thread(stop, thread)
         self._status_line = ""
         self.render()
 
@@ -633,10 +621,7 @@ class TuiConsole(Console):
         thread = self._scroll_thread
         self._scroll_stop = None
         self._scroll_thread = None
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
+        _stop_thread(stop, thread)
 
     def render(self):
         if not self._active:
@@ -930,8 +915,6 @@ class TuiConsole(Console):
                                 sync()
                             elif code == 108:            # Ctrl-L
                                 self._overlay_lines = []
-                                self._last_user = ""
-                                self._last_assistant = ""
                                 self._notice_line = ""
                                 sync()
                             elif code == 116:            # Ctrl-T
@@ -1018,8 +1001,6 @@ class TuiConsole(Console):
                     continue
                 if raw == b"\x0c":
                     self._overlay_lines = []
-                    self._last_user = ""
-                    self._last_assistant = ""
                     self._notice_line = ""
                     sync()
                     continue

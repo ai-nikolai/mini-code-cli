@@ -641,7 +641,6 @@ def _grader_python(options=None):
     ``options.grader_python`` wins, then $BENCHMARK_GRADER_PYTHON, then a couple
     of conventional locations -- and fall back to the launcher.
     """
-    import shutil
     import subprocess
     import sys
 

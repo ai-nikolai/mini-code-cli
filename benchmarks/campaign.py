@@ -323,7 +323,7 @@ def main(argv=None):
             rows.append(summary_module.row_for(
                 label, agent, args.mode, f"{run_id}/{agent}", [], status="dry-run"))
             continue
-        manifest = runner.run(trials, run_id=agent)
+        runner.run(trials, run_id=agent)
         outcomes = summary_module.read_run_outcomes(runner.run_dir(agent))
         rows.append(summary_module.row_for(
             label, agent, args.mode, f"{run_id}/{agent}", outcomes))

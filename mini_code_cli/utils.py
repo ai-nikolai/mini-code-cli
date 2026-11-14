@@ -111,7 +111,7 @@ def plural(count, noun, suffix="s"):
     return f"{count} {noun}" + ("" if count == 1 else suffix)
 
 
-def _coerce_usage_int(value):
+def coerce_usage_int(value):
     """Best-effort: coerce a raw usage field to a non-negative int.
 
     Servers sometimes report ``null``/``None`` or oddly-shaped numbers for token
@@ -124,12 +124,9 @@ def _coerce_usage_int(value):
         return 0
 
 
-def _usage_or_zero(value):
-    """Return ``int(value)`` when that is safe, else 0 (for summing fields)."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+def usage_int(usage, key):
+    """Read one token counter from a usage mapping, defaulting to 0."""
+    return coerce_usage_int((usage or {}).get(key))
 
 
 def determine_vllm_model(server_url, api_key=None, timeout=120):
@@ -302,12 +299,12 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
 
             # Token usage, when the server reports it (many local servers do not).
             usage = body.get("usage", {}) or {}
-            prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", 0))
-            completion_tokens = _coerce_usage_int(usage.get("completion_tokens", 0))
-            total_tokens = _coerce_usage_int(
+            prompt_tokens = coerce_usage_int(usage.get("prompt_tokens", 0))
+            completion_tokens = coerce_usage_int(usage.get("completion_tokens", 0))
+            total_tokens = coerce_usage_int(
                 usage.get("total_tokens",
-                          _usage_or_zero(usage.get("prompt_tokens"))
-                          + _usage_or_zero(usage.get("completion_tokens"))))
+                          coerce_usage_int(usage.get("prompt_tokens"))
+                          + coerce_usage_int(usage.get("completion_tokens"))))
 
             return content, tool_calls, {
                 # "stop" is a finished answer, "length" means the reply was cut off by
