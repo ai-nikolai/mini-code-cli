@@ -31,6 +31,10 @@ and nothing else, so a difference in success rate can be attributed to it:
                         (``plan-verify-step``)
 ``swe-plan-verify``     ``swe`` + ``--plan --plan-strategy plan-verify``
 ``swe-open-plan``       ``swe`` + ``--plan --plan-strategy open-plan``
+``swe-compaction-predict-files-plan-verify``
+                        the two best strategy choices combined:
+                        ``--compaction-strategy predict-files`` +
+                        ``--plan --plan-strategy plan-verify``
 ``swe-background``      ``swe`` + ``--background`` (background shell tasks)
 ======================  ====================================================
 
@@ -98,6 +102,11 @@ class MiniCodeAgent(AgentAdapter):
         "swe-open-plan": dict(
             _SWE, flags=_SWE["flags"] + ["--plan"],
             plan_strategy="open-plan"),
+        # The two winners from the first clean comparison, combined.
+        "swe-compaction-predict-files-plan-verify": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan"],
+            compaction_strategy="predict-files",
+            plan_strategy="plan-verify"),
         "swe-background": dict(
             _SWE, flags=_SWE["flags"] + ["--background"]),
     }

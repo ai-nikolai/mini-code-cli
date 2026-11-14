@@ -310,9 +310,10 @@ compaction, planning or background choice on top of it:
 | `swe-plan` | `--plan` (default `plan-verify-step`) |
 | `swe-plan-verify` | `--plan --plan-strategy plan-verify` |
 | `swe-open-plan` | `--plan --plan-strategy open-plan` |
+| `swe-compaction-predict-files-plan-verify` | the two best choices combined |
 | `swe-background` | `--background` (background shell tasks) |
 
-All six are present in `terminal_bench_21.json`, `ornith_30b.json` and
+All eight are present in `terminal_bench_21.json`, `ornith_30b.json` and
 `mini_code_settings.json`. The Slurm launchers default to the `swe` baseline only;
 select more with a space-separated `MINI_CODE_SETTINGS`:
 

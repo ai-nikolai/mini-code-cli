@@ -92,6 +92,7 @@
         "swe-plan",
         "swe-plan-verify",
         "swe-open-plan",
+        "swe-compaction-predict-files-plan-verify",
         "swe-background"
       ],
       "models": [
