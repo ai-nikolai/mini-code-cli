@@ -178,6 +178,16 @@ class MiniCodeAdapterTests(unittest.TestCase):
                 for baseline in ("--auto-mode", "--enable-shell", "--sudo"):
                     self.assertIn(baseline, argv)
 
+    def test_combined_strategy_preset_carries_both_choices(self):
+        argv = self.adapter(
+            "swe-compaction-predict-files-plan-verify").argv(
+                "p", local_model())
+        self.assertEqual(
+            argv[argv.index("--compaction-strategy") + 1], "predict-files")
+        self.assertEqual(
+            argv[argv.index("--plan-strategy") + 1], "plan-verify")
+        self.assertIn("--plan", argv)
+
     def test_container_argv_uses_the_images_interpreter(self):
         argv = self.adapter().argv("p", local_model(), container=True)
         self.assertEqual(argv[0], "python3")
