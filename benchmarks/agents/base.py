@@ -17,7 +17,6 @@ adapter object drives every suite, so "mini-code with plan mode" cannot quietly
 mean two different things.
 """
 import os
-import shlex
 import sys
 
 

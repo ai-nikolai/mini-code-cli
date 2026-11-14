@@ -20,7 +20,6 @@ Two consequences worth knowing before reading any result:
   inside the container.
 """
 import json
-import os
 import urllib.error
 import urllib.request
 

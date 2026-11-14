@@ -25,7 +25,6 @@ single ``--limit 1`` trial. ``harbor`` is imported at module level on purpose: t
 module is only ever loaded by harbor itself, and importing it from our CLI would
 make the harness a hard dependency.
 """
-import json
 import os
 import shlex
 from pathlib import Path
@@ -34,8 +33,7 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-#: Placeholder inside an ``argv_template`` element that receives the instruction.
-INSTRUCTION = "{instruction}"
+from .agent_args import INSTRUCTION, as_list, as_mapping, resolve_env
 
 #: Where the shared preamble lands inside a task container.
 AGENT_MD_IN_CONTAINER = "/opt/agent/agent.md"
@@ -49,7 +47,7 @@ class CommandAgent(BaseInstalledAgent):
                  install_commands=None, python_path=None, agent_md_file=None,
                  exec_timeout_sec=None, **kwargs):
         super().__init__(**kwargs)
-        template = _as_list(argv_template)
+        template = as_list(argv_template)
         if not template:
             raise ValueError("CommandAgent needs argv_template (a list of argv "
                              "elements, one of which is '{instruction}')")
@@ -61,8 +59,8 @@ class CommandAgent(BaseInstalledAgent):
         self._model = model
         self._base_url = base_url
         self._api_key_env = api_key_env
-        self._extra_env = _as_mapping(extra_env)
-        self._install_commands = _as_list(install_commands)
+        self._extra_env = as_mapping(extra_env)
+        self._install_commands = as_list(install_commands)
         # A host directory holding the agent's own package. Harbor has no bind
         # mount on this path, so it is uploaded into the container and put on
         # PYTHONPATH -- without it `python3 -m mini_code_cli` dies with
@@ -169,7 +167,7 @@ class CommandAgent(BaseInstalledAgent):
             pass
 
     def _env(self):
-        env = {str(key): _resolve(str(value))
+        env = {str(key): resolve_env(str(value))
                for key, value in self._extra_env.items()}
         if self._api_key_env:
             env[str(self._api_key_env)] = os.environ.get(str(self._api_key_env), "")
@@ -182,44 +180,3 @@ class CommandAgent(BaseInstalledAgent):
         if self._uploaded_python_path:
             env.setdefault("PYTHONPATH", self._uploaded_python_path)
         return {key: value for key, value in env.items() if value != ""}
-
-
-def _resolve(value):
-    """Resolve ``{env:NAME}`` placeholders from this process's environment."""
-    text = str(value)
-    while "{env:" in text:
-        start = text.index("{env:")
-        end = text.find("}", start)
-        if end == -1:
-            break
-        name = text[start + 5:end]
-        text = text[:start] + os.environ.get(name, "") + text[end + 1:]
-    return text
-
-
-def _as_list(value):
-    """Accept a list or its JSON spelling (``--agent-kwarg`` passes a string)."""
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    text = str(value).strip()
-    if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            return [text]
-        return list(parsed) if isinstance(parsed, list) else [text]
-    return [text]
-
-
-def _as_mapping(value):
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return dict(value)
-    try:
-        parsed = json.loads(str(value))
-    except ValueError:
-        return {}
-    return dict(parsed) if isinstance(parsed, dict) else {}

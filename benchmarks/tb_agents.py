@@ -27,7 +27,6 @@ Two details matter for correctness:
   from our own CLI would drag the harness in as a dependency, which the package
   deliberately avoids.
 """
-import json
 import os
 import shlex
 import tempfile
@@ -38,8 +37,7 @@ from terminal_bench.agents.installed_agents.abstract_installed_agent import (
 )
 from terminal_bench.terminal.models import TerminalCommand
 
-#: Placeholder inside an ``argv_template`` element that receives the instruction.
-INSTRUCTION = "{instruction}"
+from .agent_args import INSTRUCTION, as_list, as_mapping, resolve_env
 
 
 class CommandAgent(AbstractInstalledAgent):
@@ -49,7 +47,7 @@ class CommandAgent(AbstractInstalledAgent):
                  base_url=None, api_key_env=None, extra_env=None,
                  install_commands=None, **kwargs):
         super().__init__(**kwargs)
-        template = _as_list(argv_template)
+        template = as_list(argv_template)
         if not template:
             raise ValueError("CommandAgent needs argv_template (a list of argv "
                              "elements, one of which is '{instruction}')")
@@ -61,8 +59,8 @@ class CommandAgent(AbstractInstalledAgent):
         self._model = model
         self._base_url = base_url
         self._api_key_env = api_key_env
-        self._extra_env = _as_mapping(extra_env)
-        self._install_commands = _as_list(install_commands)
+        self._extra_env = as_mapping(extra_env)
+        self._install_commands = as_list(install_commands)
 
     # -- Terminal-Bench interface ----------------------------------------
 
@@ -84,7 +82,7 @@ class CommandAgent(AbstractInstalledAgent):
         """
         env = {}
         for key, value in self._extra_env.items():
-            env[str(key)] = _resolve(str(value))
+            env[str(key)] = resolve_env(str(value))
         if self._api_key_env:
             env[str(self._api_key_env)] = os.environ.get(str(self._api_key_env), "")
         if self._base_url:
@@ -119,43 +117,3 @@ class CommandAgent(AbstractInstalledAgent):
             block=True,
             append_enter=True,
         )]
-
-def _resolve(value):
-    """Resolve ``{env:NAME}`` placeholders from this process's environment."""
-    text = str(value)
-    while "{env:" in text:
-        start = text.index("{env:")
-        end = text.find("}", start)
-        if end == -1:
-            break
-        name = text[start + 5:end]
-        text = text[:start] + os.environ.get(name, "") + text[end + 1:]
-    return text
-
-
-def _as_list(value):
-    """Accept a list or its JSON spelling (``--agent-kwarg`` passes a string)."""
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    text = str(value).strip()
-    if text.startswith("["):
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            return [text]
-        return list(parsed) if isinstance(parsed, list) else [text]
-    return [text]
-
-
-def _as_mapping(value):
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return dict(value)
-    try:
-        parsed = json.loads(str(value))
-    except ValueError:
-        return {}
-    return dict(parsed) if isinstance(parsed, dict) else {}

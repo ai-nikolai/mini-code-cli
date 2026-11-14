@@ -43,7 +43,6 @@ setting produced which numbers without re-deriving it from flags.
 """
 import os
 
-from .base import agent_preamble_path
 from .base import AgentAdapter, which, python_interpreter
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(

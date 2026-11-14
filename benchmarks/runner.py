@@ -43,6 +43,7 @@ from . import forks as forks_module
 from . import metrics as metrics_module
 from . import runtime as runtime_module
 from . import vllm_metrics
+from .agent_args import resolve_env as expand_env
 from .agents import get_adapter
 from .results import read_results, summarise, write_results, write_summary
 from .suites import get_suite
@@ -656,25 +657,6 @@ def _execute(command, log_path, say):
         log.write(f"\n[exit {returncode} in "
                   f"{time.monotonic() - started:.1f}s]\n")
     return "ok" if returncode == 0 else f"exit {returncode}"
-
-
-def expand_env(value, environ=None):
-    """Resolve ``{env:NAME}`` placeholders; an unset variable expands to ``''``.
-
-    Expanding to ``''`` rather than raising keeps the failure where it belongs: the
-    agent reports "no API key", which is a result, instead of the runner dying
-    with a ``KeyError`` halfway through a matrix.
-    """
-    environ = environ if environ is not None else os.environ
-    text = str(value)
-    while "{env:" in text:
-        start = text.index("{env:")
-        end = text.find("}", start)
-        if end == -1:
-            break
-        name = text[start + 5:end]
-        text = text[:start] + environ.get(name, "") + text[end + 1:]
-    return text
 
 
 def inside_container():
