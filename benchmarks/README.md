@@ -1,8 +1,8 @@
 # Benchmarks (academic evaluation)
 
 `benchmarks/` runs coding agents against **Terminal-Bench 2.x** and **SWE-bench Verified** and
-compares them: mini-code with several settings, Claude Code, Pi, plus a deterministic `mock`
-agent for plumbing checks. It is an orchestration layer, not a reimplementation — every
+compares them: mini-code with several settings, Claude Code, Pi, OpenCode, plus a deterministic
+`mock` agent for plumbing checks. It is an orchestration layer, not a reimplementation — every
 benchmark is executed by its own official harness (`harbor` for Terminal-Bench 2.x, `tb` for the
 1.x core datasets, `swebench.harness.run_evaluation` for SWE-bench), and every agent is driven
 through its own CLI.
@@ -24,6 +24,7 @@ for the results (`python -m benchmarks.analyze` and the scorecard in
 | **a container runtime** | every task/instance runs in a container | Docker (with a daemon) **or** Apptainer (`apptainer`, formerly Singularity) |
 | a model endpoint | the agents need an LLM | see §5 |
 | `claude` / `pi` CLIs | only for host-side runs; harbor installs its own copies inside the container | `npm install -g @anthropic-ai/claude-code` / `curl -fsSL https://pi.dev/install.sh \| sh` |
+| `opencode` CLI | only for host-side runs; harbor installs it inside the container | `npm install -g opencode-ai` |
 
 The benchmark dependencies are deliberately *not* part of the CLI install:
 

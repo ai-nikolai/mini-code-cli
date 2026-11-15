@@ -10,6 +10,7 @@ from .claude_code import ClaudeCodeAgent
 from .command import CommandAgent
 from .mini_code import MiniCodeAgent
 from .mock_agent import MockAgent
+from .opencode import OpenCodeAgent
 from .pi import PiAgent
 
 #: ``--agent`` name -> adapter class.
@@ -17,14 +18,15 @@ ADAPTERS = {
     MiniCodeAgent.name: MiniCodeAgent,
     ClaudeCodeAgent.name: ClaudeCodeAgent,
     PiAgent.name: PiAgent,
+    OpenCodeAgent.name: OpenCodeAgent,
     CommandAgent.name: CommandAgent,
     MockAgent.name: MockAgent,
 }
 
 __all__ = [
     "AGENT_MD", "ADAPTERS", "AgentAdapter", "AgentError", "ClaudeCodeAgent",
-    "CommandAgent", "MiniCodeAgent", "MockAgent", "PiAgent", "get_adapter",
-    "load_agent_preamble",
+    "CommandAgent", "MiniCodeAgent", "MockAgent", "OpenCodeAgent", "PiAgent",
+    "get_adapter", "load_agent_preamble",
 ]
 
 def get_adapter(spec):
