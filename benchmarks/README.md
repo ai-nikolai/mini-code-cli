@@ -1115,8 +1115,11 @@ A fifth one is not Apptainer-specific but bites the same way: with a thinking mo
 an output cap that is too small is *not* a neutral safety net. At `--max-tokens 4096`
 the model spent the whole budget on reasoning and returned neither text nor a tool
 call; the CLI ended the session, the patch came back empty and the instance scored
-unresolved. The `swe` setting now uses `8192`, and `agent_loop` nudges a truncated
+unresolved. The `swe` setting now uses the same 32k output budget as Claude Code and
+a 200k context window, and `agent_loop` nudges a truncated
 (`finish_reason == "length"`) turn to continue up to three times instead of stopping.
+The retry budget resets after every successful reply, so a long run does not inherit
+an exhausted budget from an earlier truncation.
 
 * SWE-bench grading under Apptainer is §11, not this section: `tb_apptainer.py`
   derives images for Terminal-Bench only.

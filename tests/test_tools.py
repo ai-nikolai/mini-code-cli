@@ -6,6 +6,7 @@ truncated file, and a fetch cannot pull an unbounded body into memory.
 """
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -219,6 +220,42 @@ class FetchCapTest(unittest.TestCase):
         with mock.patch.object(tools, "_fetch", new=fake_fetch):
             tools.read_website("http://example.invalid", max_chars=0)
         self.assertEqual(calls["max_bytes"], tools.DEFAULT_MAX_FETCH_BYTES)
+
+
+class ShellOutputCapTest(ToolTestCase):
+
+    def test_small_output_is_returned_without_a_file(self):
+        result = tools.run_shell_command("echo hello", cwd=self.directory)
+        self.assertIn("hello", result)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.directory, ".mini", "tool-output")))
+
+    def test_large_output_is_capped_and_saved_in_full(self):
+        size = tools.DEFAULT_MAX_SHELL_OUTPUT_CHARS * 2
+        command = f"{sys.executable} -c \"print('x' * {size})\""
+        result = tools.run_shell_command(command, cwd=self.directory)
+
+        self.assertLess(len(result), tools.DEFAULT_MAX_SHELL_OUTPUT_CHARS + 2_000)
+        self.assertIn("truncated", result)
+        self.assertIn("full output saved to", result)
+
+        directory = os.path.join(self.directory, ".mini", "tool-output")
+        files = os.listdir(directory)
+        self.assertEqual(len(files), 1)
+        path = os.path.join(directory, files[0])
+        self.assertIn(path, result)
+        with open(path, encoding="utf-8") as handle:
+            self.assertGreaterEqual(len(handle.read()), size)
+
+    def test_a_missing_worktree_still_returns_a_bounded_result(self):
+        # A read-only cwd must not make the tool raise just because the full
+        # output cannot be saved; the heading/exit code still comes back.
+        with mock.patch.object(tools, "_save_shell_output", return_value=None):
+            result = tools.run_shell_command(
+                f"{sys.executable} -c \"print('y' * 60000)\"",
+                cwd=self.directory)
+        self.assertIn("full output could not be saved", result)
+        self.assertLess(len(result), tools.DEFAULT_MAX_SHELL_OUTPUT_CHARS + 2_000)
 
 
 if __name__ == "__main__":

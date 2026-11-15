@@ -25,6 +25,7 @@ without the tests reaching into every module.
 
 import os
 import json
+import re
 import time
 import argparse
 
@@ -50,6 +51,7 @@ from .config import (
     DEFAULT_TOOL_TIMEOUT,
     DEFAULT_HTTP_TIMEOUT,
     compaction_budget,
+    default_max_output_tokens,
 )
 from .persistence import (
     save_history,
@@ -134,7 +136,7 @@ def parse_args():
         description="Agent loop for interacting with a language model")
     # MODEL / LLM related
     parser.add_argument("--url", type=str, default=f"{DEFAULT_MODEL_URL}", help=f"API host, default={DEFAULT_MODEL_URL}")
-    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for a single LLM response (the reply budget), default=None. Also used as the output headroom reserved when deriving the compaction limit from the model's context window.")
+    parser.add_argument("--max-tokens", type=int, default=None, help="Maximum tokens for a single LLM response (the reply budget). Unset (default): 32768 for a large-context model, clamped to half the model's context window. It is also used as the output headroom reserved when deriving the compaction limit from the model's context window.")
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help=f"Temperature for LLM, default={DEFAULT_TEMPERATURE}")
     parser.add_argument("--model", type=str, help="Model name, default=None")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
@@ -166,6 +168,10 @@ def parse_args():
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
                         help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify-step: same, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+    parser.add_argument("--allow-nudge", action="store_true",
+                        help="Plan mode only: when the model replies without a tool call, ask it to continue (or reply DONE) before running the plan review. Works with every --plan-strategy.")
+    parser.add_argument("--nudge-limit", type=int, default=1,
+                        help="Maximum continuation nudges per text-only stop with --allow-nudge. default=1")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
     parser.add_argument("--tui", nargs="?", const="on", default="auto",
@@ -624,6 +630,27 @@ TRUNCATED_RETRY_NUDGES = (
     "task is complete, reply DONE.",
 )
 
+#: A text-only reply only counts as finished when it carries an explicit marker.
+#: "I will complete X" is not enough; the nudge asks the model to say DONE.
+_COMPLETION_MARKER_RE = re.compile(
+    r"(?i)\b(done|complete|completed|finished)\b")
+_NEGATED_COMPLETION_RE = re.compile(
+    r"(?i)\b(?:not|never|haven't|hasn't|isn't|aren't|wasn't|weren't)\s+"
+    r"(?:done|complete|completed|finished)\b")
+
+TEXT_ONLY_NUDGE = (
+    "You stopped without a tool call. If the task is not complete, continue "
+    "with the next tool call now. If it is complete, reply DONE.")
+
+
+def _looks_complete(text):
+    """Whether a text-only reply explicitly claims completion."""
+    text = str(text or "")
+    if not _COMPLETION_MARKER_RE.search(text):
+        return False
+    return not _NEGATED_COMPLETION_RE.search(text)
+
+
 
 class AgentSession:
     """A single interactive agent session.
@@ -663,6 +690,10 @@ class AgentSession:
         self.server_url = f"{args.url}"
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
         self.model = self._resolve_model(args)
+        # A higher reply budget is the CLI default; an explicit --max-tokens
+        # always wins, and a small-window model gets at most half its window.
+        if getattr(args, "max_tokens", None) is None:
+            args.max_tokens = default_max_output_tokens(self.model)
 
         # Background task registry. It is independent of the foreground loop;
         # tools and /background read snapshots from it.
@@ -699,6 +730,15 @@ class AgentSession:
             self.plan_strategy = planning.DEFAULT_PLAN_STRATEGY
         self.plan_mode = (bool(getattr(self.args, "plan", False))
                           or requested_plan_strategy is not None)
+        self.allow_nudge = bool(getattr(self.args, "allow_nudge", False))
+        try:
+            self.nudge_limit = max(0, int(getattr(self.args, "nudge_limit", 1)))
+        except (TypeError, ValueError):
+            self.nudge_limit = 1
+        if self.allow_nudge and not self.plan_mode:
+            self.console.note(
+                "--allow-nudge only applies in plan mode; ignoring it.", "warn")
+        self._text_only_nudges = 0
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = (self.tui_mode != "off"
@@ -1851,8 +1891,14 @@ class AgentSession:
             extra step and keep whatever that step says.
           * ``open-plan`` -- the agent owns a plan document and maintains it
             itself; the loop neither authors nor reviews a plan.
+
+        ``--allow-nudge`` applies to every strategy when plan mode is active:
+        a text-only reply without an explicit completion marker gets up to
+        ``--nudge-limit`` continuation messages before the strategy's normal
+        review/end path runs.
         """
         self.messages.append({"role": "user", "content": user_input})
+        self._text_only_nudges = 0
 
         if self.plan_mode and not skip_plan:
             self._record_goal_request(user_input)
@@ -1872,10 +1918,28 @@ class AgentSession:
             should_continue = self._step()
             self._persist()
             if should_continue:
+                # A tool call or a recovered reply means the text-only nudge
+                # budget starts fresh at the next settle.
+                self._text_only_nudges = 0
                 self.console.note(
                     "Continuing with LLM calls until no more tool calls.", "info")
                 continue
             self.console.note("LLM seems to have to an end of the task.", "info")
+            # A text-only reply is a checkpoint, not necessarily completion.
+            # With --allow-nudge, ask the model to continue (bounded) before
+            # paying for a full plan review. An explicit DONE/complete marker
+            # skips the nudge and goes straight to the review.
+            if (self.plan_mode and not skip_plan and self.allow_nudge
+                    and self._text_only_nudges < self.nudge_limit
+                    and not _looks_complete(self._last_assistant_text())):
+                self._text_only_nudges += 1
+                self.console.note(
+                    "The model stopped without a tool call; asking it to "
+                    "continue before reviewing the plan.", "info")
+                self.messages.append({"role": "user",
+                                      "content": TEXT_ONLY_NUDGE})
+                self._persist()
+                continue
             if (not self.plan_mode or skip_plan
                     or self.plan_strategy == planning.OPEN_PLAN):
                 return

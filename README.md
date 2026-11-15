@@ -72,7 +72,7 @@ given a reference implementation.
 | `--url URL` | `http://0.0.0.0:30000` | API host |
 | `--model MODEL` | — | model name |
 | `--api-key KEY` | `$MINI_CODE_API_KEY` | API key for authentication |
-| `--max-tokens N` | — | reply budget; also the output headroom used when deriving the compaction limit |
+| `--max-tokens N` | 32768, or half the model window | reply budget; also the output headroom used when deriving the compaction limit |
 | `--temperature T` | `1.0` | sampling temperature |
 | `--system-prompt TEXT` | built-in | replace the system prompt (an `--agent-md` file is appended *after* it) |
 | `--prompt TEXT` | — | initial user prompt |
@@ -88,6 +88,8 @@ given a reference implementation.
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
 | `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
+| `--allow-nudge` | off | plan mode only: ask the model to continue (or reply DONE) when it stops without a tool call, before running the plan review |
+| `--nudge-limit N` | 1 | maximum continuation nudges per text-only stop with `--allow-nudge` |
 | `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
 | `--compaction-strategy NAME` | `summarise` | `summarise`, `predict-files` or `predict-messages` |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
@@ -115,7 +117,7 @@ parameter a model does not need is defaulted, so omitting it keeps the previous 
 | `glob` | list files matching a glob (one per line, `**` supported), optionally against a `root`; capped at 2000 matches / 100k characters |
 | `web_search` | best-effort lookup: related queries + a short Wikipedia extract. Never raises |
 | `read_website` | fetch raw text/HTML of a **public http/https** URL (other schemes and private/link-local hosts are rejected; `MINI_CODE_ALLOW_PRIVATE_URLS=1` overrides); `max_chars` caps size |
-| `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported |
+| `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported. Output over 50k characters is capped in the reply and the full text is written to `.mini/tool-output/` so `read_file`/`grep` can page it |
 | `background` | start/list/output/wait/cancel background **shell** tasks (needs `--background --enable-shell`) or **sub-agent** tasks (needs `--background --enable-subagents`); output is captured in a per-task log |
 
 ## Sub-agents
@@ -324,6 +326,13 @@ on for later turns).
 > looks done the plan is reviewed and any outstanding task is re-queued before the agent returns
 > to you (except with `open-plan`).
 
+`--allow-nudge` adds a completion checkpoint to any plan strategy. When the model replies without
+a tool call and the text does not explicitly say `DONE` / complete / finished, the loop appends a
+short “continue with the next tool call, or reply DONE” message instead of immediately paying for a
+plan review. `--nudge-limit N` controls how many nudges are allowed per text-only stop (default 1).
+After the limit, the normal plan strategy takes over. This is useful for thinking models that tend
+to emit an intermediate “let me do X” message and stop.
+
 ### Scratchpad — `--scratchpad`
 
 With `--scratchpad`, the loop creates `.mini/SCRATCHPAD.md` inside `--allowed-dir` and tells the
@@ -397,7 +406,7 @@ Because a rollover leaves no trace in the transcript (the old turns really are g
 console says in plain terms what happened — all of it without `--verbose`:
 
 ```
-[!] Compacting the conversation: 42 messages -> a summary (51000 tokens in, 8192 reserved for the reply > 52000 budget). The current turn (1 message) is kept verbatim.
+[!] Compacting the conversation: 42 messages -> a summary (51000 tokens in, 32768 reserved for the reply > 60000 budget). The current turn (1 message) is kept verbatim.
 [!] Summary preview: The user asked for a token-based compaction trigger, then fixed ...
 [!] Compacted history_0.json (42 messages) into a summary; history_1.json now starts with 3 messages (summary + 1 kept message).
 ```
