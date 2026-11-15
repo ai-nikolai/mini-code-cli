@@ -11,6 +11,11 @@ Everything in this directory is driven by one command line, `python -m benchmark
 for the results (`python -m benchmarks.analyze` and the scorecard in
 `python -m benchmarks.table`).
 
+The Terminal-Bench config follows the official policy as closely as Apptainer allows:
+task-defined container memory and agent/verifier timeouts, `n_concurrent=1`, and the full task
+set except `qemu-startup`/`qemu-alpine-ssh` (musl/fakeroot). SIF environment-build and agent-setup
+timeouts keep a 12× multiplier because extraction/start is much slower than a Docker image start.
+
 ---
 
 ## 1. Prerequisites
