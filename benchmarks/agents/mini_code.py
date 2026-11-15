@@ -22,7 +22,8 @@ and nothing else, so a difference in success rate can be attributed to it:
 ``short-tool-timeout``  ``--tool-timeout 30``: fail fast on hung commands
 ``all``                 the kitchen sink (plan + subagents + shell + sudo)
 ``swe``                 the benchmark setting: unattended shell + sudo, a
-                        131k context and long tool/LLM timeouts
+                        200k context, a 32k reply budget and long tool/LLM
+                        timeouts
 ``swe-compaction-predict-files``
                         ``swe`` + ``--compaction-strategy predict-files``
 ``swe-compaction-predict-messages``
@@ -32,6 +33,8 @@ and nothing else, so a difference in success rate can be attributed to it:
                         benchmark keeps measuring the same behaviour now that
                         ``plan-verify`` is the CLI default
 ``swe-plan-verify``     ``swe`` + ``--plan --plan-strategy plan-verify``
+``swe-plan-verify-nudge``
+                        ``swe-plan-verify`` + ``--allow-nudge --nudge-limit 1``
 ``swe-open-plan``       ``swe`` + ``--plan --plan-strategy open-plan``
 ``swe-compaction-predict-files-plan-verify``
                         the two best strategy choices combined:
@@ -102,6 +105,10 @@ class MiniCodeAgent(AgentAdapter):
             plan_strategy="plan-verify-step"),
         "swe-plan-verify": dict(
             _SWE, flags=_SWE["flags"] + ["--plan"],
+            plan_strategy="plan-verify"),
+        "swe-plan-verify-nudge": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--allow-nudge",
+                                        "--nudge-limit", "1"],
             plan_strategy="plan-verify"),
         "swe-open-plan": dict(
             _SWE, flags=_SWE["flags"] + ["--plan"],

@@ -194,6 +194,16 @@ class MiniCodeAdapterTests(unittest.TestCase):
             argv[argv.index("--plan-strategy") + 1], "plan-verify")
         self.assertIn("--plan", argv)
 
+    def test_nudge_preset_is_plan_verify_plus_the_nudge_flag(self):
+        argv = self.adapter("swe-plan-verify-nudge").argv("p", local_model())
+        self.assertIn("--plan", argv)
+        self.assertEqual(
+            argv[argv.index("--plan-strategy") + 1], "plan-verify")
+        self.assertIn("--allow-nudge", argv)
+        self.assertEqual(argv[argv.index("--nudge-limit") + 1], "1")
+        for baseline in ("--auto-mode", "--enable-shell", "--sudo"):
+            self.assertIn(baseline, argv)
+
     def test_container_argv_uses_the_images_interpreter(self):
         argv = self.adapter().argv("p", local_model(), container=True)
         self.assertEqual(argv[0], "python3")
