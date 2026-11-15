@@ -400,6 +400,19 @@ class TerminalBenchSuite(Suite):
         if options.get("verifier_timeout_multiplier"):
             argv += ["--verifier-timeout-multiplier",
                      str(float(options["verifier_timeout_multiplier"]))]
+        # Several Terminal-Bench test scripts install pytest at verify time with
+        # a bare `pip install`. On PEP 668 images that now fails with
+        # "externally-managed-environment", and on images with two interpreters
+        # a user-site install can land in a Python the test command does not use.
+        # Let the verifier override PEP 668 and install system-wide; the SIF also
+        # bakes pytest/pytest-json-ctrf into the image's interpreters.
+        verifier_env = options.get("verifier_env") or (
+            "PIP_BREAK_SYSTEM_PACKAGES=1", "PIP_USER=0")
+        if isinstance(verifier_env, dict):
+            verifier_env = [f"{key}={value}"
+                            for key, value in verifier_env.items()]
+        for entry in verifier_env:
+            argv += ["--verifier-env", str(entry)]
         # Some task images (the qemu ones) are musl/Alpine and have no
         # /.singularity.d/libs/fakeroot, so harbor's unconditional
         # `exec --fakeroot` dies before the server starts. Excluding them is

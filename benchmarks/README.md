@@ -1009,6 +1009,14 @@ three are handled by `benchmarks/suites/tb_apptainer.py`:
    `/etc/resolv.conf` bind — the container then cannot resolve anything, which
    surfaces far away as `apt`/`curl`/verifier failures (`Could not resolve host:
    astral.sh`). The suite passes `singularity_no_mount=home,tmp` instead.
+4. **Verifier test dependencies are baked in.** Several upstream `tests/test.sh`
+   scripts run a bare `pip install pytest ...`; on PEP 668 images that fails with
+   `externally-managed-environment`, and a `pip` from one interpreter may install
+   tests for a different `python`. The SIF installs `pytest` and
+   `pytest-json-ctrf` into both `/usr/local/bin/python` and `/usr/bin/python3`,
+   and the harbor command also passes
+   `--verifier-env PIP_BREAK_SYSTEM_PACKAGES=1 --verifier-env PIP_USER=0`.
+   Existing SIFs must be rebuilt (`FORCE=1`) to pick up the baked packages.
 
 ```bash
 # 1. derive one .sif per task and stage a local dataset (downloads the task files
