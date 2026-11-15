@@ -435,6 +435,18 @@ class TerminalBenchSuiteTests(unittest.TestCase):
         self.assertEqual(
             argv[argv.index("--exclude-task-name") + 1], "qemu-startup")
 
+    def test_harbor_gives_the_verifier_a_usable_pip_environment(self):
+        trial = minimal_config(
+            suites=[{"name": "terminal-bench", "dataset": "terminal-bench",
+                     "version": "2.1", "limit": 1}],
+            agents=[{"name": "mini-code", "settings": ["swe"]}]).trials()[0]
+        argv = get_suite(trial.suite).commands(
+            trial, "/tmp/work", "/tmp/run", get_adapter(trial.agent))[0].argv
+        verifier_env = [argv[i + 1] for i, item in enumerate(argv)
+                        if item == "--verifier-env"]
+        self.assertIn("PIP_BREAK_SYSTEM_PACKAGES=1", verifier_env)
+        self.assertIn("PIP_USER=0", verifier_env)
+
     def test_harbor_can_include_only_selected_tasks(self):
         trial = minimal_config(
             suites=[{"name": "terminal-bench", "dataset": "terminal-bench",
@@ -1200,6 +1212,15 @@ class TbSifDefinitionTests(unittest.TestCase):
         text = render_def("example/image:tag")
         self.assertIn("py3-virtualenv", text)
         self.assertIn("command -v virtualenv", text)
+
+    def test_verifier_dependencies_are_baked_into_each_interpreter(self):
+        from benchmarks.suites.tb_apptainer import render_def
+
+        text = render_def("example/image:tag")
+        self.assertIn("pytest==8.4.1", text)
+        self.assertIn("pytest-json-ctrf==0.3.5", text)
+        self.assertIn("for py in /usr/local/bin/python /usr/bin/python3", text)
+        self.assertIn("--break-system-packages", text)
 
 
 class AgentMetricsTests(unittest.TestCase):

@@ -54,6 +54,14 @@ POST_INSTALL = (
 #: dependency-free after all: it imports ``requests`` for its HTTP client.
 PIP_FOR_AGENT = ("requests",)
 
+#: Test dependencies that several Terminal-Bench ``tests/test.sh`` scripts try
+#: to install at verify time. Baking them in makes verification independent of a
+#: PEP 668 refusal or a ``pip``/``python`` interpreter mismatch. They are
+#: installed into every interpreter the image may expose (see the loop in
+#: :func:`render_def`), because ``pytest`` and ``python -m pytest`` can resolve
+#: to different Pythons.
+VERIFIER_DEPS = ("pytest==8.4.1", "pytest-json-ctrf==0.3.5")
+
 
 def render_def(image, mini_code_dir=None):
     """The Apptainer definition that turns a task image into a runnable SIF."""
@@ -94,13 +102,17 @@ def render_def(image, mini_code_dir=None):
         "    # harbor's singularity backend wants a ready server venv here; the SIF",
         "    # is read-only, and its --writable-tmpfs layer does not survive the",
         "    # agent setup step, so the venv has to be baked in.",
+        "    for py in /usr/local/bin/python /usr/bin/python3; do",
+        "        [ -x \"$py\" ] || continue",
+        "        \"$py\" -m ensurepip --upgrade >/dev/null 2>&1 || true",
+        f"        \"$py\" -m pip install -q --break-system-packages "
+        f"{' '.join(PIP_FOR_AGENT + VERIFIER_DEPS)} 2>/dev/null || "
+        f"\"$py\" -m pip install -q {' '.join(PIP_FOR_AGENT + VERIFIER_DEPS)} "
+        f"|| true",
+        "    done",
         "    if [ -x /usr/bin/python3 ]; then",
-        # agent runtime deps into the *system* interpreter (the bridge starts
-        # `python3 -m mini_code_cli`); --break-system-packages for PEP 668 images.
+        # The harbor server venv must use the interpreter harbor itself starts.
         "        /usr/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || true",
-        f"        /usr/bin/python3 -m pip install -q --break-system-packages "
-        f"{' '.join(PIP_FOR_AGENT)} 2>/dev/null || "
-        f"/usr/bin/python3 -m pip install -q {' '.join(PIP_FOR_AGENT)} || true",
         "        if [ ! -x /opt/harbor-server/bin/pip ]; then",
         "            rm -rf /opt/harbor-server",
         "            /usr/bin/python3 -m venv /opt/harbor-server || "
