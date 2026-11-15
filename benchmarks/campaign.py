@@ -108,8 +108,8 @@ MODES = {
                           "instance_seconds": 7200, "agent_seconds": 3600}),
 }
 
-AGENT_CHOICES = ("mini-code", "pi", "claude-code", "all")
-ALL_AGENTS = ("mini-code", "pi", "claude-code")
+AGENT_CHOICES = ("mini-code", "pi", "claude-code", "opencode", "all")
+ALL_AGENTS = ("mini-code", "pi", "claude-code", "opencode")
 
 
 def build_parser():
@@ -119,7 +119,7 @@ def build_parser():
     parser.add_argument("--dataset", "-d", required=True, choices=sorted(DATASETS),
                         help="swe-bench | swe-bench-lite | terminalbench-2.1 | terminalbench-2.0")
     parser.add_argument("--agent", "-a", default="all", choices=AGENT_CHOICES,
-                        help="mini-code | pi | claude-code | all (default: all)")
+                        help="mini-code | pi | claude-code | opencode | all (default: all)")
     # Both spellings are accepted on purpose: `--mode` in documentation, `-mode`
     # is what people type after reading a single-dash example.
     parser.add_argument("--mode", "-mode", "-m", dest="mode",
