@@ -69,6 +69,12 @@ def build_parser():
     analyze.add_argument("analyze_args", nargs=argparse.REMAINDER,
                          help="paths and flags, forwarded to benchmarks.analyze")
 
+    table = sub.add_parser(
+        "table", help="scorecard from stored runs (see also: python -m benchmarks.table)",
+        add_help=False)
+    table.add_argument("table_args", nargs=argparse.REMAINDER,
+                       help="paths and flags, forwarded to benchmarks.table")
+
     report = sub.add_parser("report", help="rebuild a run's summary")
     report.add_argument("--run", required=True, help="run directory")
     report.add_argument("--csv", nargs="?", const="auto", default=None,
@@ -119,6 +125,10 @@ def _dispatch(args, parser):
         from .analyze import main as analyze_main
 
         return analyze_main(args.analyze_args)
+    if args.command == "table":
+        from .table import main as table_main
+
+        return table_main(args.table_args)
 
     config = _require_config(args)
     if args.command == "models":

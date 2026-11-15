@@ -7,8 +7,9 @@ benchmark is executed by its own official harness (`harbor` for Terminal-Bench 2
 1.x core datasets, `swebench.harness.run_evaluation` for SWE-bench), and every agent is driven
 through its own CLI.
 
-Everything in this directory is driven by one command line, `python -m benchmarks`, plus a
-reader for the results (`python -m benchmarks.analyze`).
+Everything in this directory is driven by one command line, `python -m benchmarks`, plus readers
+for the results (`python -m benchmarks.analyze` and the scorecard in
+`python -m benchmarks.table`).
 
 ---
 
@@ -307,7 +308,7 @@ compaction, planning or background choice on top of it:
 | `swe` | baseline: `summarise` compaction, no plan mode |
 | `swe-compaction-predict-files` | `--compaction-strategy predict-files` |
 | `swe-compaction-predict-messages` | `--compaction-strategy predict-messages` |
-| `swe-plan` | `--plan` (default `plan-verify-step`) |
+| `swe-plan` | `--plan --plan-strategy plan-verify-step` (pinned baseline) |
 | `swe-plan-verify` | `--plan --plan-strategy plan-verify` |
 | `swe-open-plan` | `--plan --plan-strategy open-plan` |
 | `swe-compaction-predict-files-plan-verify` | the two best choices combined |
@@ -559,6 +560,31 @@ ALL                                                                       9  0  
 answers), `to` = timeouts, `cmdfail` = commands that did not finish, `mean s` = mean wall-clock
 per outcome that reported one (pooled, not a mean of means; `-` when none did). `--md`,
 `--json` and `--csv` write the same table for a README, a script or a spreadsheet.
+
+### 8.1 Scorecard from stored campaign runs
+
+For the raw-score + token table, point `python -m benchmarks.table` at campaign or agent
+directories. It joins each run's `manifest.json` (which maps a trial directory to its agent
+and setting) with the per-task `results.jsonl`, and sums `extra.metrics` — so it is not
+affected by a vLLM server counter that restarted mid-run:
+
+```bash
+python -m benchmarks.table \
+    results/tb21-clean1-{a,b,c}_* results/tb21-clean1-pi_* \
+    results/tb21-clean1-claude_terminalbench* results/tb21-combined1_* \
+    --md scorecard.md --sort raw
+
+# the same through the main CLI
+python -m benchmarks table results/tb21-combined1_*
+```
+
+Rows with the same `(agent, setting, model)` are pooled, so point it at the
+campaigns you want compared. In particular, do not also pass a retry campaign
+(a subset of the main run) unless you want its outcomes added to the total.
+
+The table has `resolved`, `raw` (`resolved / n`), `err`, `clean`
+(`resolved / (n - errors - timeouts)`), `mean s`, total `tokens`, `tok/task`, and `tok n`
+(how many trials reported token metrics). `--json` writes the underlying rows.
 
 ---
 
