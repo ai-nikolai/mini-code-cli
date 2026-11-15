@@ -89,6 +89,15 @@
       "models": [
         "ornith-35b-a3b-anthropic"
       ]
+    },
+    {
+      "name": "opencode",
+      "settings": [
+        "default"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
     }
   ],
   "suites": [

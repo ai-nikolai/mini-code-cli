@@ -337,6 +337,22 @@ class OtherAdapterTests(unittest.TestCase):
         argv = get_adapter(AgentSpec(name="pi", setting="json-events")).argv("p", local_model())
         self.assertEqual(argv[argv.index("--mode") + 1], "json")
 
+    def test_opencode_uses_the_harbor_builtin_and_local_endpoint(self):
+        adapter = get_adapter(AgentSpec(name="opencode"))
+        selection = adapter.harbor_selection(local_model())
+        self.assertEqual(selection["agent"], "opencode")
+        env = adapter.env(local_model(base="http://127.0.0.1:31208"))
+        self.assertEqual(env["OPENAI_BASE_URL"], "http://127.0.0.1:31208/v1")
+        argv = adapter.argv("p", local_model())
+        self.assertEqual(argv[0], "opencode")
+        self.assertIn("run", argv)
+        self.assertIn("--dangerously-skip-permissions", argv)
+
+    def test_opencode_no_web_setting(self):
+        adapter = get_adapter(AgentSpec(name="opencode", setting="no-web"))
+        self.assertEqual(adapter.harbor_selection(local_model())["kwargs"],
+                         {"disable_web_search": True})
+
     def test_command_template_substitutes_and_rejects_unknown_placeholders(self):
         adapter = get_adapter(AgentSpec(
             name="command", setting="mine",
