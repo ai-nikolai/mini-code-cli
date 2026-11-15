@@ -150,6 +150,11 @@ class MiniCodeAdapterTests(unittest.TestCase):
         argv = self.adapter("short-tool-timeout").argv("p", local_model())
         self.assertEqual(argv[argv.index("--tool-timeout") + 1], "30")
 
+    def test_the_swe_baseline_uses_the_32k_generation_budget(self):
+        argv = self.adapter("swe").argv("p", local_model())
+        self.assertEqual(argv[argv.index("--max-context-tokens") + 1], "200000")
+        self.assertEqual(argv[argv.index("--max-tokens") + 1], "32768")
+
     def test_strategy_presets_change_exactly_one_choice(self):
         argv = self.adapter("swe").argv("p", local_model())
         self.assertNotIn("--compaction-strategy", argv)

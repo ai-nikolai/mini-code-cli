@@ -55,14 +55,15 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 #: plus one compaction/planning choice, so a comparison changes one variable.
 _SWE = {
     "flags": ["--auto-mode", "--enable-shell", "--sudo"],
-    "max_context_tokens": 131072,
+    "max_context_tokens": 200_000,
     "tool_timeout": 600,
     "llm_timeout": 600,
     # Bounded, reproducible responses: see MiniCodeAgent.argv.
-    # 4096 was too tight -- a thinking model spent the whole budget on
-    # reasoning and returned no tool call (empty patch, 0 resolved),
-    # even with the loop's truncation nudge.
-    "max_tokens": 8192,
+    # 8192 was too tight -- a thinking model spent the whole budget on
+    # reasoning and returned no tool call (empty patch, 0 resolved), even with
+    # the loop's truncation nudge. Match the 32k output budget used by Claude
+    # Code and current local servers, with the same 200k context window.
+    "max_tokens": 32_768,
     "temperature": 0.6,
 }
 
