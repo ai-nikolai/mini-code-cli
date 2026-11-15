@@ -165,7 +165,7 @@ def parse_args():
                         help="How to compact history. summarise: summary only (default). predict-files: summary + re-read the files the model predicts it needs. predict-messages: summary + the original messages the model predicts are worth keeping.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
-                        help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+                        help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify-step: same, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
     parser.add_argument("--tui", nargs="?", const="on", default="auto",
@@ -1806,12 +1806,12 @@ class AgentSession:
 
         The planning *strategy* changes the plan/review wiring only:
 
-          * ``plan-verify-step`` (default) -- current behaviour: author a plan,
-            review it when the work settles, then run one extra step and keep
-            whatever that step says.
-          * ``plan-verify`` -- same plan and review, but the post-review step is
-            kept only when it calls a tool. A no-tool response is shown to the
-            user and ends the turn without being appended.
+          * ``plan-verify`` (default) -- author a plan, review it when the work
+            settles, then keep the post-review step only when it calls a tool.
+            A no-tool response is shown to the user and ends the turn without
+            being appended.
+          * ``plan-verify-step`` -- same plan and review, but always run one
+            extra step and keep whatever that step says.
           * ``open-plan`` -- the agent owns a plan document and maintains it
             itself; the loop neither authors nor reviews a plan.
         """

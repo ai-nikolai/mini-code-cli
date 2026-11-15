@@ -157,7 +157,8 @@ class MiniCodeAdapterTests(unittest.TestCase):
 
         argv = self.adapter("swe-plan").argv("p", local_model())
         self.assertIn("--plan", argv)
-        self.assertNotIn("--plan-strategy", argv)
+        self.assertEqual(
+            argv[argv.index("--plan-strategy") + 1], "plan-verify-step")
 
         argv = self.adapter("swe-background").argv("p", local_model())
         self.assertIn("--background", argv)

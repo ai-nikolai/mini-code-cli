@@ -1,17 +1,18 @@
 """Planning strategies for ``--plan`` mode.
 
-The loop's built-in plan handling is :func:`plan_verify_step`, the original
-implementation:
+The default is ``plan-verify``, the strategy that won the clean benchmark
+comparison:
 
   * the loop asks the model to author a plan;
   * after the work settles it asks the model to review the plan;
-  * it runs one more step so the review can drive further work.
+  * the post-review step is appended to the transcript only when it calls a
+    tool. A no-tool answer is shown to the user and ends the turn without being
+    stored.
 
 Alternative strategies:
 
-  * ``plan-verify`` -- same plan + review, but the post-review step is only
-    appended to the transcript when it calls a tool. A no-tool answer is shown
-    to the user and ends the turn without being stored.
+  * ``plan-verify-step`` -- the original behaviour: same plan + review, then
+    always run one extra step and keep whatever that step says.
   * ``open-plan`` -- the agent owns a plan document in ``--allowed-dir/.mini``
     and reads/writes it with the normal file tools; the loop neither authors
     nor reviews a plan.
@@ -26,4 +27,4 @@ PLAN_VERIFY = "plan-verify"
 OPEN_PLAN = "open-plan"
 
 PLAN_STRATEGIES = (PLAN_VERIFY_STEP, PLAN_VERIFY, OPEN_PLAN)
-DEFAULT_PLAN_STRATEGY = PLAN_VERIFY_STEP
+DEFAULT_PLAN_STRATEGY = PLAN_VERIFY

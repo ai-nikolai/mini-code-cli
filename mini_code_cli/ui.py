@@ -31,6 +31,7 @@ import threading
 import unicodedata
 from collections import deque
 
+from .planning import DEFAULT_PLAN_STRATEGY
 from .utils import oneline, plural
 
 # --- ANSI SGR codes ---------------------------------------------------------
@@ -801,7 +802,7 @@ class Console:
                 server_url, model, permission_mode, agent_mode, shell_mode,
                 compaction_strategy=None, plan_strategy=None, plan_mode=False):
         """Render the startup info banner."""
-        planning = plan_strategy or "plan-verify-step"
+        planning = plan_strategy or DEFAULT_PLAN_STRATEGY
         if not plan_mode:
             planning += " (plan mode off)"
         lines = [

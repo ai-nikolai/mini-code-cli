@@ -87,7 +87,7 @@ given a reference implementation.
 | `--tui [auto\|on\|off]` | `auto` | fixed full-screen dashboard. `auto` enables it only on a known interactive TTY; `on` forces it; `off` uses the scrolling console |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
-| `--plan-strategy NAME` | `plan-verify-step` | `plan-verify-step`, `plan-verify` or `open-plan` (implies `--plan`) |
+| `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
 | `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
 | `--compaction-strategy NAME` | `summarise` | `summarise`, `predict-files` or `predict-messages` |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
@@ -313,8 +313,8 @@ on for later turns).
 
 | Strategy | What happens |
 | --- | --- |
-| `plan-verify-step` (default) | Current behaviour: author a plan, review it once the work settles, then run one extra step and keep whatever that step says. |
-| `plan-verify` | Same plan + review, but the post-review step is kept only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
+| `plan-verify` (default) | Author a plan, review it once the work settles, then keep the post-review step only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
+| `plan-verify-step` | The original behaviour: same plan + review, then always run one extra step and keep whatever that step says. |
 | `open-plan` | The agent owns a plan document at `.mini/PLAN.md` inside `--allowed-dir`, reads and updates it with the normal file tools, and the loop neither authors nor reviews a plan. |
 
 > [!NOTE]

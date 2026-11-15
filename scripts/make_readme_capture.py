@@ -69,7 +69,7 @@ def _capture() -> str:
         "manual",
         "on",
         compaction_strategy="summarise",
-        plan_strategy="plan-verify-step",
+        plan_strategy="plan-verify",
         plan_mode=False,
     )
     console.rule(title="turn 1", char="═", fg="cyan")

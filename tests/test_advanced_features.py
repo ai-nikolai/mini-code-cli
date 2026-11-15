@@ -309,6 +309,10 @@ class PlanStrategyTest(_AdvancedCase):
         session = self.new_session(plan=False, plan_strategy="open-plan")
         self.assertTrue(session.plan_mode)
 
+    def test_plan_mode_defaults_to_plan_verify(self):
+        session = self.new_session(plan=True)
+        self.assertEqual(session.plan_strategy, "plan-verify")
+
     def test_plan_verify_drops_the_final_no_tool_step(self):
         session = self.new_session(start=False, plan=True,
                                    plan_strategy="plan-verify")
@@ -432,7 +436,7 @@ class WelcomeBannerTest(_AdvancedCase):
     def test_banner_marks_planning_off_when_plan_mode_is_disabled(self):
         out = self._welcome(compaction_strategy="summarise")
         self.assertIn("compaction  : summarise", out)
-        self.assertIn("planning    : plan-verify-step (plan mode off)", out)
+        self.assertIn("planning    : plan-verify (plan mode off)", out)
 
     def test_welcome_shows_the_ascii_mark(self):
         out = self._welcome()

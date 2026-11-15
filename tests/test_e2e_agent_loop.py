@@ -70,7 +70,8 @@ USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 # test helpers
 # ---------------------------------------------------------------------------
 
-def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False):
+def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False,
+              plan_strategy=None):
     """Build the argparse-like namespace AgentSession.__init__ reads."""
     return argparse.Namespace(
         url="http://0.0.0.0:30000",
@@ -95,6 +96,7 @@ def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False):
         tool_timeout=30,
         max_context_tokens=None,
         plan=plan,
+        plan_strategy=plan_strategy,
         verbose=False,
     )
 
@@ -276,7 +278,8 @@ class PlanModeEndToEndTest(unittest.TestCase):
         ])
 
         prompt = "Plan the work: grep for 'apple' in fruit.txt and report the count."
-        args = make_args(self.workdir, self.cache_dir, plan=True)
+        args = make_args(self.workdir, self.cache_dir, plan=True,
+                         plan_strategy="plan-verify-step")
         session = AgentSession(args, console=silent_console())
         stub = run_loop(session, prompt, stub)
 

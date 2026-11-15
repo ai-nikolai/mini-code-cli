@@ -27,8 +27,10 @@ and nothing else, so a difference in success rate can be attributed to it:
                         ``swe`` + ``--compaction-strategy predict-files``
 ``swe-compaction-predict-messages``
                         ``swe`` + ``--compaction-strategy predict-messages``
-``swe-plan``            ``swe`` + ``--plan``: default plan strategy
-                        (``plan-verify-step``)
+``swe-plan``            ``swe`` + ``--plan --plan-strategy plan-verify-step``:
+                        the original plan loop, pinned explicitly so the
+                        benchmark keeps measuring the same behaviour now that
+                        ``plan-verify`` is the CLI default
 ``swe-plan-verify``     ``swe`` + ``--plan --plan-strategy plan-verify``
 ``swe-open-plan``       ``swe`` + ``--plan --plan-strategy open-plan``
 ``swe-compaction-predict-files-plan-verify``
@@ -94,7 +96,9 @@ class MiniCodeAgent(AgentAdapter):
             _SWE, compaction_strategy="predict-files"),
         "swe-compaction-predict-messages": dict(
             _SWE, compaction_strategy="predict-messages"),
-        "swe-plan": dict(_SWE, flags=_SWE["flags"] + ["--plan"]),
+        "swe-plan": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan"],
+            plan_strategy="plan-verify-step"),
         "swe-plan-verify": dict(
             _SWE, flags=_SWE["flags"] + ["--plan"],
             plan_strategy="plan-verify"),
