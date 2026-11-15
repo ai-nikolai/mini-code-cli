@@ -510,6 +510,31 @@ class TruncatedReplyNudgeTest(unittest.TestCase):
         # What the server actually sees: a JSON string, never an array.
         self.assertTrue(json.dumps(nudge["content"]).startswith('"'))
 
+    def test_retries_escalate_then_reset_after_a_successful_reply(self):
+        args = make_args(self.workdir, self.cache_dir)
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+        session.messages.append({"role": "user", "content": "do the thing"})
+
+        length_usage = dict(USAGE, finish_reason="length")
+        stub = StubLLM([
+            ("", [], length_usage),
+            ("", [], length_usage),
+            ("A short useful answer.", [], USAGE),
+        ])
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            self.assertTrue(session._step())
+            self.assertEqual(session._truncated_retries, 1)
+            self.assertIn("Continue from where you stopped",
+                          session.messages[-1]["content"])
+            self.assertTrue(session._step())
+            self.assertEqual(session._truncated_retries, 2)
+            self.assertIn("be more precise",
+                          session.messages[-1]["content"])
+            self.assertFalse(session._step())
+
+        self.assertEqual(session._truncated_retries, 0)
+
 
 class CompactionTest(unittest.TestCase):
     """The module-level compaction helper that keeps the context window bounded."""

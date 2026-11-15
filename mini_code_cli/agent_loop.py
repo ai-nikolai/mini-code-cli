@@ -369,6 +369,15 @@ def _in_flight_tail(messages):
     return []
 
 
+#: Cap the transcript portion of the summariser prompt. A summary request that
+#: repeats the whole over-long history can hit the model's hard context limit
+#: itself (observed at ~261k input tokens), leaving every later request stuck.
+MAX_SUMMARY_PROMPT_TOKENS = 50_000
+
+#: Headroom for the summary template, the reply, and token-estimate error.
+SUMMARY_PROMPT_HEADROOM_TOKENS = 4_096
+
+
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
                   current_tokens=None, plan_hook=None, console=None, preserve=(),
@@ -447,51 +456,64 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         console.note(
             f"Compacting the conversation: {plural(len(messages), 'message')} "
             f"-> a summary ({reason}).{kept_note}", "warn")
-        summary_prompt = prompts.compaction_prompt(messages)
+        summary_budget = min(
+            int(token_limit or MAX_SUMMARY_PROMPT_TOKENS),
+            MAX_SUMMARY_PROMPT_TOKENS)
+        summary_budget = max(
+            4_096,
+            summary_budget - int(reserved_output_tokens or 0)
+            - SUMMARY_PROMPT_HEADROOM_TOKENS)
+        try:
+            summary_prompt = prompts.compaction_prompt(
+                messages, max_tokens=summary_budget)
+        except Exception as exc:
+            summary_prompt = ""
+            console.note(
+                f"Could not build the summary prompt: {exc}. Using the "
+                f"mechanical fallback summary.", "warn")
 
-        # The summariser sometimes answers with nothing at all. An empty summary
-        # must never be mistaken for a successful compaction: the caller would
-        # think the history had been shrunk while the over-long transcript was
-        # kept, and the rollover would be lost. Retry once, then give up loudly
-        # (keeping the messages and the segment index) so the user can see that
-        # compaction is not working -- previously this fell through silently and
-        # the over-cap transcript was retried, and paid for, on every step.
+        # The summariser sometimes answers with nothing at all, or the request
+        # itself fails (network, a context-length 400). An empty/failed summary
+        # must never be mistaken for a successful compaction, but keeping the
+        # over-long transcript leaves every subsequent request over budget. So
+        # retry once, then fall back to a deterministic mechanical summary and
+        # still roll the segment over: compaction is the only thing that can
+        # recover an already-overflowing history.
         summary = ""
-        for attempt in (1, 2):
-            console.start_thinking("compacting history")
-            try:
-                reply, _, compact_usage, _ = utils.unpack_llm_result(
-                    utils.call_openai_server(
-                        [{"role": "user", "content": summary_prompt}],
-                        max_tokens=1024,
-                        temperature=0.0,
-                        model=model,
-                        server_url=server_url,
-                        api_key=api_key,
-                        timeout=llm_timeout,
-                        console=console,
-                    ))
-            finally:
-                console.stop_thinking()
+        if summary_prompt:
+            for attempt in (1, 2):
+                compact_usage = None
+                console.start_thinking("compacting history")
+                try:
+                    reply, _, compact_usage, _ = utils.unpack_llm_result(
+                        utils.call_openai_server(
+                            [{"role": "user", "content": summary_prompt}],
+                            max_tokens=1024,
+                            temperature=0.0,
+                            model=model,
+                            server_url=server_url,
+                            api_key=api_key,
+                            timeout=llm_timeout,
+                            console=console,
+                        ))
+                except Exception as exc:
+                    console.note(f"Summariser call failed: {exc}", "warn")
+                    reply = ""
+                finally:
+                    console.stop_thinking()
 
-            accumulate_usage(token_stats, compact_usage)
-            summary = (reply or "").strip()
-            if summary:
-                break
-            if attempt == 1:
-                console.note("The summariser returned an empty summary; retrying once.", "warn")
+                accumulate_usage(token_stats, compact_usage)
+                summary = (reply or "").strip()
+                if summary:
+                    break
+                if attempt == 1:
+                    console.note("The summariser returned an empty summary; retrying once.", "warn")
 
         if not summary:
-            # Say plainly what did *not* happen: nothing was dropped and the
-            # segment did not move -- only the shrink did, so the next request
-            # may still be too large.
+            summary = compaction_mod.fallback_summary(messages)
             console.note(
-                f"Could not compact history: the summariser returned an empty "
-                f"summary twice. Keeping all {plural(len(messages), 'message')} "
-                f"and history_{history_index}.json as they are -- nothing was "
-                f"lost, but the next request may still be too large "
-                f"({reason}).", "warn")
-            return messages, False, history_index
+                "The summariser did not return usable text; using a mechanical "
+                "fallback summary so the history still shrinks.", "warn")
 
         system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
         compacted = []
@@ -586,6 +608,21 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
 #: nudged to continue before the session gives up. Bounded on purpose: a model
 #: that only ever rambles must still terminate.
 TRUNCATED_RETRY_LIMIT = 3
+
+#: Escalating continuation requests for truncated replies. The first is the
+#: original nudge; later ones ask for a shorter answer explicitly. A thinking
+#: model can otherwise burn every retry on the same long chain of thought.
+TRUNCATED_RETRY_NUDGES = (
+    "Your previous reply was cut off by the output-token limit before you "
+    "produced any answer or tool call. Continue from where you stopped: either "
+    "call a tool or give the final answer, and keep your reasoning shorter than "
+    "the budget allows.",
+    "You hit the output-token limit again. Please be more precise in your "
+    "response and thinking: give only the next tool call (or a short final "
+    "answer), and do not repeat analysis you have already done.",
+    "Final retry: respond with exactly one tool call and no explanation. If the "
+    "task is complete, reply DONE.",
+)
 
 
 class AgentSession:
@@ -3077,27 +3114,28 @@ class AgentSession:
             self.messages.pop()
 
         truncated = (usage or {}).get("finish_reason") == "length"
+        if response_text or made_tool_calls:
+            # The nudge budget is for a *consecutive* run of empty/truncated
+            # replies. A successful step means the model recovered; a later
+            # truncation gets a fresh set of retries instead of inheriting a
+            # budget exhausted earlier in a long session.
+            self._truncated_retries = 0
         if not response_text and not made_tool_calls:
             if truncated and self._truncated_retries < TRUNCATED_RETRY_LIMIT:
                 # A thinking model can spend the whole output budget on reasoning
                 # and return neither text nor a tool call. Ending the session
                 # there throws away a whole benchmark trial (the patch comes back
-                # empty and the instance is scored unresolved), so nudge it once
-                # -- bounded, so a model that only ever rambles still stops.
+                # empty and the instance is scored unresolved), so nudge it --
+                # bounded, so a model that only ever rambles still stops. Later
+                # attempts are more explicit about the need to be concise.
                 self._truncated_retries += 1
                 self.console.note(
                     "The reply hit the output-token limit before any answer or "
                     "tool call; asking it to continue.", "warn")
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        "Your previous reply was cut off by the output-token "
-                        "limit before you produced any answer or tool call. "
-                        "Continue from where you stopped: either call a tool or "
-                        "give the final answer, and keep your reasoning shorter "
-                        "than the budget allows."
-                    ),
-                })
+                nudge = TRUNCATED_RETRY_NUDGES[
+                    min(self._truncated_retries - 1,
+                        len(TRUNCATED_RETRY_NUDGES) - 1)]
+                self.messages.append({"role": "user", "content": nudge})
                 return True
             self.console.note("Warning: no response was given by the LLM.", "error")
 

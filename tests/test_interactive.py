@@ -1035,28 +1035,60 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         self.assertIn("system: S", text)
         self.assertIn("assistant:", text)               # rendered as empty
 
-    def test_empty_summary_is_retried_then_abandoned_without_rollover(self):
-        """No summary twice -> no rollover, transcript kept, both calls billed.
+    def test_compaction_prompt_caps_a_huge_tool_output(self):
+        messages = [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "the original goal"},
+            {"role": "tool", "content": "x" * 200_000},
+            {"role": "assistant", "content": "recent answer"},
+        ]
+        text = prompts.compaction_prompt(messages, max_tokens=1_000)
+        self.assertLess(len(text), 10_000)
+        self.assertIn("the original goal", text)
+        self.assertIn("truncated to fit the summary request", text)
+        self.assertIn("recent answer", text)
 
-        An empty summary must never be mistaken for a successful compaction: the
-        caller would think the history had shrunk while the over-long transcript
-        was kept and the segment index silently stayed behind. We retry once,
-        then give up -- keeping the messages and the index -- and say so.
+    def test_compaction_bounds_the_prompt_it_sends_to_the_summariser(self):
+        messages = [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "the original goal"},
+            {"role": "tool", "content": "x" * 500_000},
+            {"role": "user", "content": "current question"},
+        ]
+        stub = StubLLM([("A short summary.", [], USAGE)])
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            out, did_compact, _ = maybe_compact(
+                messages, "http://localhost:1", "m", None, 30, self.stats,
+                token_limit=1_000, current_tokens=200_000,
+                console=self.console())
+
+        self.assertTrue(did_compact)
+        sent = stub.calls[0][0]["content"]
+        self.assertLess(len(sent), 20_000)
+        self.assertIn("truncated to fit the summary request", sent)
+        self.assertIn("the original goal", sent)
+        self.assertEqual(out[-1]["content"], "current question")
+
+    def test_empty_summary_falls_back_to_a_mechanical_summary(self):
+        """No summary twice -> a mechanical summary still rolls the segment.
+
+        Keeping the over-long transcript would make every later request fail,
+        so compaction must be fail-safe: both summariser calls are billed and
+        the capped fallback summary is what the new segment starts with.
         """
         messages = [{"role": "system", "content": "S"},
                     {"role": "user", "content": "q"},
                     {"role": "assistant", "content": "a"}]
         (out, did_compact, index), stub = self._compact(messages, ["", ""])
 
-        self.assertFalse(did_compact)
-        self.assertEqual(index, 0)               # still history_0
-        self.assertIs(out, messages)             # transcript preserved verbatim
+        self.assertTrue(did_compact)
+        self.assertEqual(index, 1)               # history_0 -> history_1
+        self.assertIsNot(out, messages)
+        self.assertIn("Mechanical fallback summary", out[1]["content"])
+        self.assertIn("Initial request: q", out[1]["content"])
         self.assertEqual(len(stub.calls), 2)           # exactly one retry
         self.assertEqual(self.stats["llm_calls"], 2)   # both attempts were billed
-        self.assertIn("Could not compact history", self.output())
-        # ... and it must say that nothing was lost, not just that it failed.
-        self.assertIn("nothing was lost", self.output())
-        self.assertIn("Keeping all 3 messages and history_0.json", self.output())
+        self.assertIn("mechanical fallback summary", self.output())
 
     def test_empty_summary_then_a_real_one_still_compacts(self):
         """A single empty reply is recovered from by the retry."""
@@ -1072,8 +1104,8 @@ class CompactionEdgeCaseTest(unittest.TestCase):
         self.assertIn("A short summary.", out[1]["content"])
         self.assertEqual(len(stub.calls), 2)
 
-    def test_a_failing_summariser_call_keeps_the_transcript(self):
-        """A raised error must not lose the history or the segment index."""
+    def test_a_failing_summariser_call_falls_back_instead_of_keeping_history(self):
+        """A raised error must not leave the over-long transcript in place."""
         messages = [{"role": "system", "content": "S"},
                     {"role": "user", "content": "q"},
                     {"role": "assistant", "content": "a"}]
@@ -1083,11 +1115,10 @@ class CompactionEdgeCaseTest(unittest.TestCase):
                 messages, "http://localhost:1", "m", None, 30, self.stats,
                 token_limit=1, console=self.console())
 
-        self.assertFalse(did_compact)
-        self.assertEqual(index, 0)
-        self.assertIs(out, messages)
-        self.assertIn("Failed to compact history", self.output())
-        self.assertIn("Keeping all 3 messages unchanged", self.output())
+        self.assertTrue(did_compact)
+        self.assertEqual(index, 1)
+        self.assertIn("Mechanical fallback summary", out[1]["content"])
+        self.assertIn("mechanical fallback summary", self.output())
 
 
 

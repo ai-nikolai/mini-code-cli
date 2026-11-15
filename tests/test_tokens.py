@@ -473,15 +473,15 @@ class CompactionTriggerTest(unittest.TestCase):
         self.assertEqual(out[1]["content"], "GOAL + PLAN")
         self.assertEqual(out[2]["role"], "user")          # the in-flight turn
 
-    def test_an_empty_summary_keeps_the_transcript_and_the_segment(self):
+    def test_an_empty_summary_still_rolls_over_with_a_fallback(self):
         messages = long_messages(2, 8_000)
         out, did_compact, index = self._compact(
             messages, replies=[("", [], USAGE), ("", [], USAGE)],
             token_limit=1_000, current_tokens=4_000)
 
-        self.assertFalse(did_compact)
-        self.assertIs(out, messages)
-        self.assertEqual(index, 0)
+        self.assertTrue(did_compact)
+        self.assertEqual(index, 1)
+        self.assertIn("Mechanical fallback summary", out[0]["content"])
 
 
 if __name__ == "__main__":

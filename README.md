@@ -404,10 +404,12 @@ console says in plain terms what happened — all of it without `--verbose`:
 
 So you can see *what* was folded away (a preview of the summary itself), *how much* (the
 message count of the segment that was closed), *where it went* (`history_0.json` closed,
-`history_1.json` started) and that nothing you just typed was lost. If the summariser answers
-with an empty summary twice, or the call fails, compaction is abandoned and the note says so
-explicitly — "nothing was lost, but the next request may still be too large" — with the
-transcript and the segment left untouched.
+`history_1.json` started) and that nothing you just typed was lost. The summary request is
+itself size-bounded, so a single enormous tool output cannot make compaction overflow the
+model's context window. If the summariser answers with an empty summary twice, or the call
+fails, compaction falls back to a deterministic mechanical summary (the goal plus the newest
+turns) and still rolls the segment over — keeping the over-long transcript would make every
+later request fail.
 
 ### Exiting — the good-bye box
 

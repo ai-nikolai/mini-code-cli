@@ -101,8 +101,8 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   the trigger itself — which fires on projected tokens (+ the reply reserve) and **never**
   on the message count.
 - **`test_interactive.py`** — the shell-safety classifier (DENY / ASK / ALLOW tiers) and
-  compaction edge cases (an empty summary is retried, then abandoned without losing the
-  transcript; a failing summariser call never corrupts the segment).
+  compaction edge cases (an empty summary or a failed summariser call falls back to a
+  mechanical summary and still rolls the segment; the summary request itself is size-bounded).
 - **`test_subagents.py`** — sub-agent delegation, isolation of the child session, the
   `report.md` channel and the intersection of child permissions with the parent's.
 - **`test_advanced_features.py`** — the scratchpad (`SCRATCHPAD.md` + prompt), the
