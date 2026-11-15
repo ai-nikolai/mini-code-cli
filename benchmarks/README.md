@@ -310,11 +310,12 @@ compaction, planning or background choice on top of it:
 | `swe-compaction-predict-messages` | `--compaction-strategy predict-messages` |
 | `swe-plan` | `--plan --plan-strategy plan-verify-step` (pinned baseline) |
 | `swe-plan-verify` | `--plan --plan-strategy plan-verify` |
+| `swe-plan-verify-nudge` | `--plan --plan-strategy plan-verify --allow-nudge --nudge-limit 1` |
 | `swe-open-plan` | `--plan --plan-strategy open-plan` |
 | `swe-compaction-predict-files-plan-verify` | the two best choices combined |
 | `swe-background` | `--background` (background shell tasks) |
 
-All eight are present in `terminal_bench_21.json`, `ornith_30b.json` and
+All nine are present in `terminal_bench_21.json`, `ornith_30b.json` and
 `mini_code_settings.json`. The Slurm launchers default to the `swe` baseline only;
 select more with a space-separated `MINI_CODE_SETTINGS`:
 

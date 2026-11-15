@@ -58,6 +58,7 @@
         "swe-compaction-predict-messages",
         "swe-plan",
         "swe-plan-verify",
+        "swe-plan-verify-nudge",
         "swe-open-plan",
         "swe-compaction-predict-files-plan-verify",
         "swe-background"

@@ -63,6 +63,7 @@
         "swe-compaction-predict-messages",
         "swe-plan",
         "swe-plan-verify",
+        "swe-plan-verify-nudge",
         "swe-open-plan",
         "swe-compaction-predict-files-plan-verify",
         "swe-background"
@@ -107,7 +108,10 @@
         ],
         "sif_build_timeout_sec": 3600,
         "override_memory_mb": 16384,
-        "exclude_tasks": ["qemu-startup", "qemu-alpine-ssh"],
+        "exclude_tasks": [
+          "qemu-startup",
+          "qemu-alpine-ssh"
+        ],
         "verifier_timeout_multiplier": 2,
         "agent_timeout_sec": 3600,
         "test_timeout_sec": 3600,
