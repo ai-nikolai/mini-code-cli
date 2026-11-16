@@ -1023,6 +1023,82 @@ class TuiConsole(Console):
             except (OSError, ValueError, termios.error):
                 pass
 
+    def settings_pick(self, rows, immutable_lines=()):
+        """Show the settings table and return the selected row, or None.
+
+        Arrow keys move, a digit selects that row, Enter opens it, and q/Esc
+        cancels. Immutable rows are shown but cannot be selected.
+        """
+        if not self._active or not rows:
+            return None
+        import select
+        import termios
+
+        selected = 0
+
+        def draw():
+            lines = [self.style("[settings] ↑/↓ or number, Enter edit, q cancel",
+                                 fg="cyan", bold=True)]
+            for index, row in enumerate(rows):
+                marker = ">" if index == selected else " "
+                cache = (f"  cache:{row['cache']}"
+                         if row.get("cache", "none") != "none" else "")
+                lines.append(f"{marker} {row['number']:2}. "
+                             f"{row['name']:22} {row['value']:28}{cache}")
+            for line in immutable_lines:
+                lines.append(self.style("  " + str(line), dim=True))
+            self._overlay_lines = lines
+            self.render()
+
+        try:
+            fd = sys.stdin.fileno()
+            previous = termios.tcgetattr(fd)
+        except (AttributeError, OSError, ValueError, termios.error):
+            return None
+        attrs = termios.tcgetattr(fd)
+        attrs[3] &= ~(termios.ICANON | termios.ECHO)
+        attrs[6][termios.VMIN] = 1
+        attrs[6][termios.VTIME] = 0
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            draw()
+            while True:
+                ready, _, _ = select.select([fd], [], [], 1.0)
+                if not ready:
+                    continue
+                raw = os.read(fd, 1)
+                if not raw:
+                    return None
+                if raw in (b"q", b"Q"):
+                    return None
+                if raw == b"\x1b":
+                    seq = _read_escape_sequence(fd, lambda: os.read(fd, 1),
+                                                [], select)
+                    if seq.endswith(b"A"):
+                        selected = (selected - 1) % len(rows)
+                        draw()
+                        continue
+                    if seq.endswith(b"B"):
+                        selected = (selected + 1) % len(rows)
+                        draw()
+                        continue
+                    return None
+                if raw in b"123456789":
+                    index = int(raw) - 1
+                    if 0 <= index < len(rows):
+                        selected = index
+                        draw()
+                    continue
+                if raw in (b"\r", b"\n"):
+                    return rows[selected]
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+            except (OSError, ValueError, termios.error):
+                pass
+            self._overlay_lines = []
+            self.render()
+
     def read_line(self, prompt_text="", multiline=False, tui=False):
         if not self._active:
             return super().read_line(prompt_text, multiline=multiline, tui=tui)

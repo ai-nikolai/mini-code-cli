@@ -96,6 +96,7 @@ given a reference implementation.
 | `--tool-timeout S` | `120` | timeout for a single tool call |
 | `--max-context-tokens N` | derived | input-token budget before the history is compacted |
 | `--cache-dir DIR` | `~/.cache/mini/sessions/` | where session histories are stored |
+| `--no-settings` | off | do not load, prompt for, or save session settings (useful for CI/benchmark runs) |
 | `--restore-session PATH` | — | continue a specific previous session |
 | `-l`, `--load-last-session` | off | continue the session recorded in the `.mini` pointer |
 | `--all` | off | `--plan --enable-subagents --enable-shell --skills --auto-mode --sudo --background` |
@@ -203,6 +204,7 @@ steps; it shows the last/current blocking activity rather than live-during the c
 | `/plan` | show the current goal + plan (plan mode only) |
 | `/context` | show how the context window is used: tokens and percentages by category (system prompt, user/assistant messages, tool calls/outputs, reasoning, overhead) |
 | `/background [id]` | show foreground activity + background tasks, or one task's output tail |
+| `/settings [name|number] [value]` | show or change session settings; bare `/settings` opens the settings prompt |
 | `/expand [n]` | show the full detail of the nth most recent tool call (default: the last one) |
 | `/skip-plan <prompt>` | send `<prompt>` once without generating or reviewing a plan |
 | `/help` | show this help |
@@ -252,6 +254,27 @@ scrolling console or `--tui=on` to force it. It is not part of `--all`.
 >   total is preserved. See
 >   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#rewinding-reset-and-what-it-does-to-the-files)
 >   for the files involved.
+
+### Session settings
+
+Settings are stored per session in the cache, never in the project’s `.mini`:
+
+```text
+<cache-dir>/<session-id>/settings.json
+```
+
+A bare `mini-code` imports the settings of the most recent session and asks only for
+values it cannot infer. The first-run questions are limited to the model provider
+(`localhost`, `deepseek`, or a custom URL) and, when needed, the API key. The key is
+read from the environment first; if you type one, mini-code asks whether to store it
+in the session file with mode `0600` (default: no).
+
+Use `/settings` to inspect or change settings. The table marks values that rebuild
+the tool list or generated system prompt — these invalidate the LLM prompt cache.
+Cache-impacting edits from the settings prompt are staged until you type `apply`, so
+a batch rebuilds the prompt once. In the fixed TUI the same table is a navigable
+overlay: arrow keys or numbers select, Enter edits, `q` cancels. Changing the TUI,
+paths, the custom system prompt or the initial prompt is not allowed mid-session.
 
 ## Development
 

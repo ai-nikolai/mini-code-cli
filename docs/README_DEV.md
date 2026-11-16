@@ -39,6 +39,7 @@ needed when you actually build/upload distributions.
 
 ```
 mini_code_cli/            the package (agent loop, tools, prompts, plan mode, sub-agents, skills)
+  settings.py             session-local settings, first-run wizard and /settings helpers
   subagents/              sub-agent base class + the four built-in sub-agents
 scripts/lint.py           stdlib-only linter used by CI (and by you)
 scripts/run_model.sh                 helper for serving a local model (a small checkpoint; see README)
@@ -111,6 +112,8 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   `plan-verify-step` / `open-plan`).
 - **`test_background.py`** — background shell/sub-agent tasks: output and exit codes,
   process-group cancellation, the `/background` view, tool registration, and shutdown cleanup.
+- **`test_settings.py`** — per-session settings: load/save permissions, CLI/env/session
+  precedence, the first-run prompts, and `/settings` application including tool/prompt rebuild.
 - **`test_tui.py`** — the `--tui` view (`auto`/`on`/`off`): fixed alternate-screen
   frame, scrolling, history, questions, spinner, `/expand`, and a full session
   turn plus exit through a real pseudo-terminal.

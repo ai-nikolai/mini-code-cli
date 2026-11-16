@@ -24,6 +24,7 @@ without the tests reaching into every module.
 """
 
 import os
+import getpass
 import json
 import re
 import time
@@ -43,6 +44,7 @@ from . import agent_files
 from . import compaction as compaction_mod
 from . import planning
 from . import plan as plan_utils
+from . import settings as settings_mod
 from . import tokens as tokens_mod
 from .config import (
     DEFAULT_CACHE_LOCATION,
@@ -143,6 +145,7 @@ def parse_args():
 
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
+    parser.add_argument("--no-settings", action="store_true", help="Do not load, prompt for, or save session settings. Useful for CI and benchmark runs.")
     parser.add_argument("--restore-session", type=str, help="A previous session to continue: its directory (e.g. ~/.cache/mini/sessions/1792028090823027-a9d77653/) or a bare session id under --cache-dir. A session folder must hold a summary_history.json recorder plus the history_{n}.json segment it names; anything else starts a fresh session.")
     parser.add_argument("-l","--load-last-session", action="store_true", help="Continue the most recent previous session recorded in the --allowed-dir .mini pointer, in place and without the resume prompt, instead of starting fresh. --restore-session takes precedence if also given.")
 
@@ -228,6 +231,7 @@ def print_help(args, console=None):
         ("/plan", "show the current goal + plan (plan mode only)"),
         ("/context", "show how the context window is used (tokens + percentages)"),
         ("/background [id]", "show foreground activity + background tasks (or one task's output)"),
+        ("/settings", "show/change session settings (number or name)"),
         ("/expand [n]", "show the full detail of the nth most recent tool call"),
         ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
@@ -664,8 +668,12 @@ class AgentSession:
     EXIT_COMMANDS = {"quit", "exit", "/quit", "/exit", "exit()", "quit()"}
     CLEAR_COMMANDS = {"clear", "/clear"}
 
-    def __init__(self, args, console=None, background_mode = False):
+    def __init__(self, args, console=None, background_mode = False,
+                 settings=None):
         self.args = args
+        self.settings = settings or settings_mod.Settings.from_args(args)
+        if settings is None:
+            self.settings.apply_to_args(args)
         self.allowed_dir = os.path.abspath(args.allowed_dir)
         self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
@@ -694,6 +702,7 @@ class AgentSession:
         # always wins, and a small-window model gets at most half its window.
         if getattr(args, "max_tokens", None) is None:
             args.max_tokens = default_max_output_tokens(self.model)
+        self.settings.capture_from_args(args)
 
         # Background task registry. It is independent of the foreground loop;
         # tools and /background read snapshots from it.
@@ -837,6 +846,7 @@ class AgentSession:
         """
         try:
             if self.restore_previous_session(restore_directory):
+                self._save_settings()
                 return True
         except Exception as e:
             self.console.note(
@@ -892,6 +902,7 @@ class AgentSession:
         self.background_tasks.set_log_dir(
             os.path.join(self.session_dir, "background"))
         self._prepare_agent_files()
+        self._save_settings()
 
         self.history_index = 0
         self.summary = []
@@ -1127,27 +1138,34 @@ class AgentSession:
             path = agent_files.ensure_open_plan(self.allowed_dir)
             self.console.note(f"Open-plan document: {path}", "info")
 
+    def _render_system_prompt(self):
+        """Return the effective system prompt for the current settings.
+
+        A user-supplied ``--system-prompt`` is never regenerated. Everything
+        else (the tool list, plan/skills/scratchpad blocks) is built from the
+        live session state, so a settings change can rebuild it deliberately.
+        """
+        if self.args.system_prompt:
+            return self.args.system_prompt
+        scratch_path = (agent_files.scratchpad_path(self.allowed_dir)
+                        if self.scratchpad else None)
+        open_plan_path = None
+        if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
+            open_plan_path = agent_files.open_plan_path(self.allowed_dir)
+        return prompts.system_prompt(
+            tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
+            plan_mode=self.plan_mode,
+            skills_dir=self.allowed_dir if self.enable_skills else None,
+            session_dir=self.session_dir,
+            scratchpad_path=scratch_path,
+            scratchpad_dir=(agent_files.mini_dir(self.allowed_dir)
+                            if self.scratchpad else None),
+            open_plan_path=open_plan_path,
+        )
+
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
-        if self.args.system_prompt:
-            system_prompt = self.args.system_prompt
-        else:
-            scratch_path = (agent_files.scratchpad_path(self.allowed_dir)
-                            if self.scratchpad else None)
-            open_plan_path = None
-            if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
-                open_plan_path = agent_files.open_plan_path(self.allowed_dir)
-            system_prompt = prompts.system_prompt(
-                tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
-                plan_mode=self.plan_mode,
-                skills_dir=self.allowed_dir if self.enable_skills else None,
-                session_dir=self.session_dir,
-                scratchpad_path=scratch_path,
-                scratchpad_dir=(agent_files.mini_dir(self.allowed_dir)
-                                if self.scratchpad else None),
-                open_plan_path=open_plan_path,
-            )
-
+        system_prompt = self._render_system_prompt()
         messages = [{"role": "system", "content": system_prompt}]
         self._persistent_messages = []
 
@@ -1957,6 +1975,13 @@ class AgentSession:
             if not should_continue:
                 return
 
+    def _save_settings(self):
+        """Persist the effective settings into this session's cache folder."""
+        try:
+            self.settings.save(self.session_dir)
+        except OSError as e:
+            self.console.note(f"Could not save session settings: {e}", "warn")
+
     def _save_last_session_pointer(self):
         """Record this session's directory in --allowed-dir/.mini.
 
@@ -2465,8 +2490,232 @@ class AgentSession:
         if cmd in ("skip-plan", "skip_plan", "skipplan"):
             self._run_skipped_plan(arg)
             return True
+        if cmd == "settings":
+            self._handle_settings_command(arg)
+            return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
+
+    # -- settings ---------------------------------------------------------
+
+    def _settings_lines(self):
+        rows = self.settings.rows()
+        lines = ["Settings:"]
+        for row in rows:
+            mutable = "" if row["mutable"] else "  [immutable]"
+            cache = f"  cache:{row['cache']}" if row["cache"] != "none" else ""
+            lines.append(f"  {row['number']:2}. {row['name']:22} "
+                         f"{row['value']:28}{cache}{mutable}")
+        for name, description in settings_mod.IMMUTABLE:
+            lines.append(f"     {name:22} (cannot change: {description})")
+        return lines
+
+    def _read_setting_value(self, name):
+        if name == "api-key":
+            key = getpass.getpass("API key: ").strip()
+            if not key:
+                return ""
+            answer = self.console.read_line(
+                "Store this key in this session's settings.json (0600)? [y/N] ")
+            if answer is not None and answer.strip().lower() in ("y", "yes"):
+                self.settings.persist_api_key = True
+            else:
+                self.settings.persist_api_key = False
+            return key
+        value = self.console.read_line("value: ")
+        return "" if value is None else value.strip()
+
+    def _apply_settings(self, changes, confirm_cache=True):
+        """Validate and apply one or more settings.
+
+        Cache-impacting changes are applied as one transaction, so a batch of
+        tool/prompt edits rebuilds the prompt once.
+        """
+        parsed = []
+        for name, raw in changes.items():
+            canonical = settings_mod.BY_NAME.get(name)
+            if canonical is None:
+                canonical = settings_mod.BY_NAME.get(
+                    settings_mod.ALIASES.get(name, ""))
+            if canonical is None:
+                self.console.note(f"Unknown setting {name!r}.", "warn")
+                return False
+            if not canonical.mutable:
+                self.console.note(f"{canonical.name} cannot be changed.",
+                                  "warn")
+                return False
+            try:
+                value = settings_mod.parse_value(canonical, raw)
+            except (TypeError, ValueError) as exc:
+                self.console.note(f"{canonical.name}: {exc}", "warn")
+                return False
+            parsed.append((canonical, value))
+
+        cache_effects = {spec.cache for spec, _ in parsed
+                         if spec.cache != "none"}
+        if confirm_cache and cache_effects:
+            answer = self.console.read_line(
+                "Changing " + ", ".join(sorted(cache_effects)) +
+                " rebuilds the generated system prompt/tool list and "
+                "invalidates the LLM prompt cache for the next request. "
+                "Apply now? [y/N] ")
+            if answer is None or answer.strip().lower() not in ("y", "yes"):
+                self.console.note("Settings were not applied.", "warn")
+                return False
+
+        old_model = self.model
+        for spec, value in parsed:
+            if spec.attr == "api_key":
+                self.settings.api_key = value
+                # persist_api_key is set by _read_setting_value; an inline
+                # /settings api-key value is not persisted unless confirmed.
+            else:
+                self.settings.values[spec.attr] = value
+                if spec.attr == "plan_strategy":
+                    # /settings plan-strategy ... implies plan mode, matching
+                    # the CLI flag.
+                    self.settings.values["plan"] = True
+        self.settings.apply_to_args(self.args)
+        self.server_url = str(self.args.url).rstrip("/")
+        self.api_key = self.args.api_key or ""
+        if self.args.model:
+            self.model = self.args.model
+        elif old_model and "model" not in changes:
+            self.model = old_model
+        else:
+            self.model = self._resolve_model(self.args)
+
+        self.plan_strategy = self.args.plan_strategy or planning.DEFAULT_PLAN_STRATEGY
+        if self.plan_strategy not in planning.PLAN_STRATEGIES:
+            self.plan_strategy = planning.DEFAULT_PLAN_STRATEGY
+        if self.plan_strategy != planning.DEFAULT_PLAN_STRATEGY:
+            self.args.plan = True
+        self.plan_mode = bool(self.args.plan)
+        self.allow_nudge = bool(self.args.allow_nudge)
+        self.nudge_limit = max(0, int(self.args.nudge_limit))
+        self.compaction_strategy = self.args.compaction_strategy
+        self.scratchpad = bool(self.args.scratchpad)
+
+        if "model" in changes and self.settings.values.get("max_tokens") is None:
+            self.args.max_tokens = default_max_output_tokens(self.model)
+        self._register_tools(self.args)
+        self._prepare_agent_files()
+        if getattr(self, "plan_manager", None) is not None:
+            goal = getattr(self.plan_manager, "goal", None)
+            self.plan_manager = plan_utils.PlanManager(
+                self.session_dir, enabled=self.plan_mode, goal=goal)
+        self.compaction_budget = compaction_budget(
+            model=self.model,
+            explicit_limit=getattr(self.args, "max_context_tokens", None),
+            max_output_tokens=getattr(self.args, "max_tokens", None),
+        )
+        if self.messages and not self.args.system_prompt:
+            self.messages[0]["content"] = self._render_system_prompt()
+        elif cache_effects & {"tools", "prompt"} and self.args.system_prompt:
+            self.console.note(
+                "The custom system prompt is kept verbatim; tool/prompt "
+                "changes affect the tool registry only.", "warn")
+        self.settings.capture_from_args(self.args)
+        self._save_settings()
+        self.console.note("Settings updated.", "ok")
+        return True
+
+    def _handle_settings_command(self, arg):
+        arg = (arg or "").strip()
+        if not arg and self.tui_active and hasattr(self.console, "settings_pick"):
+            immutable = [f"{name}: cannot change ({desc})"
+                         for name, desc in settings_mod.IMMUTABLE]
+            while True:
+                row = self.console.settings_pick(
+                    self.settings.rows(), immutable)
+                if row is None:
+                    return
+                if not row["mutable"]:
+                    self.console.note(f"{row['name']} cannot be changed.",
+                                      "warn")
+                    continue
+                raw = self._read_setting_value(row["name"])
+                if raw == "":
+                    continue
+                self._apply_settings({row["name"]: raw}, confirm_cache=True)
+            return
+        if not arg:
+            for line in self._settings_lines():
+                self.console.emit(line)
+            self.console.emit(
+                "Use /settings <number|name> <value> or type it at the "
+                "settings prompt. Type q to leave; cache-impacting values "
+                "are staged until 'apply'.")
+            pending = {}
+            while True:
+                line = self.console.read_line("settings> ")
+                if line is None:
+                    return
+                text = line.strip()
+                if not text:
+                    continue
+                if text.lower() in ("q", "quit", "exit"):
+                    if pending:
+                        self.console.note("Pending settings discarded.", "warn")
+                    return
+                if text.lower() == "apply":
+                    if pending:
+                        self._apply_settings(pending)
+                        pending = {}
+                    continue
+                parts = text.split(None, 1)
+                key = parts[0]
+                if key.isdigit():
+                    try:
+                        row = self.settings.by_number(key)
+                    except (ValueError, TypeError) as exc:
+                        self.console.note(str(exc), "warn")
+                        continue
+                    key = row["name"]
+                raw = parts[1] if len(parts) > 1 else None
+                spec = settings_mod.BY_NAME.get(key) or settings_mod.BY_NAME.get(
+                    settings_mod.ALIASES.get(key, ""))
+                if spec is None:
+                    self.console.note(f"Unknown setting {key!r}.", "warn")
+                    continue
+                if not spec.mutable:
+                    self.console.note(f"{spec.name} cannot be changed.", "warn")
+                    continue
+                if raw is None:
+                    raw = self._read_setting_value(spec.name)
+                if raw == "":
+                    continue
+                if spec.cache != "none":
+                    pending[spec.name] = raw
+                    self.console.note(
+                        f"{spec.name} staged (cache: {spec.cache}); type "
+                        f"'apply' to commit.", "info")
+                else:
+                    self._apply_settings({spec.name: raw}, confirm_cache=False)
+            return
+
+        parts = arg.split(None, 1)
+        key = parts[0]
+        if key.isdigit():
+            try:
+                key = self.settings.by_number(key)["name"]
+            except (ValueError, TypeError) as exc:
+                self.console.note(str(exc), "warn")
+                return
+        raw = parts[1] if len(parts) > 1 else None
+        spec = settings_mod.BY_NAME.get(key) or settings_mod.BY_NAME.get(
+            settings_mod.ALIASES.get(key, ""))
+        if spec is None:
+            self.console.note(f"Unknown setting {key!r}.", "warn")
+            return
+        if not spec.mutable:
+            self.console.note(f"{spec.name} cannot be changed.", "warn")
+            return
+        if raw is None:
+            raw = self._read_setting_value(spec.name)
+        if raw == "":
+            return
+        self._apply_settings({spec.name: raw}, confirm_cache=True)
 
     def _run_skipped_plan(self, prompt):
         """Handle ``/skip-plan PROMPT``: run the prompt without planning it."""
@@ -3251,7 +3500,8 @@ class _Abort(Exception):
 
 def main():
     args = parse_args()
-    session = AgentSession(args)
+    settings = settings_mod.resolve_for_startup(args)
+    session = AgentSession(args, settings=settings)
     session.run(initial_prompt=args.prompt)
 
 
