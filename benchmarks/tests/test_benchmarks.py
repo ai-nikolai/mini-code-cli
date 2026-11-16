@@ -1297,6 +1297,29 @@ class AgentMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["duration_seconds"], 17.733)
         self.assertEqual(metrics["cost_usd"], 0.5)
 
+    def test_parses_opencode_step_finish_tokens(self):
+        from benchmarks.metrics import parse_text
+
+        text = (
+            '{"type":"tool_use","part":{"type":"tool","tool":"bash"}}\n'
+            '{"type":"step_finish","part":{"tokens":'
+            '{"total":110,"input":100,"output":5,"reasoning":5},'
+            '"cost":0.01}}\n'
+            '{"type":"tool_use","part":{"type":"tool","tool":"edit"}}\n'
+            '{"type":"step_finish","part":{"tokens":'
+            '{"total":130,"input":120,"output":4,"reasoning":6},'
+            '"cost":0.02}}\n'
+        )
+        metrics = parse_text(text)
+        self.assertEqual(metrics["prompt_tokens"], 220)
+        self.assertEqual(metrics["completion_tokens"], 20)
+        self.assertEqual(metrics["total_tokens"], 240)
+        self.assertEqual(metrics["llm_calls"], 2)
+        self.assertEqual(metrics["turns"], 2)
+        self.assertEqual(metrics["tool_calls"], 2)
+        self.assertEqual(metrics["tool_names"], ["bash", "edit"])
+        self.assertAlmostEqual(metrics["cost_usd"], 0.03)
+
     def test_metrics_csv_has_the_analysis_columns(self):
         from benchmarks.metrics import METRICS_CSV_COLUMNS
 
