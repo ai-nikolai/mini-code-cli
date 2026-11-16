@@ -94,6 +94,10 @@ class TuiConsole(Console):
         self._notice_line = ""
         self._notices = []
         self._overlay_lines = []
+        # Command output overlays are anchored to the bottom (like a rolling
+        # log). Interactive pickers set this so their table starts at the top
+        # and scrolls down with the selection.
+        self._overlay_top = False
         self._question_active = False
         self._question_title = "Question to User"
         self._question_lines = []
@@ -329,6 +333,7 @@ class TuiConsole(Console):
         # clear the output that was just produced.
         if title:
             self._scroll_offset = 0
+            self._overlay_top = False
             self._overlay_lines = [self.style(f"[{title}]", fg=fg, bold=True)]
             self.render()
 
@@ -344,6 +349,7 @@ class TuiConsole(Console):
         if not self._active:
             return super().print_box(lines, title=title, fg=fg)
         self._scroll_offset = 0
+        self._overlay_top = False
         styled = (list(lines or []) if fg != "yellow"
                   else [self.style(str(line), fg="yellow") for line in lines or []])
         self._overlay_lines = ([self.style(f"[{title}]", fg=fg, bold=True)]
@@ -357,6 +363,7 @@ class TuiConsole(Console):
         self._question_lines = list(lines or [])
         self._question_active = True
         self._overlay_lines = []
+        self._overlay_top = False
         self._scroll_offset = 0
         self.render()
 
@@ -368,6 +375,7 @@ class TuiConsole(Console):
                             "turn_id": self._turn_id,
                             "tools": [], "background": []})
         self._overlay_lines = []
+        self._overlay_top = False
         self._scroll_offset = 0
         self.render()
 
@@ -380,6 +388,7 @@ class TuiConsole(Console):
         if not self._active:
             return super().status_box(lines, title=title, fg=fg, dim=dim)
         self._scroll_offset = 0
+        self._overlay_top = False
         self._overlay_lines = ([self.style(f"[{title}]", fg=fg, bold=True)]
                                if title else []) + list(lines or [])
         self.render()
@@ -392,6 +401,7 @@ class TuiConsole(Console):
         # drop transient info/warning notices. The core conversation stays
         # visible -- only the scrolling console clears the terminal itself.
         self._overlay_lines = []
+        self._overlay_top = False
         self._scroll_offset = 0
         self._notice_line = ""
         self._notices = []
@@ -515,6 +525,11 @@ class TuiConsole(Console):
         lines = self._content_lines(width)
         self._last_body_height = max(height, 1)
         self._total_body_lines = len(lines)
+        if self._overlay_lines and self._overlay_top:
+            # A picker table is already windowed around its selection; show it
+            # from the first line instead of anchoring the tail to the bottom.
+            self._scroll_offset = 0
+            return (lines[:height] + [""] * height)[:height]
         max_offset = max(len(lines) - height, 0)
         self._scroll_offset = min(max(self._scroll_offset, 0), max_offset)
         if self._scroll_offset and max_offset:
@@ -541,6 +556,7 @@ class TuiConsole(Console):
             return
         if self._overlay_lines:
             self._overlay_lines = []
+            self._overlay_top = False
             self._scroll_offset = 0
             self.render()
         elif self._scroll_offset:
@@ -1025,6 +1041,31 @@ class TuiConsole(Console):
             except (OSError, ValueError, termios.error):
                 pass
 
+    def _picker_window(self, header, body, selected):
+        """Render a top-anchored picker window that follows ``selected``.
+
+        The body is scrolled so the selected row stays visible; unlike command
+        output, the window starts at the top instead of showing only its tail.
+        """
+        visible = max(int(getattr(self, "_last_body_height", 1) or 1), 3)
+        window = max(visible - 1, 1)
+        total = len(body)
+        top = getattr(self, "_picker_top", 0)
+        if selected < top:
+            top = selected
+        elif selected >= top + window:
+            top = selected - window + 1
+        top = max(0, min(top, max(0, total - window)))
+        self._picker_top = top
+        end = min(top + window, total)
+        label = header
+        if total:
+            label += f"  {top + 1}-{end}/{total}"
+        self._overlay_top = True
+        self._overlay_lines = ([self.style(label, fg="cyan", bold=True)]
+                               + body[top:end])
+        self.render()
+
     def _pick_index(self, draw, count, default=0):
         """Run a blocking raw-key picker and return a 0-based index.
 
@@ -1091,6 +1132,8 @@ class TuiConsole(Console):
                 except (OSError, ValueError, termios.error):
                     pass
             self._overlay_lines = []
+            self._overlay_top = False
+            self._picker_top = 0
             self.render()
             if self._active:
                 self.start_scroll_listener()
@@ -1102,17 +1145,16 @@ class TuiConsole(Console):
                                   prompt=prompt)
         options = list(options)
         start = max(0, min(int(default) - 1, len(options) - 1))
+        self._picker_top = 0
 
         def draw(selected):
-            lines = ([self.style(f"[{title}]", fg="cyan", bold=True)]
-                     if title else [])
+            body = []
             for index, option in enumerate(options):
                 marker = ">" if index == selected else " "
-                lines.append(f"{marker} {index + 1}. {option}")
-            lines.append(self.style("↑/↓ or number, Enter select, q cancel",
-                                     dim=True))
-            self._overlay_lines = lines
-            self.render()
+                body.append(f"{marker} {index + 1}. {option}")
+            header = (f"[{title}] ↑/↓ or number, Enter select, q cancel"
+                      if title else "[select] ↑/↓ or number, Enter, q")
+            self._picker_window(header, body, selected)
 
         index = self._pick_index(draw, len(options), start)
         return None if index is None else index + 1
@@ -1125,20 +1167,21 @@ class TuiConsole(Console):
         """
         if not self._active or not rows:
             return None
+        self._picker_top = 0
 
         def draw(selected):
-            lines = [self.style("[settings] ↑/↓ or number, Enter edit, q cancel",
-                                 fg="cyan", bold=True)]
+            body = []
             for index, row in enumerate(rows):
                 marker = ">" if index == selected else " "
                 cache = (f"  cache:{row['cache']}"
                          if row.get("cache", "none") != "none" else "")
-                lines.append(f"{marker} {row['number']:2}. "
-                             f"{row['name']:22} {row['value']:28}{cache}")
+                body.append(f"{marker} {row['number']:2}. "
+                            f"{row['name']:22} {row['value']:28}{cache}")
             for line in immutable_lines:
-                lines.append(self.style("  " + str(line), dim=True))
-            self._overlay_lines = lines
-            self.render()
+                body.append(self.style("  " + str(line), dim=True))
+            self._picker_window(
+                "[settings] ↑/↓ or number, Enter edit, q cancel",
+                body, selected)
 
         index = self._pick_index(draw, len(rows), 0)
         return None if index is None else rows[index]

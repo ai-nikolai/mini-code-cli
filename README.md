@@ -263,20 +263,26 @@ Settings are stored per session in the cache, never in the project’s `.mini`:
 <cache-dir>/<session-id>/settings.json
 ```
 
-A bare `mini-code` imports the settings of the most recent session and asks only for
-values it cannot infer. The first-run questions are limited to the model provider
-(`localhost`, `deepseek`, or a custom URL) and, when needed, the API key. When the
-fixed TUI applies, the wizard runs inside it (arrow keys or numbers select a provider,
-and a typed key is masked). The key is read from the environment first; if you type
-one, mini-code asks whether to store it in the session file with mode `0600`
-(default: no).
+A bare `mini-code` imports the settings of the most recent session, then checks the
+saved model against the provider’s `/v1/models` response. If the model is still
+served it is kept; if the server no longer lists it, the provider/model questions
+reopen. Resuming a conversation keeps the restored settings. Starting a **new**
+session asks the provider/model questions again, pre-selecting the current provider
+so Enter keeps it; an explicit `--model` skips both the probe and the questions.
+
+The wizard is limited to the model provider (`localhost`, `deepseek`, or a custom
+URL) and, when needed, the API key. When the fixed TUI applies, the wizard runs
+inside it (arrow keys or numbers select a provider, and a typed key is masked). The
+key is read from the environment first; if you type one, mini-code asks whether to
+store it in the session file with mode `0600` (default: no).
 
 Use `/settings` to inspect or change settings. The table marks values that rebuild
 the tool list or generated system prompt — these invalidate the LLM prompt cache.
 Cache-impacting edits from the settings prompt are staged until you type `apply`, so
 a batch rebuilds the prompt once. In the fixed TUI the same table is a navigable
-overlay: arrow keys or numbers select, Enter edits, `q` cancels. Changing the TUI,
-paths, the custom system prompt or the initial prompt is not allowed mid-session.
+overlay that starts at the first setting and scrolls with the selection: arrow keys
+or numbers select, Enter edits, `q` cancels. Changing the TUI, paths, the custom
+system prompt or the initial prompt is not allowed mid-session.
 
 ## Development
 

@@ -203,6 +203,11 @@ class Settings:
     api_key_env: str = ""
     persist_api_key: bool = False
     enabled: bool = True
+    #: Set when the startup wizard already asked this process, so the
+    #: new-session path does not ask the same questions a second time.
+    startup_asked: bool = False
+    #: Whether the model came from an explicit ``--model`` (not a saved value).
+    model_explicit: bool = False
 
     def __post_init__(self):
         for spec in SPECS:
@@ -224,7 +229,9 @@ class Settings:
             key = os.environ.get("MINI_CODE_API_KEY", "")
             if key:
                 env_name = "MINI_CODE_API_KEY"
-        return cls(values=values, api_key=key, api_key_env=env_name)
+        result = cls(values=values, api_key=key, api_key_env=env_name)
+        result.model_explicit = bool(getattr(args, "model", None))
+        return result
 
     @classmethod
     def load(cls, session_dir):
@@ -272,8 +279,9 @@ class Settings:
         """Merge CLI, environment and the previous session's settings."""
         saved = saved or cls()
         result = cls()
+        result.model_explicit = bool(getattr(args, "model", None))
         explicit = {
-            "model": bool(getattr(args, "model", None)),
+            "model": result.model_explicit,
             "url": getattr(args, "url", DEFAULT_MODEL_URL) != DEFAULT_MODEL_URL,
             "temperature": getattr(args, "temperature", DEFAULT_TEMPERATURE)
             != DEFAULT_TEMPERATURE,
@@ -430,6 +438,42 @@ def _ask(console, prompt_text):
     return "" if answer is None else answer.strip()
 
 
+DEEPSEEK_URL = "https://api.deepseek.com"
+
+#: Model validation is a best-effort startup probe; keep it short so an
+#: unreachable server does not delay an interactive session for long.
+MODEL_CHECK_TIMEOUT = 5
+
+
+def _provider_index(settings):
+    """Map the configured URL to the wizard's 1-based provider choice."""
+    url = str(settings.values.get("url") or DEFAULT_MODEL_URL).rstrip("/")
+    if url == str(DEFAULT_MODEL_URL).rstrip("/"):
+        return 1
+    if url == DEEPSEEK_URL.rstrip("/"):
+        return 2
+    return 3
+
+
+def model_is_valid(settings, timeout=MODEL_CHECK_TIMEOUT):
+    """Whether the configured model is still advertised by its server.
+
+    ``True`` also means "could not check": if the probe fails (server down,
+    no key, network error) the saved model is kept rather than nagging the
+    user every startup. A reachable server that does not list the model is
+    the case that re-opens the provider/model question.
+    """
+    model = settings.values.get("model")
+    if not model:
+        return False
+    url = str(settings.values.get("url") or DEFAULT_MODEL_URL)
+    served = utils.list_served_models(
+        url, api_key=settings.api_key or None, timeout=timeout)
+    if served is None:
+        return True
+    return model in served
+
+
 def _ask_key(console, settings, provider):
     """Prompt for a key and ask whether to persist it (default: no)."""
     if provider == "localhost" and not settings.api_key:
@@ -451,15 +495,22 @@ def _ask_key(console, settings, provider):
     settings.persist_api_key = answer in ("y", "yes")
 
 
-def _first_run(settings, console):
-    """Ask only the minimum questions for a new user."""
+def first_run(settings, console):
+    """Ask only the minimum questions for a new (or invalidated) model setup.
+
+    The current provider is the default, so re-asking after an invalid model
+    only needs Enter when the provider itself is unchanged.
+    """
+    current_url = str(settings.values.get("url") or DEFAULT_MODEL_URL)
+    current_model = settings.values.get("model")
+    default_provider = _provider_index(settings)
     # ``choose`` renders the numbered list on the plain console and an
     # arrow-key overlay inside the fixed TUI.
     choice = console.choose(
         "First-run settings: choose a model provider",
         ["localhost", "deepseek", "custom URL"],
-        default=1,
-    ) or 1
+        default=default_provider,
+    ) or default_provider
     if choice == 1:
         settings.values["url"] = DEFAULT_MODEL_URL
         settings.values["model"] = None
@@ -473,14 +524,21 @@ def _first_run(settings, console):
                          "warn")
         _ask_key(console, settings, "localhost")
     elif choice == 2:
-        settings.values["url"] = "https://api.deepseek.com"
+        settings.values["url"] = DEEPSEEK_URL
         settings.values["model"] = "deepseek-chat"
         _ask_key(console, settings, "deepseek")
     else:
-        settings.values["url"] = _ask(console, "URL: ") or DEFAULT_MODEL_URL
-        settings.values["model"] = _ask(console, "Model: ") or None
+        settings.values["url"] = (
+            _ask(console, f"URL [{current_url}]: ") or current_url)
+        label = current_model or "server default"
+        settings.values["model"] = (
+            _ask(console, f"Model [{label}]: ") or current_model)
         _ask_key(console, settings, "custom")
     return settings
+
+
+#: Backwards-compatible private name used by the existing tests.
+_first_run = first_run
 
 
 def resolve_for_startup(args, console=None):
@@ -496,14 +554,22 @@ def resolve_for_startup(args, console=None):
     saved = Settings.load(source) if source else Settings()
     settings = Settings.resolve(args, saved)
 
-    need_questions = (
-        _interactive(args)
-        and not (settings.values.get("model")
-                 or settings.values.get("url") != DEFAULT_MODEL_URL)
-    )
-    if need_questions:
-        _first_run(settings, console)
-    elif (_interactive(args)
+    interactive = _interactive(args)
+    missing_model = not (settings.values.get("model")
+                         or settings.values.get("url") != DEFAULT_MODEL_URL)
+    invalid_model = False
+    # An explicit --model is authoritative; do not second-guess it (and avoid
+    # an extra network probe on a normal CLI run).
+    if (interactive and not missing_model and not getattr(args, "model", None)):
+        invalid_model = not model_is_valid(settings)
+    if interactive and (missing_model or invalid_model):
+        if invalid_model:
+            console.note(
+                f"Model {settings.values.get('model')!r} is not served at "
+                f"{settings.values.get('url')}; choosing again.", "warn")
+        first_run(settings, console)
+        settings.startup_asked = True
+    elif (interactive
           and settings.values.get("url") != DEFAULT_MODEL_URL
           and not settings.api_key):
         _ask_key(console, settings, "custom")

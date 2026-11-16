@@ -97,9 +97,84 @@ class SettingsStoreTest(unittest.TestCase):
             args = make_args(cache, cache)
             args.model = None
             with mock.patch.object(settings, "find_last_session_dir",
-                                   return_value=session):
+                                   return_value=session), \
+                    mock.patch.object(utils, "list_served_models",
+                                      return_value=["from-previous"]):
                 value = settings.resolve_for_startup(args)
         self.assertEqual(value.values["model"], "from-previous")
+
+    def test_list_served_models_parses_and_fails_silently(self):
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "data": [{"id": "model-a"}, {"id": "model-b"}, {}]}
+        with mock.patch.object(utils.requests, "get",
+                               return_value=response):
+            self.assertEqual(utils.list_served_models("http://server"),
+                             ["model-a", "model-b"])
+        with mock.patch.object(
+                utils.requests, "get",
+                side_effect=utils.requests.exceptions.RequestException("down")):
+            self.assertIsNone(utils.list_served_models("http://server"))
+
+    def test_model_is_valid_against_the_served_list(self):
+        value = settings.Settings()
+        value.values["model"] = "saved-model"
+        with mock.patch.object(utils, "list_served_models",
+                               return_value=["other", "saved-model"]):
+            self.assertTrue(settings.model_is_valid(value))
+        with mock.patch.object(utils, "list_served_models",
+                               return_value=["other"]):
+            self.assertFalse(settings.model_is_valid(value))
+        with mock.patch.object(utils, "list_served_models", return_value=[]):
+            self.assertFalse(settings.model_is_valid(value))
+        # A failed probe is "unknown", not "invalid": keep the saved model.
+        with mock.patch.object(utils, "list_served_models", return_value=None):
+            self.assertTrue(settings.model_is_valid(value))
+
+    def test_invalid_saved_model_reopens_the_wizard(self):
+        saved = settings.Settings()
+        saved.values["model"] = "stale-model"
+        saved.save(self.session)
+        args = make_args(self.cache, self.cache)
+        args.model = None
+        with mock.patch.object(settings, "find_last_session_dir",
+                               return_value=self.session), \
+                mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(utils, "list_served_models",
+                                  return_value=["fresh-model"]), \
+                mock.patch.object(settings, "first_run") as first_run:
+            value = settings.resolve_for_startup(args, console=silent_console())
+        first_run.assert_called_once()
+        self.assertTrue(value.startup_asked)
+
+    def test_valid_saved_model_does_not_reopen_the_wizard(self):
+        saved = settings.Settings()
+        saved.values["model"] = "saved-model"
+        saved.save(self.session)
+        args = make_args(self.cache, self.cache)
+        args.model = None
+        with mock.patch.object(settings, "find_last_session_dir",
+                               return_value=self.session), \
+                mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(utils, "list_served_models",
+                                  return_value=["saved-model"]), \
+                mock.patch.object(settings, "first_run") as first_run:
+            value = settings.resolve_for_startup(args, console=silent_console())
+        first_run.assert_not_called()
+        self.assertFalse(value.startup_asked)
+
+    def test_explicit_cli_model_is_not_probed_or_reasked(self):
+        args = make_args(self.cache, self.cache)
+        args.model = "cli-model"
+        with mock.patch.object(settings, "find_last_session_dir",
+                               return_value=None), \
+                mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(utils, "list_served_models") as probe, \
+                mock.patch.object(settings, "first_run") as first_run:
+            settings.resolve_for_startup(args, console=silent_console())
+        probe.assert_not_called()
+        first_run.assert_not_called()
 
     def test_first_run_uses_the_active_tui_console(self):
         args = make_args(self.cache, self.cache)
@@ -138,10 +213,11 @@ class SettingsStoreTest(unittest.TestCase):
 class _WizardConsole:
     """Records the wizard's question calls without touching a terminal."""
 
-    def __init__(self, choice=2, key="sk-test", store="n"):
+    def __init__(self, choice=2, key="sk-test", store="n", answers=None):
         self.choice = choice
         self.key = key
         self.store = store
+        self.answers = list(answers or [])
         self.choices = []
         self.secrets = []
         self.lines = []
@@ -157,6 +233,8 @@ class _WizardConsole:
 
     def read_line(self, prompt_text="", multiline=False, tui=False):
         self.lines.append(prompt_text)
+        if self.answers:
+            return self.answers.pop(0)
         return self.store
 
     def note(self, msg, level="info"):
@@ -186,6 +264,25 @@ class FirstRunWizardTest(unittest.TestCase):
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         self.assertNotIn("api_key", payload)
+
+    def test_wizard_defaults_to_the_current_provider(self):
+        value = settings.Settings()
+        value.values["url"] = settings.DEEPSEEK_URL
+        value.values["model"] = "deepseek-chat"
+        console = _WizardConsole(choice=2, key="existing")
+        settings._first_run(value, console)
+        self.assertEqual(console.choices[0][2], 2)
+
+    def test_custom_provider_keeps_current_values_when_blank(self):
+        value = settings.Settings()
+        value.values["url"] = "http://custom:8000"
+        value.values["model"] = "my-model"
+        value.api_key = "existing"
+        console = _WizardConsole(choice=3, answers=["", ""])
+        settings._first_run(value, console)
+        self.assertEqual(console.choices[0][2], 3)
+        self.assertEqual(value.values["url"], "http://custom:8000")
+        self.assertEqual(value.values["model"], "my-model")
 
     def test_explicit_opt_in_stores_the_key(self):
         console = _WizardConsole(choice=2, key="sk-secret", store="y")
@@ -323,6 +420,72 @@ class StartupConsoleTest(unittest.TestCase):
             agent_loop.main()
 
         console.start_tui.assert_not_called()
+
+
+class NewSessionWizardTest(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.cache = tempfile.mkdtemp()
+        args = make_args(self.work, self.cache)
+        args.prompt = None
+        self.console = silent_console()
+        self.session = AgentSession(args, console=self.console)
+
+    def tearDown(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+        shutil.rmtree(self.cache, ignore_errors=True)
+
+    def test_fresh_session_asks_from_scratch(self):
+        self.session.settings.model_explicit = False
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(settings, "first_run") as first_run:
+            self.session._ask_settings_from_scratch()
+        first_run.assert_called_once()
+        self.assertTrue(self.session.settings.startup_asked)
+
+    def test_already_asked_session_does_not_ask_again(self):
+        self.session.settings.model_explicit = False
+        self.session.settings.startup_asked = True
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(settings, "first_run") as first_run:
+            self.session._ask_settings_from_scratch()
+        first_run.assert_not_called()
+
+    def test_explicit_model_skips_the_fresh_session_wizard(self):
+        self.session.settings.model_explicit = True
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(settings, "first_run") as first_run:
+            self.session._ask_settings_from_scratch()
+        first_run.assert_not_called()
+
+    def test_background_session_never_asks(self):
+        self.session.settings.model_explicit = False
+        self.session.background_mode = True
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(settings, "first_run") as first_run:
+            self.session._ask_settings_from_scratch()
+        first_run.assert_not_called()
+
+    def test_fresh_session_wizard_applies_the_new_model(self):
+        self.session.settings.model_explicit = False
+        self.console.choose = mock.Mock(return_value=2)
+        self.console.read_secret = mock.Mock(return_value="sk-test")
+        self.console.read_line = mock.Mock(return_value="n")
+        with mock.patch("sys.stdin.isatty", return_value=True):
+            self.session._ask_settings_from_scratch()
+
+        self.assertEqual(self.session.settings.values["url"],
+                         settings.DEEPSEEK_URL)
+        self.assertEqual(self.session.settings.values["model"],
+                         "deepseek-chat")
+        self.assertEqual(self.session.args.model, "deepseek-chat")
+        self.assertEqual(self.session.model, "deepseek-chat")
+
+    def test_start_new_session_calls_the_wizard(self):
+        with mock.patch.object(self.session, "_ask_settings_from_scratch") \
+                as ask:
+            self.session.start_new_session()
+        ask.assert_called_once()
 
 
 class SettingsCommandTest(unittest.TestCase):

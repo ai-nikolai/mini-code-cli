@@ -310,6 +310,28 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIsNone(cancelled)
 
+    def test_picker_starts_at_the_top_and_scrolls_with_the_selection(self):
+        console = self.console()
+        console._last_body_height = 6
+        body = [f"row-{index:02d}" for index in range(20)]
+
+        console._picker_window("[settings]", body, 0)
+        first_view = "\n".join(console._overlay_lines)
+        self.assertIn("row-00", first_view)
+        self.assertNotIn("row-19", first_view)
+
+        console._picker_window("[settings]", body, 12)
+        scrolled_view = "\n".join(console._overlay_lines)
+        self.assertIn("row-12", scrolled_view)
+        self.assertNotIn("row-00", scrolled_view)
+
+    def test_top_anchored_overlay_is_not_pushed_to_the_bottom(self):
+        console = self.console()
+        console._overlay_lines = ["header", "row-00", "row-01"]
+        console._overlay_top = True
+        self.assertEqual(console._body_lines(3, 40),
+                         ["header", "row-00", "row-01"])
+
     def test_settings_picker_owns_stdin_and_handles_arrows(self):
         console = self.console()
         rows = [

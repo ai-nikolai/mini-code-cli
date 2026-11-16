@@ -906,6 +906,11 @@ class AgentSession:
         self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
         self.restored_session = False
+        # A fresh interactive session asks for its model/provider again, even
+        # when the previous session's settings were imported. Resuming keeps
+        # the restored settings (and only re-asks when the model was invalid,
+        # which happens before the resume offer).
+        self._ask_settings_from_scratch()
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
@@ -2578,6 +2583,14 @@ class AgentSession:
                 self.console.note("Settings were not applied.", "warn")
                 return False
 
+        return self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed})
+
+    def _apply_parsed_settings(self, parsed, changed_names=None, announce=True):
+        """Apply already-validated values and rebuild what they affect."""
+        changed_names = set(changed_names or ())
+        cache_effects = {spec.cache for spec, _ in parsed
+                         if spec.cache != "none"}
         old_model = self.model
         for spec, value in parsed:
             if spec.attr == "api_key":
@@ -2595,7 +2608,7 @@ class AgentSession:
         self.api_key = self.args.api_key or ""
         if self.args.model:
             self.model = self.args.model
-        elif old_model and "model" not in changes:
+        elif old_model and "model" not in changed_names:
             self.model = old_model
         else:
             self.model = self._resolve_model(self.args)
@@ -2611,7 +2624,8 @@ class AgentSession:
         self.compaction_strategy = self.args.compaction_strategy
         self.scratchpad = bool(self.args.scratchpad)
 
-        if "model" in changes and self.settings.values.get("max_tokens") is None:
+        if ("model" in changed_names
+                and self.settings.values.get("max_tokens") is None):
             self.args.max_tokens = default_max_output_tokens(self.model)
         self._register_tools(self.args)
         self._prepare_agent_files()
@@ -2624,15 +2638,55 @@ class AgentSession:
             explicit_limit=getattr(self.args, "max_context_tokens", None),
             max_output_tokens=getattr(self.args, "max_tokens", None),
         )
-        if self.messages and not self.args.system_prompt:
+        if getattr(self, "messages", None) and not self.args.system_prompt:
             self.messages[0]["content"] = self._render_system_prompt()
-        elif cache_effects & {"tools", "prompt"} and self.args.system_prompt:
+        elif (announce and cache_effects & {"tools", "prompt"}
+              and self.args.system_prompt):
             self.console.note(
                 "The custom system prompt is kept verbatim; tool/prompt "
                 "changes affect the tool registry only.", "warn")
         self.settings.capture_from_args(self.args)
         self._save_settings()
-        self.console.note("Settings updated.", "ok")
+        if announce:
+            self.console.note("Settings updated.", "ok")
+        return True
+
+    def _ask_settings_from_scratch(self):
+        """Ask the provider/model questions for a fresh interactive session.
+
+        The startup resolver may already have asked (no settings at all, or an
+        invalid saved model); ``startup_asked`` prevents asking twice. Restored
+        sessions never call this, and background/sub-agent sessions and
+        one-shot prompts never prompt.
+        """
+        if not self.settings.enabled:
+            return False
+        if self.background_mode or self.args.prompt is not None:
+            return False
+        if getattr(self.settings, "model_explicit", False):
+            # An explicit --model is an instruction, not a default to ask about.
+            return False
+        if not settings_mod.interactive_startup(self.args):
+            return False
+        if getattr(self.settings, "startup_asked", False):
+            return False
+
+        self.settings.startup_asked = True
+        before = dict(self.settings.values)
+        before_key = self.settings.api_key
+        settings_mod.first_run(self.settings, self.console)
+
+        parsed = []
+        for spec in settings_mod.SPECS:
+            if spec.attr == "api_key":
+                if self.settings.api_key != before_key:
+                    parsed.append((spec, self.settings.api_key))
+            elif self.settings.values.get(spec.attr) != before.get(spec.attr):
+                parsed.append((spec, self.settings.values.get(spec.attr)))
+        if not parsed:
+            return True
+        self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
         return True
 
     def _handle_settings_command(self, arg):
