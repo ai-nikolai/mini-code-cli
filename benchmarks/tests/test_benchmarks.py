@@ -337,21 +337,27 @@ class OtherAdapterTests(unittest.TestCase):
         argv = get_adapter(AgentSpec(name="pi", setting="json-events")).argv("p", local_model())
         self.assertEqual(argv[argv.index("--mode") + 1], "json")
 
-    def test_opencode_uses_the_harbor_builtin_and_local_endpoint(self):
+    def test_opencode_uses_the_command_bridge_and_local_endpoint(self):
+        from benchmarks.agents import opencode as opencode_module
+
         adapter = get_adapter(AgentSpec(name="opencode"))
         selection = adapter.harbor_selection(local_model())
-        self.assertEqual(selection["agent"], "opencode")
+        self.assertEqual(selection["import_path"],
+                         "benchmarks.harbor_agents:CommandAgent")
+        self.assertEqual(selection["kwargs"]["argv_template"][0],
+                         opencode_module.WRAPPER)
+        commands = "\n".join(selection["kwargs"]["install_commands"])
+        self.assertIn("opencode-ai", commands)
+        self.assertIn("--dangerously-skip-permissions", commands)
+        self.assertIn("@ai-sdk/openai-compatible", commands)
         env = adapter.env(local_model(base="http://127.0.0.1:31208"))
         self.assertEqual(env["OPENAI_BASE_URL"], "http://127.0.0.1:31208/v1")
-        argv = adapter.argv("p", local_model())
-        self.assertEqual(argv[0], "opencode")
-        self.assertIn("run", argv)
-        self.assertIn("--dangerously-skip-permissions", argv)
 
     def test_opencode_no_web_setting(self):
         adapter = get_adapter(AgentSpec(name="opencode", setting="no-web"))
-        self.assertEqual(adapter.harbor_selection(local_model())["kwargs"],
-                         {"disable_web_search": True})
+        commands = "\n".join(adapter.install_commands(local_model()))
+        self.assertIn('"websearch": "deny"', commands)
+        self.assertIn('"webfetch": "deny"', commands)
 
     def test_command_template_substitutes_and_rejects_unknown_placeholders(self):
         adapter = get_adapter(AgentSpec(

@@ -31,6 +31,11 @@ timeouts keep a 12× multiplier because extraction/start is much slower than a D
 | `claude` / `pi` CLIs | only for host-side runs; harbor installs its own copies inside the container | `npm install -g @anthropic-ai/claude-code` / `curl -fsSL https://pi.dev/install.sh \| sh` |
 | `opencode` CLI | only for host-side runs; harbor installs it inside the container | `npm install -g opencode-ai` |
 
+OpenCode is driven through a small `CommandAgent` wrapper: it installs Node/`opencode-ai` in a
+writable prefix, configures an OpenAI-compatible provider for `/v1/chat/completions`, and prepends
+the shared benchmark preamble. Harbor's built-in OpenCode is not used because its apt installer and
+`/v1/responses` provider do not fit the SIF/vLLM setup.
+
 The benchmark dependencies are deliberately *not* part of the CLI install:
 
 ```bash
