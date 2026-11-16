@@ -109,7 +109,38 @@ def parse_text(text):
         metrics["duration_seconds"] = _float(exits[-1])
 
     # Claude Code --print --output-format json / Pi event records.
+    opencode_prompt = opencode_completion = opencode_total = 0
+    opencode_steps = 0
+    opencode_cost = 0.0
+    opencode_tools = []
+    opencode_seen = False
     for payload in _json_objects(text):
+        # OpenCode's ``run --format=json`` stream is one record per step. Its
+        # usage is nested under ``part.tokens`` (input/output/reasoning/total),
+        # not the top-level ``usage`` shape used by Claude Code.
+        if payload.get("type") == "step_finish":
+            part = payload.get("part") or {}
+            tokens = part.get("tokens") or {}
+            if isinstance(tokens, dict):
+                prompt = _int(tokens.get("input")) or 0
+                completion = _int(tokens.get("output")) or 0
+                reasoning = _int(tokens.get("reasoning")) or 0
+                total = _int(tokens.get("total"))
+                opencode_prompt += prompt
+                opencode_completion += completion + reasoning
+                opencode_total += (total if total is not None
+                                   else prompt + completion + reasoning)
+                opencode_steps += 1
+                cost = _float(part.get("cost"))
+                if cost is not None:
+                    opencode_cost += cost
+                opencode_seen = True
+        elif payload.get("type") == "tool_use":
+            part = payload.get("part") or {}
+            tool = part.get("tool")
+            if tool:
+                opencode_tools.append(str(tool))
+
         usage = payload.get("usage")
         if isinstance(usage, dict):
             input_tokens = (usage.get("input_tokens")
@@ -134,6 +165,20 @@ def parse_text(text):
         tool_uses = text.count('"type":"tool_use"') + text.count('"type": "tool_use"')
         if tool_uses:
             metrics["tool_calls"] = tool_uses
+
+    if opencode_seen:
+        metrics.update({
+            "prompt_tokens": opencode_prompt,
+            "completion_tokens": opencode_completion,
+            "total_tokens": opencode_total,
+            "llm_calls": opencode_steps,
+            "turns": opencode_steps,
+        })
+        if opencode_tools:
+            metrics["tool_calls"] = len(opencode_tools)
+            metrics["tool_names"] = sorted(set(opencode_tools))
+        if opencode_cost:
+            metrics["cost_usd"] = round(opencode_cost, 6)
 
     return {key: value for key, value in metrics.items()
             if value is not None and value != ""}
