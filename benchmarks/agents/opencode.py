@@ -58,10 +58,15 @@ class OpenCodeAgent(AgentAdapter):
             return (container_setup.node_commands(prefix=TOOLS)
                     + container_setup.npm_global_commands(
                         "opencode-ai", "opencode", prefix=TOOLS))
+        # A distinct provider ID is deliberate: OpenCode's built-in ``openai``
+        # provider resolves to @ai-sdk/openai and posts to /v1/responses. The
+        # compatible package speaks /v1/chat/completions, which is what vLLM
+        # serves.
         config = {
             "provider": {
-                "openai": {
+                "vllm": {
                     "npm": "@ai-sdk/openai-compatible",
+                    "name": "vLLM (local)",
                     "options": {
                         "baseURL": f"{str(model.base_url).rstrip('/')}/v1",
                         "apiKey": "local-vllm",
@@ -83,7 +88,7 @@ if [ -f /opt/agent/agent.md ]; then
     instruction="$(cat /opt/agent/agent.md)"$'\\n\\n'"$instruction"
 fi
 exec {TOOLS}/bin/opencode \\
-    --model=openai/{model.model} \\
+    --model=vllm/{model.model} \\
     run --format=json --thinking --dangerously-skip-permissions \\
     -- "$instruction"
 """
