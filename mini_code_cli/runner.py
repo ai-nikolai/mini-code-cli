@@ -40,7 +40,7 @@ def call_function_with_timeout(func, tool_params, name, timeout_seconds=DEFAULT_
     console redirects its output, and reporting to the module-level console
     would print a background child's tool errors onto the user's terminal.
     """
-    def _handler(signum, frame):
+    def _handler(*_args):
         raise _TimedOut()
 
     # SIGALRM (and ``alarm``) are POSIX-only. On a platform without them (e.g.

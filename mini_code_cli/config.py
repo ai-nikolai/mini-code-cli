@@ -121,7 +121,13 @@ DEFAULT_CONTEXT_TOKENS = 125_000
 # How much of the window to keep free for the *reply*. A reply that gets
 # truncated mid-tool-call is useless, so this is reserved up front: a request is
 # "too big" once the input plus this reserve would not fit.
-DEFAULT_RESERVED_OUTPUT_TOKENS = 8_192
+#
+# This is also the CLI's default reply budget. It used to be 8k, which a
+# thinking model could spend entirely on reasoning and return no tool call at
+# all. 32k matches the output budget Claude Code and current local servers use;
+# ``default_max_output_tokens`` clamps it for models with a smaller window.
+DEFAULT_MAX_OUTPUT_TOKENS = 32_768
+DEFAULT_RESERVED_OUTPUT_TOKENS = DEFAULT_MAX_OUTPUT_TOKENS
 
 # Fraction of the window kept as slack on top of the output reserve, covering
 # the gap between our estimate and the model's real tokenizer (tool schemas,
@@ -192,6 +198,20 @@ def context_window_for(model, default=None):
         if key in name:
             return _CONTEXT_WINDOWS_LOWER[key]
     return default
+
+
+def default_max_output_tokens(model=None):
+    """The default reply budget for ``model``, in tokens.
+
+    Large models get :data:`DEFAULT_MAX_OUTPUT_TOKENS` (32k); a model with a
+    smaller published context window gets at most half of it, so a 32k reply
+    budget cannot consume a 8k window. Explicit ``--max-tokens`` always wins;
+    this only fills in the default when the user did not configure one.
+    """
+    window = context_window_for(model)
+    if not window:
+        return DEFAULT_MAX_OUTPUT_TOKENS
+    return max(1_024, min(DEFAULT_MAX_OUTPUT_TOKENS, int(window) // 2))
 
 
 def compaction_budget(model=None, explicit_limit=None, max_output_tokens=None):

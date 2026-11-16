@@ -25,6 +25,7 @@ without the tests reaching into every module.
 
 import os
 import json
+import re
 import time
 import argparse
 
@@ -33,7 +34,7 @@ from . import prompts
 from . import shell_safety_utils
 from . import tools
 from . import utils
-from .utils import oneline, plural
+from .utils import oneline, plural, usage_int
 from . import ui
 from . import tui as tui_mod
 from . import subagents
@@ -50,6 +51,7 @@ from .config import (
     DEFAULT_TOOL_TIMEOUT,
     DEFAULT_HTTP_TIMEOUT,
     compaction_budget,
+    default_max_output_tokens,
 )
 from .persistence import (
     save_history,
@@ -134,7 +136,7 @@ def parse_args():
         description="Agent loop for interacting with a language model")
     # MODEL / LLM related
     parser.add_argument("--url", type=str, default=f"{DEFAULT_MODEL_URL}", help=f"API host, default={DEFAULT_MODEL_URL}")
-    parser.add_argument("--max-tokens", type=int, help="Maximum tokens for a single LLM response (the reply budget), default=None. Also used as the output headroom reserved when deriving the compaction limit from the model's context window.")
+    parser.add_argument("--max-tokens", type=int, default=None, help="Maximum tokens for a single LLM response (the reply budget). Unset (default): 32768 for a large-context model, clamped to half the model's context window. It is also used as the output headroom reserved when deriving the compaction limit from the model's context window.")
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help=f"Temperature for LLM, default={DEFAULT_TEMPERATURE}")
     parser.add_argument("--model", type=str, help="Model name, default=None")
     parser.add_argument("--api-key", type=str, default=None, help="API key for authentication. If not set, it tries to find it in env variable: MINI_CODE_API_KEY.")
@@ -165,7 +167,11 @@ def parse_args():
                         help="How to compact history. summarise: summary only (default). predict-files: summary + re-read the files the model predicts it needs. predict-messages: summary + the original messages the model predicts are worth keeping.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
-                        help="Planning strategy (implies --plan when given). plan-verify-step (default): author a plan, review it, and run one final step. plan-verify: same, but a final no-tool step is not appended to the transcript. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+                        help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify-step: same, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+    parser.add_argument("--allow-nudge", action="store_true",
+                        help="Plan mode only: when the model replies without a tool call, ask it to continue (or reply DONE) before running the plan review. Works with every --plan-strategy.")
+    parser.add_argument("--nudge-limit", type=int, default=1,
+                        help="Maximum continuation nudges per text-only stop with --allow-nudge. default=1")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
     parser.add_argument("--tui", nargs="?", const="on", default="auto",
@@ -369,6 +375,15 @@ def _in_flight_tail(messages):
     return []
 
 
+#: Cap the transcript portion of the summariser prompt. A summary request that
+#: repeats the whole over-long history can hit the model's hard context limit
+#: itself (observed at ~261k input tokens), leaving every later request stuck.
+MAX_SUMMARY_PROMPT_TOKENS = 50_000
+
+#: Headroom for the summary template, the reply, and token-estimate error.
+SUMMARY_PROMPT_HEADROOM_TOKENS = 4_096
+
+
 def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats,
                   history_index=0, token_limit=None, reserved_output_tokens=0,
                   current_tokens=None, plan_hook=None, console=None, preserve=(),
@@ -447,51 +462,64 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
         console.note(
             f"Compacting the conversation: {plural(len(messages), 'message')} "
             f"-> a summary ({reason}).{kept_note}", "warn")
-        summary_prompt = prompts.compaction_prompt(messages)
+        summary_budget = min(
+            int(token_limit or MAX_SUMMARY_PROMPT_TOKENS),
+            MAX_SUMMARY_PROMPT_TOKENS)
+        summary_budget = max(
+            4_096,
+            summary_budget - int(reserved_output_tokens or 0)
+            - SUMMARY_PROMPT_HEADROOM_TOKENS)
+        try:
+            summary_prompt = prompts.compaction_prompt(
+                messages, max_tokens=summary_budget)
+        except Exception as exc:
+            summary_prompt = ""
+            console.note(
+                f"Could not build the summary prompt: {exc}. Using the "
+                f"mechanical fallback summary.", "warn")
 
-        # The summariser sometimes answers with nothing at all. An empty summary
-        # must never be mistaken for a successful compaction: the caller would
-        # think the history had been shrunk while the over-long transcript was
-        # kept, and the rollover would be lost. Retry once, then give up loudly
-        # (keeping the messages and the segment index) so the user can see that
-        # compaction is not working -- previously this fell through silently and
-        # the over-cap transcript was retried, and paid for, on every step.
+        # The summariser sometimes answers with nothing at all, or the request
+        # itself fails (network, a context-length 400). An empty/failed summary
+        # must never be mistaken for a successful compaction, but keeping the
+        # over-long transcript leaves every subsequent request over budget. So
+        # retry once, then fall back to a deterministic mechanical summary and
+        # still roll the segment over: compaction is the only thing that can
+        # recover an already-overflowing history.
         summary = ""
-        for attempt in (1, 2):
-            console.start_thinking("compacting history")
-            try:
-                reply, _, compact_usage, _ = utils.unpack_llm_result(
-                    utils.call_openai_server(
-                        [{"role": "user", "content": summary_prompt}],
-                        max_tokens=1024,
-                        temperature=0.0,
-                        model=model,
-                        server_url=server_url,
-                        api_key=api_key,
-                        timeout=llm_timeout,
-                        console=console,
-                    ))
-            finally:
-                console.stop_thinking()
+        if summary_prompt:
+            for attempt in (1, 2):
+                compact_usage = None
+                console.start_thinking("compacting history")
+                try:
+                    reply, _, compact_usage, _ = utils.unpack_llm_result(
+                        utils.call_openai_server(
+                            [{"role": "user", "content": summary_prompt}],
+                            max_tokens=1024,
+                            temperature=0.0,
+                            model=model,
+                            server_url=server_url,
+                            api_key=api_key,
+                            timeout=llm_timeout,
+                            console=console,
+                        ))
+                except Exception as exc:
+                    console.note(f"Summariser call failed: {exc}", "warn")
+                    reply = ""
+                finally:
+                    console.stop_thinking()
 
-            accumulate_usage(token_stats, compact_usage)
-            summary = (reply or "").strip()
-            if summary:
-                break
-            if attempt == 1:
-                console.note("The summariser returned an empty summary; retrying once.", "warn")
+                accumulate_usage(token_stats, compact_usage)
+                summary = (reply or "").strip()
+                if summary:
+                    break
+                if attempt == 1:
+                    console.note("The summariser returned an empty summary; retrying once.", "warn")
 
         if not summary:
-            # Say plainly what did *not* happen: nothing was dropped and the
-            # segment did not move -- only the shrink did, so the next request
-            # may still be too large.
+            summary = compaction_mod.fallback_summary(messages)
             console.note(
-                f"Could not compact history: the summariser returned an empty "
-                f"summary twice. Keeping all {plural(len(messages), 'message')} "
-                f"and history_{history_index}.json as they are -- nothing was "
-                f"lost, but the next request may still be too large "
-                f"({reason}).", "warn")
-            return messages, False, history_index
+                "The summariser did not return usable text; using a mechanical "
+                "fallback summary so the history still shrinks.", "warn")
 
         system_content = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
         compacted = []
@@ -582,6 +610,48 @@ def maybe_compact(messages, server_url, model, api_key, llm_timeout, token_stats
 # the agent session
 # ---------------------------------------------------------------------------
 
+#: How many times a truncated (``finish_reason == "length"``) reply may be
+#: nudged to continue before the session gives up. Bounded on purpose: a model
+#: that only ever rambles must still terminate.
+TRUNCATED_RETRY_LIMIT = 3
+
+#: Escalating continuation requests for truncated replies. The first is the
+#: original nudge; later ones ask for a shorter answer explicitly. A thinking
+#: model can otherwise burn every retry on the same long chain of thought.
+TRUNCATED_RETRY_NUDGES = (
+    "Your previous reply was cut off by the output-token limit before you "
+    "produced any answer or tool call. Continue from where you stopped: either "
+    "call a tool or give the final answer, and keep your reasoning shorter than "
+    "the budget allows.",
+    "You hit the output-token limit again. Please be more precise in your "
+    "response and thinking: give only the next tool call (or a short final "
+    "answer), and do not repeat analysis you have already done.",
+    "Final retry: respond with exactly one tool call and no explanation. If the "
+    "task is complete, reply DONE.",
+)
+
+#: A text-only reply only counts as finished when it carries an explicit marker.
+#: "I will complete X" is not enough; the nudge asks the model to say DONE.
+_COMPLETION_MARKER_RE = re.compile(
+    r"(?i)\b(done|complete|completed|finished)\b")
+_NEGATED_COMPLETION_RE = re.compile(
+    r"(?i)\b(?:not|never|haven't|hasn't|isn't|aren't|wasn't|weren't)\s+"
+    r"(?:done|complete|completed|finished)\b")
+
+TEXT_ONLY_NUDGE = (
+    "You stopped without a tool call. If the task is not complete, continue "
+    "with the next tool call now. If it is complete, reply DONE.")
+
+
+def _looks_complete(text):
+    """Whether a text-only reply explicitly claims completion."""
+    text = str(text or "")
+    if not _COMPLETION_MARKER_RE.search(text):
+        return False
+    return not _NEGATED_COMPLETION_RE.search(text)
+
+
+
 class AgentSession:
     """A single interactive agent session.
 
@@ -620,6 +690,10 @@ class AgentSession:
         self.server_url = f"{args.url}"
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
         self.model = self._resolve_model(args)
+        # A higher reply budget is the CLI default; an explicit --max-tokens
+        # always wins, and a small-window model gets at most half its window.
+        if getattr(args, "max_tokens", None) is None:
+            args.max_tokens = default_max_output_tokens(self.model)
 
         # Background task registry. It is independent of the foreground loop;
         # tools and /background read snapshots from it.
@@ -656,6 +730,15 @@ class AgentSession:
             self.plan_strategy = planning.DEFAULT_PLAN_STRATEGY
         self.plan_mode = (bool(getattr(self.args, "plan", False))
                           or requested_plan_strategy is not None)
+        self.allow_nudge = bool(getattr(self.args, "allow_nudge", False))
+        try:
+            self.nudge_limit = max(0, int(getattr(self.args, "nudge_limit", 1)))
+        except (TypeError, ValueError):
+            self.nudge_limit = 1
+        if self.allow_nudge and not self.plan_mode:
+            self.console.note(
+                "--allow-nudge only applies in plan mode; ignoring it.", "warn")
+        self._text_only_nudges = 0
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = (self.tui_mode != "off"
@@ -681,6 +764,7 @@ class AgentSession:
         # Keeping the two apart is what lets usage survive a compaction.
         self.token_stats = empty_usage()
         self.total_usage = empty_usage()
+        self._truncated_retries = 0
 
         # Compaction budget. History is compacted when the *projected input size*
         # of the next request would not leave room for the reply inside the
@@ -1127,7 +1211,7 @@ class AgentSession:
         """
         if not usage:
             return
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        prompt_tokens = usage_int(usage, "prompt_tokens")
         if prompt_tokens <= 0:
             return
         if message_count is None:
@@ -1506,14 +1590,6 @@ class AgentSession:
         tasks = (self.background_tasks.list()
                  if hasattr(self, "background_tasks") else [])
 
-        def count(key):
-            # The dashboard refreshes on every turn: a display detail must
-            # never raise, even if a server reported a null/odd usage value.
-            try:
-                return int(usage.get(key) or 0)
-            except (TypeError, ValueError):
-                return 0
-
         running = sum(1 for task in tasks
                       if task.get("status") in ("running", "cancelling"))
         if tasks:
@@ -1521,8 +1597,9 @@ class AgentSession:
                           f"{plural(len(tasks), 'background task')} running")
         else:
             background = "no background tasks"
-        return (f"{plural(count('tool_calls'), 'tool call')} · "
-                f"{plural(count('llm_calls'), 'LLM call')} · {background}")
+        return (f"{plural(usage_int(usage, 'tool_calls'), 'tool call')} · "
+                f"{plural(usage_int(usage, 'llm_calls'), 'LLM call')} · "
+                f"{background}")
 
     def _tui_header_lines(self):
         """The fixed dashboard content for --tui."""
@@ -1806,16 +1883,22 @@ class AgentSession:
 
         The planning *strategy* changes the plan/review wiring only:
 
-          * ``plan-verify-step`` (default) -- current behaviour: author a plan,
-            review it when the work settles, then run one extra step and keep
-            whatever that step says.
-          * ``plan-verify`` -- same plan and review, but the post-review step is
-            kept only when it calls a tool. A no-tool response is shown to the
-            user and ends the turn without being appended.
+          * ``plan-verify`` (default) -- author a plan, review it when the work
+            settles, then keep the post-review step only when it calls a tool.
+            A no-tool response is shown to the user and ends the turn without
+            being appended.
+          * ``plan-verify-step`` -- same plan and review, but always run one
+            extra step and keep whatever that step says.
           * ``open-plan`` -- the agent owns a plan document and maintains it
             itself; the loop neither authors nor reviews a plan.
+
+        ``--allow-nudge`` applies to every strategy when plan mode is active:
+        a text-only reply without an explicit completion marker gets up to
+        ``--nudge-limit`` continuation messages before the strategy's normal
+        review/end path runs.
         """
         self.messages.append({"role": "user", "content": user_input})
+        self._text_only_nudges = 0
 
         if self.plan_mode and not skip_plan:
             self._record_goal_request(user_input)
@@ -1835,10 +1918,28 @@ class AgentSession:
             should_continue = self._step()
             self._persist()
             if should_continue:
+                # A tool call or a recovered reply means the text-only nudge
+                # budget starts fresh at the next settle.
+                self._text_only_nudges = 0
                 self.console.note(
                     "Continuing with LLM calls until no more tool calls.", "info")
                 continue
             self.console.note("LLM seems to have to an end of the task.", "info")
+            # A text-only reply is a checkpoint, not necessarily completion.
+            # With --allow-nudge, ask the model to continue (bounded) before
+            # paying for a full plan review. An explicit DONE/complete marker
+            # skips the nudge and goes straight to the review.
+            if (self.plan_mode and not skip_plan and self.allow_nudge
+                    and self._text_only_nudges < self.nudge_limit
+                    and not _looks_complete(self._last_assistant_text())):
+                self._text_only_nudges += 1
+                self.console.note(
+                    "The model stopped without a tool call; asking it to "
+                    "continue before reviewing the plan.", "info")
+                self.messages.append({"role": "user",
+                                      "content": TEXT_ONLY_NUDGE})
+                self._persist()
+                continue
             if (not self.plan_mode or skip_plan
                     or self.plan_strategy == planning.OPEN_PLAN):
                 return
@@ -2898,15 +2999,6 @@ class AgentSession:
         turns = len(self.summary)
         usage = self.total_usage or {}
 
-        def count(key):
-            # A display detail on the exit path must never raise: a server that
-            # reported ``null`` usage leaves a None here, and crashing while
-            # saying goodbye would be the worst possible time to fail.
-            try:
-                return int(usage.get(key) or 0)
-            except (TypeError, ValueError):
-                return 0
-
         elapsed = max(time.monotonic() - getattr(self, "started_at",
                                                   time.monotonic()), 0.0)
         hours, remainder = divmod(int(elapsed), 3600)
@@ -2922,11 +3014,11 @@ class AgentSession:
                         f"{plural(len(self.messages), 'message')}"),
             ("conversation", plural(turns, "recorded turn")),
             ("duration", duration),
-            ("tokens", f"{count('prompt_tokens'):,} in / "
-                       f"{count('completion_tokens'):,} out "
-                       f"({count('total_tokens'):,} total)"),
-            ("calls", f"{count('llm_calls'):,} LLM, "
-                      f"{count('tool_calls'):,} tool"),
+            ("tokens", f"{usage_int(usage, 'prompt_tokens'):,} in / "
+                       f"{usage_int(usage, 'completion_tokens'):,} out "
+                       f"({usage_int(usage, 'total_tokens'):,} total)"),
+            ("calls", f"{usage_int(usage, 'llm_calls'):,} LLM, "
+                      f"{usage_int(usage, 'tool_calls'):,} tool"),
             ("background", (f"{plural(cancelled, 'task')} cancelled on exit"
                             if cancelled else "none running")),
             ("resume", "mini-code --load-last-session"),
@@ -3052,8 +3144,7 @@ class AgentSession:
             self.token_stats["tool_calls"] += len(tool_calls)
             self.total_usage["tool_calls"] += len(tool_calls)
             # The model predicted more tool calls: once the work settles down a
-            # completion review is due again (finalized_plan).
-            self.finalized_plan = True
+            # completion review is due again.
 
         if response_text:
             self._print_assistant(response_text)
@@ -3086,7 +3177,30 @@ class AgentSession:
             # not store it (or record it) as part of the conversation.
             self.messages.pop()
 
+        truncated = (usage or {}).get("finish_reason") == "length"
+        if response_text or made_tool_calls:
+            # The nudge budget is for a *consecutive* run of empty/truncated
+            # replies. A successful step means the model recovered; a later
+            # truncation gets a fresh set of retries instead of inheriting a
+            # budget exhausted earlier in a long session.
+            self._truncated_retries = 0
         if not response_text and not made_tool_calls:
+            if truncated and self._truncated_retries < TRUNCATED_RETRY_LIMIT:
+                # A thinking model can spend the whole output budget on reasoning
+                # and return neither text nor a tool call. Ending the session
+                # there throws away a whole benchmark trial (the patch comes back
+                # empty and the instance is scored unresolved), so nudge it --
+                # bounded, so a model that only ever rambles still stops. Later
+                # attempts are more explicit about the need to be concise.
+                self._truncated_retries += 1
+                self.console.note(
+                    "The reply hit the output-token limit before any answer or "
+                    "tool call; asking it to continue.", "warn")
+                nudge = TRUNCATED_RETRY_NUDGES[
+                    min(self._truncated_retries - 1,
+                        len(TRUNCATED_RETRY_NUDGES) - 1)]
+                self.messages.append({"role": "user", "content": nudge})
+                return True
             self.console.note("Warning: no response was given by the LLM.", "error")
 
         # Mirror the running tool-call total into this call's usage dict so the

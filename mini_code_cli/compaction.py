@@ -43,6 +43,54 @@ MAX_PREDICTED_FILE_CALLS = 6
 MAX_KEPT_MESSAGES = 20
 MAX_STRATEGY_CHARS = 40_000
 
+#: Character budget for the mechanical summary used when the model summariser
+#: fails. Small enough to fit any model, large enough to keep the goal and the
+#: most recent turns useful.
+FALLBACK_SUMMARY_CHARS = 6_000
+
+
+def _clip(text, limit):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit] + " [...]"
+
+
+def fallback_summary(messages, limit=FALLBACK_SUMMARY_CHARS):
+    """A deterministic summary used when the model cannot summarise.
+
+    Compaction is the mechanism that prevents an over-long transcript from
+    poisoning every later request. If the summariser itself fails (an empty
+    reply, a network error, or a context-length 400 because one tool output was
+    enormous), keeping the original transcript guarantees the next request fails
+    too. This fallback instead keeps the first user instruction and the newest
+    few turns, then marks the result as mechanical so the next model knows to
+    re-read files if it needs detail.
+    """
+    parts = []
+    first_user = next(
+        (message for message in messages
+         if message.get("role") == "user" and message.get("content")), None)
+    if first_user is not None:
+        parts.append("Initial request: "
+                     + _clip(first_user.get("content"), 1_500))
+
+    recent = [message for message in messages
+              if message.get("role") in ("user", "assistant", "tool")][-8:]
+    for message in recent:
+        content = _clip(message.get("content"), 800)
+        if content:
+            parts.append(f"{message.get('role', '?')}: {content}")
+    if not parts:
+        return ("The conversation was compacted, but no summary text was "
+                "available. Re-read any files you still need.")
+    body = "\n".join(parts)
+    if len(body) > limit:
+        # Keep the goal even when the recent-turn tail has to be clipped.
+        head = parts[0]
+        room = max(0, limit - len(head) - 100)
+        body = head + ("\n" + "\n".join(parts[1:])[-room:] if room else "")
+    return ("Mechanical fallback summary (the model summariser did not return "
+            "usable text; re-read files if you need detail):\n" + body)
+
 
 @dataclass
 class CompactionContext:

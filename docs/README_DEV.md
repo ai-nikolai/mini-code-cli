@@ -41,7 +41,7 @@ needed when you actually build/upload distributions.
 mini_code_cli/            the package (agent loop, tools, prompts, plan mode, sub-agents, skills)
   subagents/              sub-agent base class + the four built-in sub-agents
 scripts/lint.py           stdlib-only linter used by CI (and by you)
-scripts/run_model.sh      helper for serving a local model (a small checkpoint; see README)
+scripts/run_model.sh                 helper for serving a local model (a small checkpoint; see README)
 scripts/push_version_tag.py  tags HEAD with the pyproject version and pushes the tag
 tests/                    stdlib unittest suite
 .github/workflows/ci.yml      lint + test on every push / pull request
@@ -101,14 +101,14 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   the trigger itself — which fires on projected tokens (+ the reply reserve) and **never**
   on the message count.
 - **`test_interactive.py`** — the shell-safety classifier (DENY / ASK / ALLOW tiers) and
-  compaction edge cases (an empty summary is retried, then abandoned without losing the
-  transcript; a failing summariser call never corrupts the segment).
+  compaction edge cases (an empty summary or a failed summariser call falls back to a
+  mechanical summary and still rolls the segment; the summary request itself is size-bounded).
 - **`test_subagents.py`** — sub-agent delegation, isolation of the child session, the
   `report.md` channel and the intersection of child permissions with the parent's.
 - **`test_advanced_features.py`** — the scratchpad (`SCRATCHPAD.md` + prompt), the
   compaction-strategy registry and message shapes (`summarise` / `predict-files` /
-  `predict-messages`), and the planning strategies (`plan-verify-step` / `plan-verify` /
-  `open-plan`).
+  `predict-messages`), and the planning strategies (`plan-verify` (default) /
+  `plan-verify-step` / `open-plan`).
 - **`test_background.py`** — background shell/sub-agent tasks: output and exit codes,
   process-group cancellation, the `/background` view, tool registration, and shutdown cleanup.
 - **`test_tui.py`** — the `--tui` view (`auto`/`on`/`off`): fixed alternate-screen

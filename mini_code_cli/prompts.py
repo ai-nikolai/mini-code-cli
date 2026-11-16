@@ -22,6 +22,8 @@ model:
 
 import os
 
+from .tokens import CHARS_PER_TOKEN
+
 # ---------------------------------------------------------------------------
 # the system prompt
 # ---------------------------------------------------------------------------
@@ -221,15 +223,66 @@ def skills_instructions(skills_dir):
     )
 
 
-def compaction_prompt(messages):
+def _bounded_conversation(messages, max_tokens):
+    """Render a transcript that fits the summariser's own input budget.
+
+    The *whole* point of compaction is that the transcript no longer fits, yet
+    sending it verbatim to the summariser reproduces the same overflow: a single
+    huge tool output can make the summary request itself exceed the model's hard
+    context limit (observed on a task where one command produced ~191k tokens
+    after only two tool calls). Keep the newest messages that fit, truncate any
+    individual oversized message, and always include the first user instruction
+    so the summary does not lose the goal.
+    """
+    max_chars = max(4_000, int(max_tokens) * CHARS_PER_TOKEN)
+    per_message_chars = max(2_000, max_chars // 6)
+    selected = []
+    used = 0
+    for message in reversed(messages):
+        role = message.get("role", "?")
+        content = str(message.get("content") or "")
+        if len(content) > per_message_chars:
+            content = (content[:per_message_chars]
+                       + "\n[... truncated to fit the summary request ...]")
+        text = f"{role}: {content}"
+        if selected and used + len(text) + 1 > max_chars:
+            break
+        selected.append(text)
+        used += len(text) + 1
+    selected.reverse()
+
+    first_user = next(
+        (message for message in messages
+         if message.get("role") == "user" and message.get("content")), None)
+    if first_user is not None:
+        content = str(first_user.get("content") or "")
+        if len(content) > 2_000:
+            content = content[:2_000] + "\n[... truncated ...]"
+        selected.insert(0, f"user (initial request): {content}")
+
+    if len(selected) < len(messages):
+        selected.insert(0, "[... earlier messages omitted to fit the "
+                           "summary request ...]")
+    return "\n".join(selected)
+
+
+def compaction_prompt(messages, max_tokens=None):
     """
     Takes a messages list and returns a compact prompt string summarizing the conversation.
+
+    ``max_tokens`` caps the transcript portion of the prompt. Without it the
+    prompt is unbounded, which is useful for tests and callers that already know
+    the transcript is small; the agent loop always passes the summariser budget.
     """
     # .get() rather than msg['content']: a tool-call-only assistant turn has
     # content None (or the key absent) and must not raise KeyError here -- a
     # failed build of the summary prompt would abort the whole compaction.
-    conversation = "\n".join(
-        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+    if max_tokens:
+        conversation = _bounded_conversation(messages, max_tokens)
+    else:
+        conversation = "\n".join(
+            [f"{msg.get('role', '?')}: {msg.get('content') or ''}"
+             for msg in messages])
     prompt = f"""
 Please analyze the following conversation and output a concise summary covering:
 1. Key topics discussed

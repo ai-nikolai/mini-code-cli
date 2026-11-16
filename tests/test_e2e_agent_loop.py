@@ -70,7 +70,8 @@ USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 # test helpers
 # ---------------------------------------------------------------------------
 
-def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False):
+def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False,
+              plan_strategy=None):
     """Build the argparse-like namespace AgentSession.__init__ reads."""
     return argparse.Namespace(
         url="http://0.0.0.0:30000",
@@ -95,6 +96,7 @@ def make_args(allowed_dir, cache_dir, plan=False, enable_subagents=False):
         tool_timeout=30,
         max_context_tokens=None,
         plan=plan,
+        plan_strategy=plan_strategy,
         verbose=False,
     )
 
@@ -276,7 +278,8 @@ class PlanModeEndToEndTest(unittest.TestCase):
         ])
 
         prompt = "Plan the work: grep for 'apple' in fruit.txt and report the count."
-        args = make_args(self.workdir, self.cache_dir, plan=True)
+        args = make_args(self.workdir, self.cache_dir, plan=True,
+                         plan_strategy="plan-verify-step")
         session = AgentSession(args, console=silent_console())
         stub = run_loop(session, prompt, stub)
 
@@ -471,6 +474,67 @@ class ToolGatingTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # scenario 6 -- history compaction
 # ---------------------------------------------------------------------------
+
+class TruncatedReplyNudgeTest(unittest.TestCase):
+    """The "continue" nudge must be a string, not a one-item tuple.
+
+    A ``finish_reason == "length"`` reply with no text/tool call is followed by a
+    user message asking the model to continue. A stray trailing comma once made
+    that ``content`` a tuple, which JSON-encodes as an array; vLLM rejects the
+    next request with HTTP 400 (``ChatCompletionContentPartTextParam``), ending
+    the trial with an empty patch.
+    """
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp()
+        self.cache_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.cache_dir, ignore_errors=True)
+
+    def test_the_continue_nudge_is_a_plain_string(self):
+        args = make_args(self.workdir, self.cache_dir)
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+        session.messages.append({"role": "user", "content": "do the thing"})
+
+        length_usage = dict(USAGE, finish_reason="length")
+        stub = StubLLM([("", [], length_usage)])
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            should_continue = session._step()
+
+        self.assertTrue(should_continue)
+        nudge = session.messages[-1]
+        self.assertEqual(nudge["role"], "user")
+        self.assertIsInstance(nudge["content"], str)
+        self.assertIn("output-token limit", nudge["content"])
+        # What the server actually sees: a JSON string, never an array.
+        self.assertTrue(json.dumps(nudge["content"]).startswith('"'))
+
+    def test_retries_escalate_then_reset_after_a_successful_reply(self):
+        args = make_args(self.workdir, self.cache_dir)
+        session = AgentSession(args, console=silent_console())
+        session.start_session()
+        session.messages.append({"role": "user", "content": "do the thing"})
+
+        length_usage = dict(USAGE, finish_reason="length")
+        stub = StubLLM([
+            ("", [], length_usage),
+            ("", [], length_usage),
+            ("A short useful answer.", [], USAGE),
+        ])
+        with mock.patch.object(utils, "call_openai_server", new=stub):
+            self.assertTrue(session._step())
+            self.assertEqual(session._truncated_retries, 1)
+            self.assertIn("Continue from where you stopped",
+                          session.messages[-1]["content"])
+            self.assertTrue(session._step())
+            self.assertEqual(session._truncated_retries, 2)
+            self.assertIn("be more precise",
+                          session.messages[-1]["content"])
+            self.assertFalse(session._step())
+
+        self.assertEqual(session._truncated_retries, 0)
+
 
 class CompactionTest(unittest.TestCase):
     """The module-level compaction helper that keeps the context window bounded."""

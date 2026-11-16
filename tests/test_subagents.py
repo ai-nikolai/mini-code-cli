@@ -20,7 +20,6 @@ Everything still runs against the real loop, the real tools and the real
 sandbox; only the LLM is stubbed.
 """
 
-import io
 import json
 import os
 import shutil
@@ -28,7 +27,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import persistence, ui, utils
+from mini_code_cli import persistence, ui
 from mini_code_cli.agent_loop import AgentSession
 from mini_code_cli.subagents import SubAgent, clear_registry, register
 from mini_code_cli.persistence import save_history, save_summary

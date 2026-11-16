@@ -9,15 +9,12 @@ The compaction/planning strategies are exercised at two levels:
 """
 
 import io
-import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import agent_files, agent_loop, compaction, planning, prompts, ui, utils
+from mini_code_cli import agent_files, agent_loop, compaction, prompts, ui, utils
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
 
 from test_e2e_agent_loop import (
@@ -312,6 +309,88 @@ class PlanStrategyTest(_AdvancedCase):
         session = self.new_session(plan=False, plan_strategy="open-plan")
         self.assertTrue(session.plan_mode)
 
+    def test_plan_mode_defaults_to_plan_verify(self):
+        session = self.new_session(plan=True)
+        self.assertEqual(session.plan_strategy, "plan-verify")
+
+    def test_generation_budget_defaults_to_32k(self):
+        session = self.new_session()
+        self.assertEqual(session.args.max_tokens, 32_768)
+
+    def test_allow_nudge_continues_a_text_only_reply_before_review(self):
+        target = os.path.join(self.workdir, "data.txt")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("alpha\n")
+
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="plan-verify",
+                                   allow_nudge=True)
+        stub = StubLLM([
+            ("Plan:\n1. read the file", [], USAGE),          # plan generation
+            ("I'll continue.", [], USAGE),                   # text-only -> nudge
+            ("", [tool_call("c1", "read_file",
+                            {"file_path": target})], USAGE),  # resumed work
+            ("DONE", [], USAGE),                             # explicit marker
+            ("Review says done.", [], USAGE),                # plan review
+            ("Final answer.", [], USAGE),                    # dropped final
+        ])
+        run_loop(session, "read the file", stub)
+
+        user_texts = [m.get("content") for m in session.messages
+                      if m.get("role") == "user"]
+        self.assertIn(agent_loop.TEXT_ONLY_NUDGE, user_texts)
+        self.assertTrue(any("Review says done." in (text or "")
+                            for text in user_texts))
+        self.assertEqual(len([m for m in session.messages
+                              if m.get("role") == "tool"]), 1)
+
+    def test_an_explicit_completion_marker_skips_the_nudge(self):
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="plan-verify",
+                                   allow_nudge=True)
+        stub = StubLLM([
+            ("Plan:\n1. do the thing", [], USAGE),
+            ("DONE", [], USAGE),
+            ("Review says done.", [], USAGE),
+            ("Final answer.", [], USAGE),
+        ])
+        run_loop(session, "do the thing", stub)
+
+        user_texts = [m.get("content") for m in session.messages
+                      if m.get("role") == "user"]
+        self.assertNotIn(agent_loop.TEXT_ONLY_NUDGE, user_texts)
+
+    def test_completion_marker_ignores_negation(self):
+        self.assertTrue(agent_loop._looks_complete("DONE"))
+        self.assertTrue(agent_loop._looks_complete("All tasks are complete."))
+        self.assertFalse(agent_loop._looks_complete("The task is not complete."))
+        self.assertFalse(agent_loop._looks_complete("I will continue."))
+
+    def test_nudge_limit_allows_more_than_one_continuation(self):
+        target = os.path.join(self.workdir, "data.txt")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("alpha\n")
+
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="plan-verify",
+                                   allow_nudge=True, nudge_limit=2)
+        stub = StubLLM([
+            ("Plan:\n1. read the file", [], USAGE),
+            ("I'll continue.", [], USAGE),
+            ("Still thinking.", [], USAGE),
+            ("", [tool_call("c1", "read_file",
+                            {"file_path": target})], USAGE),
+            ("DONE", [], USAGE),
+            ("Review says done.", [], USAGE),
+            ("Final answer.", [], USAGE),
+        ])
+        run_loop(session, "read the file", stub)
+
+        nudges = [m for m in session.messages
+                  if m.get("role") == "user"
+                  and m.get("content") == agent_loop.TEXT_ONLY_NUDGE]
+        self.assertEqual(len(nudges), 2)
+
     def test_plan_verify_drops_the_final_no_tool_step(self):
         session = self.new_session(start=False, plan=True,
                                    plan_strategy="plan-verify")
@@ -435,7 +514,7 @@ class WelcomeBannerTest(_AdvancedCase):
     def test_banner_marks_planning_off_when_plan_mode_is_disabled(self):
         out = self._welcome(compaction_strategy="summarise")
         self.assertIn("compaction  : summarise", out)
-        self.assertIn("planning    : plan-verify-step (plan mode off)", out)
+        self.assertIn("planning    : plan-verify (plan mode off)", out)
 
     def test_welcome_shows_the_ascii_mark(self):
         out = self._welcome()
@@ -450,15 +529,21 @@ class ParseArgsTest(unittest.TestCase):
         self.assertFalse(args.scratchpad)
         self.assertEqual(args.compaction_strategy, "summarise")
         self.assertIsNone(args.plan_strategy)
+        self.assertIsNone(args.max_tokens)      # resolved from the model later
+        self.assertFalse(args.allow_nudge)
+        self.assertEqual(args.nudge_limit, 1)
 
     def test_new_flags_are_accepted(self):
         with mock.patch.object(
                 sys, "argv",
                 ["mini-code", "--scratchpad", "--compaction-strategy",
-                 "predict-files", "--plan-strategy", "plan-verify"]):
+                 "predict-files", "--plan-strategy", "plan-verify",
+                 "--allow-nudge", "--nudge-limit", "2"]):
             args = agent_loop.parse_args()
         self.assertTrue(args.scratchpad)
         self.assertEqual(args.compaction_strategy, "predict-files")
         self.assertEqual(args.plan_strategy, "plan-verify")
+        self.assertTrue(args.allow_nudge)
+        self.assertEqual(args.nudge_limit, 2)
         # A strategy implies plan mode so the banner and the session agree.
         self.assertTrue(args.plan)
