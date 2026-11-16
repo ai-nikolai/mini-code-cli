@@ -440,6 +440,10 @@ def _ask(console, prompt_text):
 
 DEEPSEEK_URL = "https://api.deepseek.com"
 
+#: Stable DeepSeek model aliases used when ``/v1/models`` cannot be queried
+#: (for example before an API key is entered).
+DEEPSEEK_MODELS = ("deepseek-chat", "deepseek-reasoner")
+
 #: Model validation is a best-effort startup probe; keep it short so an
 #: unreachable server does not delay an interactive session for long.
 MODEL_CHECK_TIMEOUT = 5
@@ -481,18 +485,55 @@ def _ask_key(console, settings, provider):
         return
     if settings.api_key:
         return
+    if provider == "deepseek":
+        console.note(
+            "DeepSeek API key: create one at "
+            "https://platform.deepseek.com/api_keys or set "
+            "MINI_CODE_API_KEY.", "info")
+        prompt = "DeepSeek API key (hidden; Enter to skip): "
+    else:
+        console.note(
+            "API key for this server (leave blank if it does not need one).",
+            "info")
+        prompt = "API key (hidden; Enter to skip): "
     # ``read_secret`` masks the typed value in the fixed TUI and uses getpass
     # on the ordinary console.
-    key = console.read_secret("API key: ")
+    key = console.read_secret(prompt)
     if key is None:
         return
     key = key.strip()
     if not key:
         return
     settings.api_key = key
-    answer = _ask(console, "Store this key in this session's settings.json "
-                           "(mode 0600)? [y/N] ").lower()
+    answer = _ask(
+        console,
+        "Store this key? Type 'y' to write it to settings.json (mode 0600), "
+        "or Enter to keep it in memory for this session only: ").lower()
     settings.persist_api_key = answer in ("y", "yes")
+
+
+def _deepseek_model_choices(settings):
+    """Live DeepSeek model ids, falling back to the stable aliases."""
+    served = utils.list_served_models(
+        DEEPSEEK_URL, api_key=settings.api_key or None,
+        timeout=MODEL_CHECK_TIMEOUT)
+    models = []
+    for name in list(served or ()) + list(DEEPSEEK_MODELS):
+        if name and name not in models:
+            models.append(name)
+    return models
+
+
+def _ask_deepseek_model(settings, console):
+    """Ask which DeepSeek model to use, preferring the live served list."""
+    models = _deepseek_model_choices(settings)
+    current = settings.values.get("model")
+    default = models.index(current) + 1 if current in models else 1
+    choice = console.choose("DeepSeek model to use", models, default=default)
+    if choice is None:
+        settings.values["model"] = current or models[0]
+    else:
+        settings.values["model"] = models[choice - 1]
 
 
 def first_run(settings, console):
@@ -525,8 +566,10 @@ def first_run(settings, console):
         _ask_key(console, settings, "localhost")
     elif choice == 2:
         settings.values["url"] = DEEPSEEK_URL
-        settings.values["model"] = "deepseek-chat"
+        # Ask for the key first so the live model list can be queried with it;
+        # if the key is skipped the stable aliases are offered instead.
         _ask_key(console, settings, "deepseek")
+        _ask_deepseek_model(settings, console)
     else:
         settings.values["url"] = (
             _ask(console, f"URL [{current_url}]: ") or current_url)

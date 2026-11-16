@@ -270,11 +270,14 @@ reopen. Resuming a conversation keeps the restored settings. Starting a **new**
 session asks the provider/model questions again, pre-selecting the current provider
 so Enter keeps it; an explicit `--model` skips both the probe and the questions.
 
-The wizard is limited to the model provider (`localhost`, `deepseek`, or a custom
-URL) and, when needed, the API key. When the fixed TUI applies, the wizard runs
-inside it (arrow keys or numbers select a provider, and a typed key is masked). The
-key is read from the environment first; if you type one, mini-code asks whether to
-store it in the session file with mode `0600` (default: no).
+The wizard asks for the model provider (`localhost`, `deepseek`, or a custom URL)
+and, when needed, the API key. For DeepSeek it then asks which model to use, offering
+the ids from the live `/v1/models` response when a key is available (otherwise the
+stable `deepseek-chat` / `deepseek-reasoner` aliases). The DeepSeek key prompt says
+where to create a key and that `MINI_CODE_API_KEY` is used first. When the fixed TUI
+applies, the wizard runs inside it (arrow keys or numbers select, and a typed key is
+masked). If you type a key, mini-code asks clearly whether to write it to the session
+file with mode `0600`; otherwise it stays in memory for this session only.
 
 Use `/settings` to inspect or change settings. The table marks values that rebuild
 the tool list or generated system prompt — these invalidate the LLM prompt cache.

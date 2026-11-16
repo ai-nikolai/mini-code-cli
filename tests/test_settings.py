@@ -184,16 +184,19 @@ class SettingsStoreTest(unittest.TestCase):
         console._active = True
         with mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch.object(console, "choose",
-                                  return_value=2) as choose, \
+                                  side_effect=[2, 1]) as choose, \
                 mock.patch.object(console, "read_secret",
                                   return_value="sk-tui") as secret, \
                 mock.patch.object(console, "read_line", return_value="n"), \
+                mock.patch.object(utils, "list_served_models",
+                                  return_value=None), \
                 mock.patch.object(settings, "find_last_session_dir",
                                   return_value=None):
             value = settings.resolve_for_startup(args, console=console)
 
-        choose.assert_called_once()
-        secret.assert_called_once_with("API key: ")
+        self.assertEqual(choose.call_count, 2)
+        secret.assert_called_once_with(
+            "DeepSeek API key (hidden; Enter to skip): ")
         self.assertEqual(value.values["model"], "deepseek-chat")
         self.assertEqual(value.api_key, "sk-tui")
 
@@ -213,11 +216,13 @@ class SettingsStoreTest(unittest.TestCase):
 class _WizardConsole:
     """Records the wizard's question calls without touching a terminal."""
 
-    def __init__(self, choice=2, key="sk-test", store="n", answers=None):
+    def __init__(self, choice=2, key="sk-test", store="n", answers=None,
+                 choice_answers=None):
         self.choice = choice
         self.key = key
         self.store = store
         self.answers = list(answers or [])
+        self.choice_answers = list(choice_answers or [])
         self.choices = []
         self.secrets = []
         self.lines = []
@@ -225,6 +230,8 @@ class _WizardConsole:
 
     def choose(self, title, options, default=1, prompt="> "):
         self.choices.append((title, list(options), default))
+        if self.choice_answers:
+            return self.choice_answers.pop(0)
         return self.choice
 
     def read_secret(self, prompt_text="API key: "):
@@ -243,9 +250,12 @@ class _WizardConsole:
 
 class FirstRunWizardTest(unittest.TestCase):
     def test_wizard_uses_the_console_choose_and_secret_hooks(self):
-        console = _WizardConsole(choice=2, key=" sk-test ", store="n")
+        console = _WizardConsole(choice_answers=[2, 1], key=" sk-test ",
+                                 store="n")
         value = settings.Settings()
-        settings._first_run(value, console)
+        with mock.patch.object(utils, "list_served_models",
+                               return_value=None):
+            settings._first_run(value, console)
 
         self.assertEqual(value.values["url"], "https://api.deepseek.com")
         self.assertEqual(value.values["model"], "deepseek-chat")
@@ -253,24 +263,43 @@ class FirstRunWizardTest(unittest.TestCase):
         self.assertFalse(value.persist_api_key)
         self.assertEqual(console.choices[0][1],
                          ["localhost", "deepseek", "custom URL"])
-        self.assertEqual(console.secrets, ["API key: "])
+        self.assertEqual(console.choices[1][0], "DeepSeek model to use")
+        self.assertIn("deepseek-chat", console.choices[1][1])
+        self.assertEqual(
+            console.secrets,
+            ["DeepSeek API key (hidden; Enter to skip): "])
 
     def test_typed_key_is_not_written_without_explicit_opt_in(self):
-        console = _WizardConsole(choice=2, key="sk-secret", store="n")
+        console = _WizardConsole(choice_answers=[2, 1], key="sk-secret",
+                                 store="n")
         value = settings.Settings()
-        settings._first_run(value, console)
+        with mock.patch.object(utils, "list_served_models",
+                               return_value=None):
+            settings._first_run(value, console)
         with tempfile.TemporaryDirectory() as session:
             path = value.save(session)
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         self.assertNotIn("api_key", payload)
 
+    def test_deepseek_model_choices_prefer_the_served_list(self):
+        value = settings.Settings()
+        value.api_key = "sk-test"
+        with mock.patch.object(
+                utils, "list_served_models",
+                return_value=["deepseek-chat", "deepseek-v4"]):
+            models = settings._deepseek_model_choices(value)
+        self.assertEqual(models[:2], ["deepseek-chat", "deepseek-v4"])
+        self.assertIn("deepseek-reasoner", models)
+
     def test_wizard_defaults_to_the_current_provider(self):
         value = settings.Settings()
         value.values["url"] = settings.DEEPSEEK_URL
         value.values["model"] = "deepseek-chat"
-        console = _WizardConsole(choice=2, key="existing")
-        settings._first_run(value, console)
+        console = _WizardConsole(choice_answers=[2, 1], key="existing")
+        with mock.patch.object(utils, "list_served_models",
+                               return_value=None):
+            settings._first_run(value, console)
         self.assertEqual(console.choices[0][2], 2)
 
     def test_custom_provider_keeps_current_values_when_blank(self):
@@ -285,9 +314,12 @@ class FirstRunWizardTest(unittest.TestCase):
         self.assertEqual(value.values["model"], "my-model")
 
     def test_explicit_opt_in_stores_the_key(self):
-        console = _WizardConsole(choice=2, key="sk-secret", store="y")
+        console = _WizardConsole(choice_answers=[2, 1], key="sk-secret",
+                                 store="y")
         value = settings.Settings()
-        settings._first_run(value, console)
+        with mock.patch.object(utils, "list_served_models",
+                               return_value=None):
+            settings._first_run(value, console)
         with tempfile.TemporaryDirectory() as session:
             path = value.save(session)
             with open(path, encoding="utf-8") as handle:
@@ -468,10 +500,12 @@ class NewSessionWizardTest(unittest.TestCase):
 
     def test_fresh_session_wizard_applies_the_new_model(self):
         self.session.settings.model_explicit = False
-        self.console.choose = mock.Mock(return_value=2)
+        self.console.choose = mock.Mock(side_effect=[2, 1])
         self.console.read_secret = mock.Mock(return_value="sk-test")
         self.console.read_line = mock.Mock(return_value="n")
-        with mock.patch("sys.stdin.isatty", return_value=True):
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(utils, "list_served_models",
+                                  return_value=None):
             self.session._ask_settings_from_scratch()
 
         self.assertEqual(self.session.settings.values["url"],
