@@ -1037,16 +1037,22 @@ class TuiConsole(Console):
         import termios
 
         selected = max(0, min(int(default), count - 1))
+        # The scroll listener runs between prompts and also reads stdin. If it
+        # stays alive here it steals the arrow-key bytes, so the picker sees
+        # only (or part of) the ESC sequence and treats it as a cancel.
+        self.stop_scroll_listener()
+        fd = None
+        previous = None
         try:
-            fd = sys.stdin.fileno()
-            previous = termios.tcgetattr(fd)
-        except (AttributeError, OSError, ValueError, termios.error):
-            return None
-        attrs = termios.tcgetattr(fd)
-        attrs[3] &= ~(termios.ICANON | termios.ECHO)
-        attrs[6][termios.VMIN] = 1
-        attrs[6][termios.VTIME] = 0
-        try:
+            try:
+                fd = sys.stdin.fileno()
+                previous = termios.tcgetattr(fd)
+            except (AttributeError, OSError, ValueError, termios.error):
+                return None
+            attrs = termios.tcgetattr(fd)
+            attrs[3] &= ~(termios.ICANON | termios.ECHO)
+            attrs[6][termios.VMIN] = 1
+            attrs[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
             draw(selected)
             while True:
@@ -1079,12 +1085,15 @@ class TuiConsole(Console):
                 if raw in (b"\r", b"\n"):
                     return selected
         finally:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, previous)
-            except (OSError, ValueError, termios.error):
-                pass
+            if fd is not None and previous is not None:
+                try:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+                except (OSError, ValueError, termios.error):
+                    pass
             self._overlay_lines = []
             self.render()
+            if self._active:
+                self.start_scroll_listener()
 
     def choose(self, title, options, default=1, prompt="> "):
         """Arrow-key picker for the fixed view; returns 1-based index or None."""

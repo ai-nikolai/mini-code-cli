@@ -310,6 +310,33 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIsNone(cancelled)
 
+    def test_settings_picker_owns_stdin_and_handles_arrows(self):
+        console = self.console()
+        rows = [
+            {"number": 1, "name": "model", "value": "m", "cache": "none"},
+            {"number": 2, "name": "temperature", "value": "1.0",
+             "cache": "none"},
+        ]
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            events = []
+            console.stop_scroll_listener = mock.Mock(
+                side_effect=lambda: events.append("stop"))
+            console.start_scroll_listener = mock.Mock(
+                side_effect=lambda: events.append("start"))
+            selected = self._feed_pick(
+                console, b"\x1b[B\r",
+                lambda: console.settings_pick(rows))
+            picker_events = list(events)
+            console.stop_tui()
+
+        self.assertEqual(selected["name"], "temperature")
+        # The between-prompt listener must not compete for the arrow keys.
+        self.assertEqual(picker_events, ["stop", "start"])
+
     def test_caret_column_uses_display_width_for_cjk(self):
         console = self.console()
         with mock.patch.object(
