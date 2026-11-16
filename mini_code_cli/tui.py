@@ -722,7 +722,7 @@ class TuiConsole(Console):
 
     # -- full-screen input -------------------------------------------------
 
-    def _read_tui_input(self, prompt_text=""):
+    def _read_tui_input(self, prompt_text="", mask=False, remember=True):
         import codecs
         import select
 
@@ -752,7 +752,7 @@ class TuiConsole(Console):
         draft = ""
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._notice_line = prompt_text.strip() if prompt_text.strip() else ""
-        self._input_buffer = buffer
+        self._input_buffer = ["*"] * len(buffer) if mask else buffer
         self._input_cursor = cursor
         self._input_active = True
         self.render()
@@ -761,7 +761,9 @@ class TuiConsole(Console):
             return os.read(fd, 1)
 
         def sync():
-            self._input_buffer = buffer
+            # A masked prompt (an API key) keeps the real text in ``buffer``
+            # but shows one star per character so nothing leaks on screen.
+            self._input_buffer = ["*"] * len(buffer) if mask else buffer
             self._input_cursor = cursor
             self.render()
 
@@ -781,8 +783,8 @@ class TuiConsole(Console):
         def submit_current():
             nonlocal cursor
             text = "".join(buffer)
-            if text.strip() and (not self._input_history
-                                 or self._input_history[-1] != text):
+            if (remember and text.strip() and (not self._input_history
+                                              or self._input_history[-1] != text)):
                 self._input_history.append(text)
                 if len(self._input_history) > 100:
                     del self._input_history[0]
@@ -1023,33 +1025,18 @@ class TuiConsole(Console):
             except (OSError, ValueError, termios.error):
                 pass
 
-    def settings_pick(self, rows, immutable_lines=()):
-        """Show the settings table and return the selected row, or None.
+    def _pick_index(self, draw, count, default=0):
+        """Run a blocking raw-key picker and return a 0-based index.
 
-        Arrow keys move, a digit selects that row, Enter opens it, and q/Esc
-        cancels. Immutable rows are shown but cannot be selected.
+        ``draw(selected)`` renders the overlay. Up/down move, a digit jumps to
+        that row, Enter confirms, and q/Esc cancels (returning ``None``).
         """
-        if not self._active or not rows:
+        if not self._active or count <= 0:
             return None
         import select
         import termios
 
-        selected = 0
-
-        def draw():
-            lines = [self.style("[settings] ↑/↓ or number, Enter edit, q cancel",
-                                 fg="cyan", bold=True)]
-            for index, row in enumerate(rows):
-                marker = ">" if index == selected else " "
-                cache = (f"  cache:{row['cache']}"
-                         if row.get("cache", "none") != "none" else "")
-                lines.append(f"{marker} {row['number']:2}. "
-                             f"{row['name']:22} {row['value']:28}{cache}")
-            for line in immutable_lines:
-                lines.append(self.style("  " + str(line), dim=True))
-            self._overlay_lines = lines
-            self.render()
-
+        selected = max(0, min(int(default), count - 1))
         try:
             fd = sys.stdin.fileno()
             previous = termios.tcgetattr(fd)
@@ -1061,7 +1048,7 @@ class TuiConsole(Console):
         attrs[6][termios.VTIME] = 0
         try:
             termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
-            draw()
+            draw(selected)
             while True:
                 ready, _, _ = select.select([fd], [], [], 1.0)
                 if not ready:
@@ -1075,22 +1062,22 @@ class TuiConsole(Console):
                     seq = _read_escape_sequence(fd, lambda: os.read(fd, 1),
                                                 [], select)
                     if seq.endswith(b"A"):
-                        selected = (selected - 1) % len(rows)
-                        draw()
+                        selected = (selected - 1) % count
+                        draw(selected)
                         continue
                     if seq.endswith(b"B"):
-                        selected = (selected + 1) % len(rows)
-                        draw()
+                        selected = (selected + 1) % count
+                        draw(selected)
                         continue
                     return None
                 if raw in b"123456789":
                     index = int(raw) - 1
-                    if 0 <= index < len(rows):
+                    if 0 <= index < count:
                         selected = index
-                        draw()
+                        draw(selected)
                     continue
                 if raw in (b"\r", b"\n"):
-                    return rows[selected]
+                    return selected
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, previous)
@@ -1098,6 +1085,72 @@ class TuiConsole(Console):
                 pass
             self._overlay_lines = []
             self.render()
+
+    def choose(self, title, options, default=1, prompt="> "):
+        """Arrow-key picker for the fixed view; returns 1-based index or None."""
+        if not self._active or not options:
+            return super().choose(title, options, default=default,
+                                  prompt=prompt)
+        options = list(options)
+        start = max(0, min(int(default) - 1, len(options) - 1))
+
+        def draw(selected):
+            lines = ([self.style(f"[{title}]", fg="cyan", bold=True)]
+                     if title else [])
+            for index, option in enumerate(options):
+                marker = ">" if index == selected else " "
+                lines.append(f"{marker} {index + 1}. {option}")
+            lines.append(self.style("↑/↓ or number, Enter select, q cancel",
+                                     dim=True))
+            self._overlay_lines = lines
+            self.render()
+
+        index = self._pick_index(draw, len(options), start)
+        return None if index is None else index + 1
+
+    def settings_pick(self, rows, immutable_lines=()):
+        """Show the settings table and return the selected row, or None.
+
+        Arrow keys move, a digit selects that row, Enter opens it, and q/Esc
+        cancels. Immutable rows are shown but cannot be selected.
+        """
+        if not self._active or not rows:
+            return None
+
+        def draw(selected):
+            lines = [self.style("[settings] ↑/↓ or number, Enter edit, q cancel",
+                                 fg="cyan", bold=True)]
+            for index, row in enumerate(rows):
+                marker = ">" if index == selected else " "
+                cache = (f"  cache:{row['cache']}"
+                         if row.get("cache", "none") != "none" else "")
+                lines.append(f"{marker} {row['number']:2}. "
+                             f"{row['name']:22} {row['value']:28}{cache}")
+            for line in immutable_lines:
+                lines.append(self.style("  " + str(line), dim=True))
+            self._overlay_lines = lines
+            self.render()
+
+        index = self._pick_index(draw, len(rows), 0)
+        return None if index is None else rows[index]
+
+    def read_secret(self, prompt_text="API key: "):
+        """Read a secret into the fixed-view input line without echoing it."""
+        if not self._active:
+            return super().read_secret(prompt_text)
+        self.stop_scroll_listener()
+        try:
+            return self._read_tui_input(prompt_text, mask=True, remember=False)
+        except (EOFError, KeyboardInterrupt):
+            self._input_active = False
+            return None
+        finally:
+            if self._question_active:
+                self._question_active = False
+                self._question_lines = []
+                self.render()
+            if self._active:
+                self.start_scroll_listener()
 
     def read_line(self, prompt_text="", multiline=False, tui=False):
         if not self._active:

@@ -1,4 +1,5 @@
 """Tests for session-local settings and the /settings command."""
+import io
 import json
 import os
 import shutil
@@ -7,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mini_code_cli import settings, utils
+from mini_code_cli import agent_loop, settings, tui, ui, utils
 from mini_code_cli.agent_loop import AgentSession
 from test_e2e_agent_loop import make_args, silent_console
 
@@ -100,6 +101,27 @@ class SettingsStoreTest(unittest.TestCase):
                 value = settings.resolve_for_startup(args)
         self.assertEqual(value.values["model"], "from-previous")
 
+    def test_first_run_uses_the_active_tui_console(self):
+        args = make_args(self.cache, self.cache)
+        args.model = None
+        console = tui.TuiConsole(stream=io.StringIO(), color=False,
+                                 unicode=False)
+        console._active = True
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(console, "choose",
+                                  return_value=2) as choose, \
+                mock.patch.object(console, "read_secret",
+                                  return_value="sk-tui") as secret, \
+                mock.patch.object(console, "read_line", return_value="n"), \
+                mock.patch.object(settings, "find_last_session_dir",
+                                  return_value=None):
+            value = settings.resolve_for_startup(args, console=console)
+
+        choose.assert_called_once()
+        secret.assert_called_once_with("API key: ")
+        self.assertEqual(value.values["model"], "deepseek-chat")
+        self.assertEqual(value.api_key, "sk-tui")
+
     def test_localhost_wizard_auto_detects_model(self):
         args = make_args(self.cache, self.cache)
         args.model = None
@@ -111,6 +133,196 @@ class SettingsStoreTest(unittest.TestCase):
                                   return_value="detected-model"):
             value = settings.resolve_for_startup(args, console=console)
         self.assertEqual(value.values["model"], "detected-model")
+
+
+class _WizardConsole:
+    """Records the wizard's question calls without touching a terminal."""
+
+    def __init__(self, choice=2, key="sk-test", store="n"):
+        self.choice = choice
+        self.key = key
+        self.store = store
+        self.choices = []
+        self.secrets = []
+        self.lines = []
+        self.notes = []
+
+    def choose(self, title, options, default=1, prompt="> "):
+        self.choices.append((title, list(options), default))
+        return self.choice
+
+    def read_secret(self, prompt_text="API key: "):
+        self.secrets.append(prompt_text)
+        return self.key
+
+    def read_line(self, prompt_text="", multiline=False, tui=False):
+        self.lines.append(prompt_text)
+        return self.store
+
+    def note(self, msg, level="info"):
+        self.notes.append((msg, level))
+
+
+class FirstRunWizardTest(unittest.TestCase):
+    def test_wizard_uses_the_console_choose_and_secret_hooks(self):
+        console = _WizardConsole(choice=2, key=" sk-test ", store="n")
+        value = settings.Settings()
+        settings._first_run(value, console)
+
+        self.assertEqual(value.values["url"], "https://api.deepseek.com")
+        self.assertEqual(value.values["model"], "deepseek-chat")
+        self.assertEqual(value.api_key, "sk-test")
+        self.assertFalse(value.persist_api_key)
+        self.assertEqual(console.choices[0][1],
+                         ["localhost", "deepseek", "custom URL"])
+        self.assertEqual(console.secrets, ["API key: "])
+
+    def test_typed_key_is_not_written_without_explicit_opt_in(self):
+        console = _WizardConsole(choice=2, key="sk-secret", store="n")
+        value = settings.Settings()
+        settings._first_run(value, console)
+        with tempfile.TemporaryDirectory() as session:
+            path = value.save(session)
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        self.assertNotIn("api_key", payload)
+
+    def test_explicit_opt_in_stores_the_key(self):
+        console = _WizardConsole(choice=2, key="sk-secret", store="y")
+        value = settings.Settings()
+        settings._first_run(value, console)
+        with tempfile.TemporaryDirectory() as session:
+            path = value.save(session)
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(payload["api_key"], "sk-secret")
+
+
+class ConsoleChooseTest(unittest.TestCase):
+    def test_number_name_and_default(self):
+        console = silent_console()
+        console.read_line = mock.Mock(return_value="2")
+        self.assertEqual(console.choose("Pick", ["a", "b"]), 2)
+        console.read_line = mock.Mock(return_value="b")
+        self.assertEqual(console.choose("Pick", ["a", "b"]), 2)
+        console.read_line = mock.Mock(return_value="")
+        self.assertEqual(console.choose("Pick", ["a", "b"], default=1), 1)
+        console.read_line = mock.Mock(return_value="nonsense")
+        self.assertEqual(console.choose("Pick", ["a", "b"], default=2), 2)
+        self.assertIn("1. a", console.stream.getvalue())
+
+
+class StartupConsoleTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.args = make_args(self.dir, self.dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_build_console_follows_tui_mode(self):
+        self.args.tui = "off"
+        console, _mode = agent_loop.build_console(self.args)
+        self.assertIs(console, ui.console)
+
+        self.args.tui = "on"
+        console, mode = agent_loop.build_console(self.args)
+        self.assertIsInstance(console, tui.TuiConsole)
+        self.assertEqual(mode, "on")
+
+        self.args.tui = "auto"
+        with mock.patch.object(tui.TuiConsole, "supported",
+                               return_value=True):
+            console, _mode = agent_loop.build_console(self.args)
+        self.assertIsInstance(console, tui.TuiConsole)
+        with mock.patch.object(tui.TuiConsole, "supported",
+                               return_value=False):
+            console, _mode = agent_loop.build_console(self.args)
+        self.assertIs(console, ui.console)
+
+    def test_main_starts_tui_before_resolving_settings(self):
+        self.args.tui = "on"
+        self.args.prompt = None
+        self.args.no_settings = False
+        events = []
+        console = tui.TuiConsole(stream=io.StringIO(), color=False,
+                                 unicode=False)
+        console.start_tui = mock.Mock(
+            side_effect=lambda: events.append("tui") or True)
+        sentinel = mock.Mock()
+
+        class FakeSession:
+            def __init__(self, args, console=None, settings=None):
+                self.console = console
+                self.settings = settings
+
+            def run(self, initial_prompt=None):
+                events.append("run")
+
+        with mock.patch.object(agent_loop, "parse_args",
+                               return_value=self.args), \
+                mock.patch.object(agent_loop, "build_console",
+                                  return_value=(console, "on")), \
+                mock.patch.object(agent_loop.settings_mod,
+                                  "interactive_startup", return_value=True), \
+                mock.patch.object(
+                    agent_loop.settings_mod, "resolve_for_startup",
+                    side_effect=lambda args, console=None:
+                    events.append("settings") or sentinel), \
+                mock.patch.object(agent_loop, "AgentSession", FakeSession):
+            agent_loop.main()
+
+        self.assertEqual(events, ["tui", "settings", "run"])
+
+    def test_interrupt_during_first_run_stops_the_tui(self):
+        self.args.tui = "on"
+        self.args.prompt = None
+        self.args.no_settings = False
+        console = tui.TuiConsole(stream=io.StringIO(), color=False,
+                                 unicode=False)
+        console._active = True
+        console.start_tui = mock.Mock(return_value=True)
+
+        with mock.patch.object(agent_loop, "parse_args",
+                               return_value=self.args), \
+                mock.patch.object(agent_loop, "build_console",
+                                  return_value=(console, "on")), \
+                mock.patch.object(agent_loop.settings_mod,
+                                  "interactive_startup", return_value=True), \
+                mock.patch.object(agent_loop.settings_mod,
+                                  "resolve_for_startup",
+                                  side_effect=KeyboardInterrupt):
+            agent_loop.main()
+
+        self.assertFalse(console.active)
+
+    def test_one_shot_prompt_never_starts_the_tui(self):
+        self.args.tui = "on"
+        self.args.prompt = "do it"
+        self.args.no_settings = False
+        console = tui.TuiConsole(stream=io.StringIO(), color=False,
+                                 unicode=False)
+        console.start_tui = mock.Mock(return_value=True)
+
+        class FakeSession:
+            def __init__(self, args, console=None, settings=None):
+                pass
+
+            def run(self, initial_prompt=None):
+                pass
+
+        with mock.patch.object(agent_loop, "parse_args",
+                               return_value=self.args), \
+                mock.patch.object(agent_loop, "build_console",
+                                  return_value=(console, "on")), \
+                mock.patch.object(agent_loop.settings_mod,
+                                  "resolve_for_startup",
+                                  return_value=mock.Mock()), \
+                mock.patch.object(agent_loop, "AgentSession", FakeSession):
+            agent_loop.main()
+
+        console.start_tui.assert_not_called()
 
 
 class SettingsCommandTest(unittest.TestCase):
@@ -160,6 +372,19 @@ class SettingsCommandTest(unittest.TestCase):
         self.console.read_line = mock.Mock(side_effect=["4 0.4", "q"])
         self.session._handle_settings_command("")
         self.assertEqual(self.session.args.temperature, 0.4)
+
+    def test_api_key_edit_is_masked_and_not_stored_by_default(self):
+        self.console.read_secret = mock.Mock(return_value="sk-new")
+        self.console.read_line = mock.Mock(side_effect=["n", "y"])
+        self.session._handle_settings_command("api-key")
+
+        self.assertEqual(self.session.settings.api_key, "sk-new")
+        self.assertFalse(self.session.settings.persist_api_key)
+        self.console.read_secret.assert_called_once_with("API key: ")
+        path = os.path.join(self.session.session_dir, "settings.json")
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertNotIn("api_key", payload)
 
     def test_settings_file_lives_in_session_cache(self):
         self.session._handle_settings_command("temperature 0.3")

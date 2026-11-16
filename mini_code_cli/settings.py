@@ -14,7 +14,6 @@ settings, then built-in defaults.
 """
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import stat
@@ -406,9 +405,18 @@ class Settings:
         raise ValueError(f"no setting number {number}")
 
 
-def _interactive(args):
+def interactive_startup(args):
+    """Whether startup may ask the user questions.
+
+    A one-shot ``--prompt`` run, a non-TTY (pipes, CI) and ``--no-settings``
+    must never block on input.
+    """
     return (args.prompt is None and sys.stdin.isatty()
             and not getattr(args, "no_settings", False))
+
+
+#: Backwards-compatible private alias used inside this module.
+_interactive = interactive_startup
 
 
 def _source_session(args):
@@ -429,7 +437,12 @@ def _ask_key(console, settings, provider):
         return
     if settings.api_key:
         return
-    key = getpass.getpass("API key: ").strip()
+    # ``read_secret`` masks the typed value in the fixed TUI and uses getpass
+    # on the ordinary console.
+    key = console.read_secret("API key: ")
+    if key is None:
+        return
+    key = key.strip()
     if not key:
         return
     settings.api_key = key
@@ -440,15 +453,14 @@ def _ask_key(console, settings, provider):
 
 def _first_run(settings, console):
     """Ask only the minimum questions for a new user."""
-    console.rule("first-run settings", fg="cyan")
-    console.emit("Choose a model provider:")
-    console.emit("  1. localhost")
-    console.emit("  2. deepseek")
-    console.emit("  3. custom URL")
-    choice = _ask(console, "> ")
-    if choice not in ("1", "2", "3"):
-        choice = "1"
-    if choice == "1":
+    # ``choose`` renders the numbered list on the plain console and an
+    # arrow-key overlay inside the fixed TUI.
+    choice = console.choose(
+        "First-run settings: choose a model provider",
+        ["localhost", "deepseek", "custom URL"],
+        default=1,
+    ) or 1
+    if choice == 1:
         settings.values["url"] = DEFAULT_MODEL_URL
         settings.values["model"] = None
         detected = utils.determine_vllm_model(
@@ -460,7 +472,7 @@ def _first_run(settings, console):
             console.note("No local model detected; set model later with /settings.",
                          "warn")
         _ask_key(console, settings, "localhost")
-    elif choice == "2":
+    elif choice == 2:
         settings.values["url"] = "https://api.deepseek.com"
         settings.values["model"] = "deepseek-chat"
         _ask_key(console, settings, "deepseek")

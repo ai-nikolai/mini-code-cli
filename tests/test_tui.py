@@ -182,6 +182,32 @@ class TuiConsoleTest(unittest.TestCase):
                 mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
             return console.read_line("", multiline=True, tui=True)
 
+    def _feed_secret(self, console, data):
+        """Drive the masked secret editor with ``data`` bytes, then EOF."""
+        calls = [bytes([byte]) for byte in data] + [b""]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"), \
+                mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
+            return console.read_secret("API key: ")
+
+    def _feed_pick(self, console, data, call):
+        """Drive an arrow-key picker with ``data`` bytes."""
+        calls = [bytes([byte]) for byte in data]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"):
+            return call()
+
     @staticmethod
     def _caret(output):
         matches = re.findall(r"\x1b\[(\d+);(\d+)H\x1b\[\?25h", output)
@@ -230,6 +256,59 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertEqual(text, "abc")
         self.assertEqual(console._input_buffer, [])
         self.assertFalse(console._input_active)
+
+    def test_read_secret_masks_the_value_and_keeps_it_out_of_history(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            text = self._feed_secret(console, b"sk-123")
+            output = console.stream.getvalue()
+            history = list(console._input_history)
+            console.stop_tui()
+
+        self.assertEqual(text, "sk-123")
+        self.assertNotIn("sk-123", output)
+        self.assertIn("******", output)
+        self.assertEqual(history, [])
+
+    def test_choose_accepts_a_number_and_enter(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"2\r",
+                lambda: console.choose("Provider", ["localhost", "deepseek",
+                                                    "custom URL"]))
+            output = console.stream.getvalue()
+            console.stop_tui()
+
+        self.assertEqual(result, 2)
+        self.assertIn("deepseek", output)
+        self.assertIn("custom URL", output)
+
+    def test_choose_supports_arrows_and_cancel(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"\x1b[B\r",
+                lambda: console.choose("Provider", ["a", "b", "c"]))
+            cancelled = self._feed_pick(
+                console, b"q",
+                lambda: console.choose("Provider", ["a", "b", "c"]))
+            console.stop_tui()
+
+        self.assertEqual(result, 2)
+        self.assertIsNone(cancelled)
 
     def test_caret_column_uses_display_width_for_cjk(self):
         console = self.console()

@@ -24,7 +24,6 @@ without the tests reaching into every module.
 """
 
 import os
-import getpass
 import json
 import re
 import time
@@ -656,6 +655,19 @@ def _looks_complete(text):
 
 
 
+def build_console(args):
+    """Return ``(console, tui_mode)`` for these args.
+
+    Startup needs the console *before* the session exists: first-run settings
+    questions must run inside the fixed TUI when the TUI is applicable, and the
+    same console must then be reused by the session.
+    """
+    mode = tui_mod.tui_mode(getattr(args, "tui", "auto"))
+    use_tui = (mode == "on"
+               or (mode == "auto" and tui_mod.TuiConsole.supported()))
+    return (tui_mod.TuiConsole() if use_tui else ui.console), mode
+
+
 class AgentSession:
     """A single interactive agent session.
 
@@ -688,9 +700,7 @@ class AgentSession:
 
         self.tui_mode = tui_mod.tui_mode(getattr(args, "tui", "auto"))
         if console is None:
-            use_tui = (self.tui_mode == "on"
-                       or (self.tui_mode == "auto" and tui_mod.TuiConsole.supported()))
-            console = tui_mod.TuiConsole() if use_tui else ui.console
+            console, _mode = build_console(args)
         self.console = console
         self.console.verbose = getattr(args, "verbose", False)
 
@@ -1762,7 +1772,9 @@ class AgentSession:
         # they read args, allowed_dir, cache_dir, server_url and the resolved
         # model, plus the provisional id minted in __init__.
         if self.tui and isinstance(self.console, tui_mod.TuiConsole):
-            if not self.console.start_tui():
+            # ``main`` may already have started the TUI so the first-run
+            # settings wizard could run inside the fixed view.
+            if not self.console.active and not self.console.start_tui():
                 # --tui on requested the fixed view, but this terminal cannot
                 # host it (piped output, an unsupported TERM, ...). Fall back
                 # to the scrolling console instead of leaving self.tui true
@@ -2512,7 +2524,10 @@ class AgentSession:
 
     def _read_setting_value(self, name):
         if name == "api-key":
-            key = getpass.getpass("API key: ").strip()
+            # ``read_secret`` masks the value in the fixed TUI and uses
+            # getpass on the ordinary console.
+            key = self.console.read_secret("API key: ")
+            key = "" if key is None else key.strip()
             if not key:
                 return ""
             answer = self.console.read_line(
@@ -3500,9 +3515,31 @@ class _Abort(Exception):
 
 def main():
     args = parse_args()
-    settings = settings_mod.resolve_for_startup(args)
-    session = AgentSession(args, settings=settings)
-    session.run(initial_prompt=args.prompt)
+    # Build (and, when startup may ask questions, start) the console before
+    # resolving settings: the first-run wizard must use the same view -- the
+    # fixed TUI when applicable -- as the session that follows it.
+    console, _mode = build_console(args)
+    tui_started = False
+    if (isinstance(console, tui_mod.TuiConsole)
+            and settings_mod.interactive_startup(args)):
+        tui_started = console.start_tui()
+    try:
+        settings = settings_mod.resolve_for_startup(args, console=console)
+        session = AgentSession(args, console=console, settings=settings)
+        session.run(initial_prompt=args.prompt)
+    except KeyboardInterrupt:
+        # Ctrl-C while answering the first-run wizard: leave the fixed view
+        # and exit without a traceback or an alternate-screen left behind.
+        if tui_started and console.active:
+            console.stop_tui()
+        console.note("Startup cancelled.", "info")
+        return
+    except BaseException:
+        # A failure before run() would otherwise leave the terminal on the
+        # alternate screen. run() stops the TUI itself on its normal paths.
+        if tui_started and console.active:
+            console.stop_tui()
+        raise
 
 
 if __name__ == "__main__":

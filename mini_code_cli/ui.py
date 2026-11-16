@@ -23,6 +23,7 @@ a unit test) for full control.
 
 from __future__ import annotations
 
+import getpass
 import os
 import re
 import shutil
@@ -882,6 +883,48 @@ class Console:
                   "warn")
 
     # -- interactive input --------------------------------------------------
+    def choose(self, title, options, default=1, prompt="> "):
+        """Render a numbered choice and return the 1-based selection.
+
+        A blank answer, an unknown answer or EOF falls back to ``default``.
+        The fixed TUI overrides this with an arrow-key picker.
+        """
+        options = list(options or [])
+        if not options:
+            return None
+        if title:
+            self.emit(title)
+        for index, option in enumerate(options, 1):
+            self.emit(f"  {index}. {option}")
+        answer = self.read_line(prompt)
+        if answer is not None:
+            text = answer.strip()
+            if not text:
+                return default
+            if text.isdigit() and 1 <= int(text) <= len(options):
+                return int(text)
+            for index, option in enumerate(options, 1):
+                if text.lower() == str(option).lower():
+                    return index
+        return default
+
+    def read_secret(self, prompt_text="API key: "):
+        """Read a secret without echoing it.
+
+        Uses :mod:`getpass` on a real terminal and falls back to a normal line
+        read when stdin is not a TTY (tests, piped input).
+        """
+        if self.parent_console is not None:
+            return self.parent_console.read_secret(prompt_text)
+        try:
+            return getpass.getpass(prompt_text)
+        except (EOFError, KeyboardInterrupt):
+            return None
+        except Exception:
+            # getpass can fail on unusual terminals; a plain read is better
+            # than aborting the first-run wizard.
+            return self.read_line(prompt_text)
+
     def read_line(self, prompt_text="", multiline=False, tui=False):
         """Print an (already-styled) prompt and read one line from stdin.
 

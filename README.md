@@ -265,9 +265,11 @@ Settings are stored per session in the cache, never in the project’s `.mini`:
 
 A bare `mini-code` imports the settings of the most recent session and asks only for
 values it cannot infer. The first-run questions are limited to the model provider
-(`localhost`, `deepseek`, or a custom URL) and, when needed, the API key. The key is
-read from the environment first; if you type one, mini-code asks whether to store it
-in the session file with mode `0600` (default: no).
+(`localhost`, `deepseek`, or a custom URL) and, when needed, the API key. When the
+fixed TUI applies, the wizard runs inside it (arrow keys or numbers select a provider,
+and a typed key is masked). The key is read from the environment first; if you type
+one, mini-code asks whether to store it in the session file with mode `0600`
+(default: no).
 
 Use `/settings` to inspect or change settings. The table marks values that rebuild
 the tool list or generated system prompt — these invalidate the LLM prompt cache.
