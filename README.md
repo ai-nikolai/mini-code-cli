@@ -72,7 +72,7 @@ given a reference implementation.
 | `--url URL` | `http://0.0.0.0:30000` | API host |
 | `--model MODEL` | — | model name |
 | `--api-key KEY` | `$MINI_CODE_API_KEY` | API key for authentication |
-| `--max-tokens N` | — | reply budget; also the output headroom used when deriving the compaction limit |
+| `--max-tokens N` | 32768, or half the model window | reply budget; also the output headroom used when deriving the compaction limit |
 | `--temperature T` | `1.0` | sampling temperature |
 | `--system-prompt TEXT` | built-in | replace the system prompt (an `--agent-md` file is appended *after* it) |
 | `--prompt TEXT` | — | initial user prompt |
@@ -87,7 +87,9 @@ given a reference implementation.
 | `--tui [auto\|on\|off]` | `auto` | fixed full-screen dashboard. `auto` enables it only on a known interactive TTY; `on` forces it; `off` uses the scrolling console |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
-| `--plan-strategy NAME` | `plan-verify-step` | `plan-verify-step`, `plan-verify` or `open-plan` (implies `--plan`) |
+| `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
+| `--allow-nudge` | off | plan mode only: ask the model to continue (or reply DONE) when it stops without a tool call, before running the plan review |
+| `--nudge-limit N` | 1 | maximum continuation nudges per text-only stop with `--allow-nudge` |
 | `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
 | `--compaction-strategy NAME` | `summarise` | `summarise`, `predict-files` or `predict-messages` |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
@@ -115,7 +117,7 @@ parameter a model does not need is defaulted, so omitting it keeps the previous 
 | `glob` | list files matching a glob (one per line, `**` supported), optionally against a `root`; capped at 2000 matches / 100k characters |
 | `web_search` | best-effort lookup: related queries + a short Wikipedia extract. Never raises |
 | `read_website` | fetch raw text/HTML of a **public http/https** URL (other schemes and private/link-local hosts are rejected; `MINI_CODE_ALLOW_PRIVATE_URLS=1` overrides); `max_chars` caps size |
-| `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported |
+| `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported. Output over 50k characters is capped in the reply and the full text is written to `.mini/tool-output/` so `read_file`/`grep` can page it |
 | `background` | start/list/output/wait/cancel background **shell** tasks (needs `--background --enable-shell`) or **sub-agent** tasks (needs `--background --enable-subagents`); output is captured in a per-task log |
 
 ## Sub-agents
@@ -313,8 +315,8 @@ on for later turns).
 
 | Strategy | What happens |
 | --- | --- |
-| `plan-verify-step` (default) | Current behaviour: author a plan, review it once the work settles, then run one extra step and keep whatever that step says. |
-| `plan-verify` | Same plan + review, but the post-review step is kept only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
+| `plan-verify` (default) | Author a plan, review it once the work settles, then keep the post-review step only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
+| `plan-verify-step` | The original behaviour: same plan + review, then always run one extra step and keep whatever that step says. |
 | `open-plan` | The agent owns a plan document at `.mini/PLAN.md` inside `--allowed-dir`, reads and updates it with the normal file tools, and the loop neither authors nor reviews a plan. |
 
 > [!NOTE]
@@ -323,6 +325,13 @@ on for later turns).
 > same goal. With `open-plan`, the agent's `.mini/PLAN.md` is re-injected instead. When the work
 > looks done the plan is reviewed and any outstanding task is re-queued before the agent returns
 > to you (except with `open-plan`).
+
+`--allow-nudge` adds a completion checkpoint to any plan strategy. When the model replies without
+a tool call and the text does not explicitly say `DONE` / complete / finished, the loop appends a
+short “continue with the next tool call, or reply DONE” message instead of immediately paying for a
+plan review. `--nudge-limit N` controls how many nudges are allowed per text-only stop (default 1).
+After the limit, the normal plan strategy takes over. This is useful for thinking models that tend
+to emit an intermediate “let me do X” message and stop.
 
 ### Scratchpad — `--scratchpad`
 
@@ -397,17 +406,19 @@ Because a rollover leaves no trace in the transcript (the old turns really are g
 console says in plain terms what happened — all of it without `--verbose`:
 
 ```
-[!] Compacting the conversation: 42 messages -> a summary (51000 tokens in, 8192 reserved for the reply > 52000 budget). The current turn (1 message) is kept verbatim.
+[!] Compacting the conversation: 42 messages -> a summary (51000 tokens in, 32768 reserved for the reply > 60000 budget). The current turn (1 message) is kept verbatim.
 [!] Summary preview: The user asked for a token-based compaction trigger, then fixed ...
 [!] Compacted history_0.json (42 messages) into a summary; history_1.json now starts with 3 messages (summary + 1 kept message).
 ```
 
 So you can see *what* was folded away (a preview of the summary itself), *how much* (the
 message count of the segment that was closed), *where it went* (`history_0.json` closed,
-`history_1.json` started) and that nothing you just typed was lost. If the summariser answers
-with an empty summary twice, or the call fails, compaction is abandoned and the note says so
-explicitly — "nothing was lost, but the next request may still be too large" — with the
-transcript and the segment left untouched.
+`history_1.json` started) and that nothing you just typed was lost. The summary request is
+itself size-bounded, so a single enormous tool output cannot make compaction overflow the
+model's context window. If the summariser answers with an empty summary twice, or the call
+fails, compaction falls back to a deterministic mechanical summary (the goal plus the newest
+turns) and still rolls the segment over — keeping the over-long transcript would make every
+later request fail.
 
 ### Exiting — the good-bye box
 
@@ -438,9 +449,61 @@ says what went wrong in red, so it does not get a cheerful summary box on top. W
 the old per-field `Token usage (this session)` block is printed above it as well.
 
 
+## Benchmarks (academic evaluation)
+
+Everything benchmark-related lives in **[`benchmarks/`](benchmarks/README.md)** — the harness,
+its tests, its dependencies and its scripts:
+
+```bash
+python -m pip install -r benchmarks/requirements.txt   # harbor (from its branch), swebench, vllm
+#                one 3.12 env is enough: harbor needs >=3.12, mini-code supports 3.10+
+benchmarks/scripts/setup_external_repos.sh             # the TB 2.1 task set (data: clone, not pip)
+
+python benchmarks/run_benchmarks.py --dataset swe-bench         --agent mini-code --mode short_eval
+python benchmarks/run_benchmarks.py --dataset swe-bench-lite    --agent all       --mode short_eval
+python benchmarks/run_benchmarks.py --dataset terminalbench-2.1 --agent all       --mode short
+
+# On an existing Slurm GPU allocation: start vLLM, wait for /health, then run
+# one agent at a time (variables at the top of the script):
+benchmarks/scripts/run_benchmark_slurm.sh
+# Or generate/submit an sbatch job for the full matrix on 1-4 GPUs:
+benchmarks/scripts/submit_benchmark_slurm.sh
+# Prepare/verify the Terminal-Bench SIFs on a CPU partition:
+benchmarks/scripts/submit_prepare_tb_sifs.sh
+```
+
+Both SWE-bench splits work on this cluster and need no extra repository — `swe-bench-lite`
+is the same harness, the same published instance images and the same grading, only the
+HuggingFace dataset changes. Measured on the Docker-less H200 with `--limit 5`,
+`--agent all`: Verified 10/15 (mini-code 2, pi 4, claude-code 4) and Lite 12/15
+(mini-code 3, pi 4, claude-code 5); Terminal-Bench 2.1 scores per task but not yet as a
+campaign (one task: reward 0.0, nine verifier tests, no exception).
+
+Each run writes `results/<run-id>/summary_results.csv` — one row per agent, with
+`trials, resolved, pass_rate, mean_reward, mean_seconds`. `--mode short` is a smoke run
+(3 tasks, no grading), `short_eval` grades those 3, `full` runs everything, and `--dry-run`
+prints every command and starts nothing.
+
+The harness runs coding agents against **Terminal-Bench 2.x** and **SWE-bench Verified/Lite** and
+compares them — mini-code with several settings, Claude Code, Pi and a deterministic `mock`
+agent — by wrapping each benchmark's own official harness (`harbor`, `tb`,
+`swebench.harness.run_evaluation`). It supports Docker and Apptainer, exports a CSV and ships an
+analyser. Every agent gets the same instructions from one file,
+`benchmarks/agents/agent.md`, so a comparison cannot be explained by three different prompts.
+
+See **[benchmarks/README.md](benchmarks/README.md)** for prerequisites, the two harness forks and
+their branches (installed from GitHub, and cloned into `external_repos/` for local development by
+`benchmarks/scripts/setup_external_repos.sh`), the `plan` / `run --csv` / `analyze` commands
+underneath the entry point, the Docker and Apptainer variants, the configs
+(`benchmarks/configs/ornith_30b.json` for TB 2.0 + SWE-bench, `terminal_bench_21.json` for the
+local TB 2.1 checkout), and what a run produces.
+
 ## Serving a model locally
 
-Tested with vLLM v0.30 (tool calling enabled):
+For a one-GPU quick start, `scripts/run_model.sh` starts the small
+`ornith-ai/Ornith-1.5-35B-A3B` checkpoint on port 30000 and waits for `/health`.
+Edit its model/tensor-parallel line for a larger checkpoint. Tested with vLLM
+v0.30 (tool calling enabled):
 
 ```bash
 vllm serve ornith-ai/Ornith-1.5-397B-FP8 \

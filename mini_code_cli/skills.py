@@ -28,7 +28,6 @@ the allowed dir, so a skill tool can never escape ``--allowed-dir``. A final
 import os
 import sys
 import shlex
-import shutil
 import subprocess
 import functools
 
@@ -242,25 +241,6 @@ def create_skill(allowed_dir, skill_name, description, title=None, overwrite=Fal
             f.write(_skill_md_template(title or safe, description))
         _write_summary(allowed_dir, _list_skill_names(allowed_dir))
         return f"Created skill {safe!r} at {mpath}"
-    except OSError as e:
-        return f"Error: {e}"
-
-
-def delete_skill(allowed_dir, skill_name):
-    """Delete a skill's sub-directory (and drop it from SKILLS.md).
-
-    Kept minimal and only surfaced if ever wanted as a tool; best-effort.
-    """
-    safe = _safe_name(skill_name)
-    if not safe:
-        return "Error: invalid skill name."
-    sdir = skill_dir(allowed_dir, safe)
-    if not os.path.isdir(sdir):
-        return f"Error: no skill named {skill_name!r}."
-    try:
-        shutil.rmtree(sdir)
-        _write_summary(allowed_dir, _list_skill_names(allowed_dir))
-        return f"Deleted skill {safe!r}."
     except OSError as e:
         return f"Error: {e}"
 

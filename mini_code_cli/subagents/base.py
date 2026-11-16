@@ -42,7 +42,6 @@ import types
 
 from .. import compaction as compaction_module
 from .. import ui
-from ..utils import oneline
 
 
 class SubAgent:

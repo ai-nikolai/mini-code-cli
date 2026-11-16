@@ -48,6 +48,28 @@ class ContextWindowLookupTest(unittest.TestCase):
             self.assertEqual(key, key.lower(), msg=key)
 
 
+class DefaultOutputBudgetTest(unittest.TestCase):
+
+    def test_large_models_get_32k(self):
+        self.assertEqual(
+            config.default_max_output_tokens(
+                "ornith-ai/Ornith-1.5-35B-A3B"),
+            config.DEFAULT_MAX_OUTPUT_TOKENS)
+        self.assertEqual(config.DEFAULT_MAX_OUTPUT_TOKENS, 32_768)
+
+    def test_small_models_are_clamped_to_half_their_window(self):
+        # gpt-4 advertises 8k: a 32k reply budget cannot fit.
+        self.assertEqual(config.default_max_output_tokens("gpt-4"), 4_096)
+        self.assertEqual(config.default_max_output_tokens("llama-2"), 2_048)
+
+    def test_unknown_models_get_the_large_default(self):
+        self.assertEqual(
+            config.default_max_output_tokens("no-such-model-xyz"),
+            config.DEFAULT_MAX_OUTPUT_TOKENS)
+        self.assertEqual(config.default_max_output_tokens(None),
+                         config.DEFAULT_MAX_OUTPUT_TOKENS)
+
+
 class CompactionBudgetTest(unittest.TestCase):
 
     def test_explicit_limit_wins(self):

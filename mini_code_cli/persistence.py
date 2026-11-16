@@ -40,6 +40,7 @@ import time
 
 from . import ui
 from .config import DEFAULT_CACHE_LOCATION, SESSION_DIRNAME
+from .utils import coerce_usage_int
 
 
 # ---------------------------------------------------------------------------
@@ -463,10 +464,7 @@ def _coerce_usage(saved):
     stats = empty_usage()
     if isinstance(saved, dict):
         for key in USAGE_KEYS:
-            try:
-                stats[key] = int(saved.get(key, 0) or 0)
-            except (TypeError, ValueError):
-                stats[key] = 0
+            stats[key] = coerce_usage_int(saved.get(key, 0))
     return stats
 
 
@@ -474,9 +472,10 @@ def accumulate_usage(token_stats, usage):
     """Add a single LLM call's token usage into the running totals."""
     if not usage:
         return
-    token_stats["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
-    token_stats["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
-    token_stats["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+    token_stats["prompt_tokens"] += coerce_usage_int(usage.get("prompt_tokens"))
+    token_stats["completion_tokens"] += coerce_usage_int(
+        usage.get("completion_tokens"))
+    token_stats["total_tokens"] += coerce_usage_int(usage.get("total_tokens"))
     token_stats["llm_calls"] += 1
 
 

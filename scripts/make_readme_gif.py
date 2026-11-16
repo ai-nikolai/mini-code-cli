@@ -40,7 +40,7 @@ def _welcome(console):
         "~/projects/demo", "http://localhost:30000",
         "deepseek-v4-flash", "auto (safe)", "manual", "on",
         compaction_strategy="summarise",
-        plan_strategy="plan-verify-step", plan_mode=False,
+        plan_strategy="plan-verify", plan_mode=False,
     )
 
 

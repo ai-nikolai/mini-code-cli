@@ -29,6 +29,8 @@ import tempfile
 import urllib.parse
 import urllib.request
 
+from .config import SESSION_DIRNAME
+
 # Default timeout (seconds) for a single tool invocation. Mirrors the CLI's
 # --tool-timeout default so a tool that is slow/hangs gets aborted.
 DEFAULT_TOOL_TIMEOUT = 120
@@ -49,6 +51,14 @@ DEFAULT_MAX_FETCH_BYTES = 10_000_000
 # (`read_file` offset/limit) or narrow (`grep` max_results) if it needs more;
 # one unbounded tool result must not be able to fill the context window.
 DEFAULT_MAX_TOOL_OUTPUT_CHARS = 100_000
+
+# Shell output is capped separately and *saved in full*: a command like
+# `find /` or a failing build can emit hundreds of kilobytes, and returning it
+# verbatim can fill the whole context window in one tool result. PI's bash tool
+# uses the same 50 KB / 2000-line idea. The file lives under the task worktree's
+# `.mini/tool-output/` so mini-code's own read_file/grep can page it later.
+DEFAULT_MAX_SHELL_OUTPUT_CHARS = 50_000
+SHELL_OUTPUT_DIRNAME = "tool-output"
 
 # Matched grep lines longer than this are truncated (a minified JS/CSS file is
 # one line, and echoing it whole would drown the conversation).
@@ -77,6 +87,50 @@ def _cap_output(text, hint="use a more specific query or page the result"):
     return (text[:DEFAULT_MAX_TOOL_OUTPUT_CHARS]
             + f"\n...[truncated: showing {DEFAULT_MAX_TOOL_OUTPUT_CHARS} "
               f"of {len(text)} characters; {hint}]")
+
+
+def _save_shell_output(text, cwd=None):
+    """Write a full shell result under the worktree's ``.mini/tool-output/``.
+
+    Returns the path, or ``None`` when the directory/file cannot be written.
+    The file is deliberately inside the task worktree: mini-code's file tools
+    are sandboxed to ``--allowed-dir``, so a file outside it could not be paged
+    with ``read_file`` after the shell result was capped.
+    """
+    base = os.path.abspath(cwd or os.getcwd())
+    directory = os.path.join(base, SESSION_DIRNAME, SHELL_OUTPUT_DIRNAME)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", errors="replace",
+            prefix="shell-", suffix=".txt", dir=directory, delete=False)
+        try:
+            handle.write(text)
+        finally:
+            handle.close()
+        return handle.name
+    except OSError:
+        return None
+
+
+def _cap_shell_output(text, cwd=None):
+    """Bound a shell result, preserving both ends and saving the full text."""
+    text = str(text or "")
+    if len(text) <= DEFAULT_MAX_SHELL_OUTPUT_CHARS:
+        return text
+    full_path = _save_shell_output(text, cwd)
+    half = DEFAULT_MAX_SHELL_OUTPUT_CHARS // 2
+    head, tail = text[:half], text[-half:]
+    if full_path:
+        location = f"full output saved to {full_path}"
+    else:
+        location = "full output could not be saved"
+    return (head
+            + f"\n...[truncated: showing first and last {half:,} of "
+              f"{len(text):,} characters; {location}. Use read_file/grep on "
+              f"that file to inspect the middle.]...\n"
+            + tail)
+
 
 # Directories that are never worth recursively searching: noise, huge, or
 # generated. Only used by grep's recursive walk.
@@ -755,7 +809,9 @@ def run_shell_command(command, timeout: int = DEFAULT_TOOL_TIMEOUT, cwd=None,
         output = output.strip()
         if result.returncode != 0:
             output += f"\nEXIT CODE: {result.returncode}"
-        return output if output else f"Command produced no output (exit code {result.returncode})."
+        if not output:
+            output = f"Command produced no output (exit code {result.returncode})."
+        return _cap_shell_output(output, cwd)
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {_coerce_timeout(timeout)} seconds: {command!r}"
     except Exception as e:

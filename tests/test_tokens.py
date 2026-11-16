@@ -134,7 +134,8 @@ class CompactionBudgetTest(unittest.TestCase):
         self.assertEqual(budget.context_window, 128_000)
         self.assertEqual(budget.reserved_output_tokens,
                          config.DEFAULT_RESERVED_OUTPUT_TOKENS)
-        self.assertEqual(budget.token_limit, 128_000 - 8_192 - 12_800)
+        self.assertEqual(budget.token_limit,
+                         128_000 - config.DEFAULT_RESERVED_OUTPUT_TOKENS - 12_800)
         self.assertLess(budget.token_limit, budget.context_window)
         self.assertEqual(budget.source, "model")
 
@@ -157,7 +158,7 @@ class CompactionBudgetTest(unittest.TestCase):
         self.assertEqual(config.compaction_budget(None).source, "default")
 
     def test_a_small_window_still_yields_a_usable_budget(self):
-        # gpt-4 has an 8k window: the 8k default reserve would swamp it.
+        # gpt-4 has an 8k window: the 32k default reserve is clamped to 4k.
         budget = config.compaction_budget("gpt-4")
         self.assertEqual(budget.context_window, 8_192)
         self.assertLessEqual(budget.reserved_output_tokens, 8_192 // 2)
@@ -176,7 +177,8 @@ class CompactionBudgetTest(unittest.TestCase):
     def test_a_zero_or_negative_explicit_limit_is_ignored(self):
         budget = config.compaction_budget("gpt-4o", explicit_limit=0)
         self.assertEqual(budget.source, "model")
-        self.assertEqual(budget.token_limit, 128_000 - 8_192 - 12_800)
+        self.assertEqual(budget.token_limit,
+                         128_000 - config.DEFAULT_RESERVED_OUTPUT_TOKENS - 12_800)
 
     def test_the_convenience_resolver_agrees_with_the_budget(self):
         for model in ("gpt-4o", "gpt-4", "nope"):
@@ -473,15 +475,15 @@ class CompactionTriggerTest(unittest.TestCase):
         self.assertEqual(out[1]["content"], "GOAL + PLAN")
         self.assertEqual(out[2]["role"], "user")          # the in-flight turn
 
-    def test_an_empty_summary_keeps_the_transcript_and_the_segment(self):
+    def test_an_empty_summary_still_rolls_over_with_a_fallback(self):
         messages = long_messages(2, 8_000)
         out, did_compact, index = self._compact(
             messages, replies=[("", [], USAGE), ("", [], USAGE)],
             token_limit=1_000, current_tokens=4_000)
 
-        self.assertFalse(did_compact)
-        self.assertIs(out, messages)
-        self.assertEqual(index, 0)
+        self.assertTrue(did_compact)
+        self.assertEqual(index, 1)
+        self.assertIn("Mechanical fallback summary", out[0]["content"])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,83 @@
-import requests
 import json
 import time
+
+try:  # The only third-party import in the package.
+    import requests
+except ModuleNotFoundError:  # pragma: no cover - bare images (Terminal-Bench)
+    # A benchmark task image is free-form: it may ship python3 without pip and
+    # without `requests` (the first real Terminal-Bench trial died with
+    # "No module named 'requests'", and `python3 -m pip` is not even there to
+    # fix it). Everything this module uses from `requests` is a thin layer over
+    # urllib, so fall back to a shim with the same surface -- `get`, `post`,
+    # `exceptions.RequestException` and a response object with `status_code`,
+    # `text`, `json()` and `raise_for_status()` -- and no code below changes.
+    import socket
+    import urllib.error
+    import urllib.request
+
+    class RequestException(Exception):
+        """Stand-in for ``requests.exceptions.RequestException``."""
+
+    class _Response:
+        """The slice of ``requests.Response`` this module relies on."""
+
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
+
+        @property
+        def text(self):
+            return self._body.decode("utf-8", "replace")
+
+        def json(self):
+            return json.loads(self.text)
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RequestException(
+                    f"{self.status_code} error for {self.url}")
+
+    def _request(method, url, headers=None, payload=None, timeout=None):
+        data = None
+        prepared_headers = dict(headers or {})
+        if payload is not None:
+            # NB: keep this parameter off the name `json` -- that would shadow
+            # the module imported at the top of this file.
+            data = json.dumps(payload).encode("utf-8")
+            prepared_headers.setdefault("Content-Type", "application/json")
+        request = urllib.request.Request(url, data=data,
+                                         headers=prepared_headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as handle:
+                response = _Response(handle.status, handle.read())
+        except urllib.error.HTTPError as error:
+            # An HTTP status is a *response*, not a transport failure: the caller
+            # reports the body, so hand back what the server said.
+            body = error.read() if hasattr(error, "read") else b""
+            response = _Response(error.code, body)
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as error:
+            raise RequestException(str(error)) from error
+        response.url = url
+        return response
+
+    class _Exceptions:
+        RequestException = RequestException
+
+    class _RequestsShim:
+        """Namespace mirroring the parts of `requests` used in this module."""
+
+        exceptions = _Exceptions
+
+        @staticmethod
+        def get(url, headers=None, timeout=None):
+            return _request("GET", url, headers=headers, timeout=timeout)
+
+        @staticmethod
+        def post(url, headers=None, json=None, timeout=None):
+            return _request("POST", url, headers=headers, payload=json,
+                            timeout=timeout)
+
+    requests = _RequestsShim
 
 
 def oneline(text, limit=None):
@@ -34,7 +111,7 @@ def plural(count, noun, suffix="s"):
     return f"{count} {noun}" + ("" if count == 1 else suffix)
 
 
-def _coerce_usage_int(value):
+def coerce_usage_int(value):
     """Best-effort: coerce a raw usage field to a non-negative int.
 
     Servers sometimes report ``null``/``None`` or oddly-shaped numbers for token
@@ -47,12 +124,9 @@ def _coerce_usage_int(value):
         return 0
 
 
-def _usage_or_zero(value):
-    """Return ``int(value)`` when that is safe, else 0 (for summing fields)."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+def usage_int(usage, key):
+    """Read one token counter from a usage mapping, defaulting to 0."""
+    return coerce_usage_int((usage or {}).get(key))
 
 
 def determine_vllm_model(server_url, api_key=None, timeout=120):
@@ -210,7 +284,8 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
             # Parse the body once: a second ``response.json()`` call re-decodes it
             # and can raise on a server that sends a slightly different body.
             body = response.json()
-            result = body.get("choices", [{}])[0].get("message", {})
+            choice = body.get("choices", [{}])[0] or {}
+            result = choice.get("message", {})
             content = result.get("content", "")
             tool_calls = result.get("tool_calls", [])
             # Thinking-mode servers return the chain of thought next to ``content``.
@@ -224,14 +299,19 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
 
             # Token usage, when the server reports it (many local servers do not).
             usage = body.get("usage", {}) or {}
-            prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", 0))
-            completion_tokens = _coerce_usage_int(usage.get("completion_tokens", 0))
-            total_tokens = _coerce_usage_int(
+            prompt_tokens = coerce_usage_int(usage.get("prompt_tokens", 0))
+            completion_tokens = coerce_usage_int(usage.get("completion_tokens", 0))
+            total_tokens = coerce_usage_int(
                 usage.get("total_tokens",
-                          _usage_or_zero(usage.get("prompt_tokens"))
-                          + _usage_or_zero(usage.get("completion_tokens"))))
+                          coerce_usage_int(usage.get("prompt_tokens"))
+                          + coerce_usage_int(usage.get("completion_tokens"))))
 
             return content, tool_calls, {
+                # "stop" is a finished answer, "length" means the reply was cut off by
+                # the output-token cap -- often a thinking model that spent the whole
+                # budget on reasoning and never got to a tool call. The agent loop
+                # needs to tell those apart, or a truncated turn silently ends a run.
+                "finish_reason": choice.get("finish_reason"),
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
