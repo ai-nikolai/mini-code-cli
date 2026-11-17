@@ -340,7 +340,31 @@ Conversation so far:
     return prompt.strip()
 
 
-def plan_review_prompt(messages, goal):
+def _strict_verification_rules():
+    """The extra rules shared by the strict verification prompts."""
+    return """
+Strict verification is enabled. Do not accept a summary or the agent's claim of
+completion as evidence.
+
+1. Restate the goal as a numbered list of concrete, checkable requirements and
+   deliverables (files at exact paths, formats, commands, numerical results,
+   preserved artefacts, ...).
+2. For each requirement, cite the specific evidence in the conversation: the
+   tool call that produced the artefact and the observed output/result. A file
+   mentioned but never verified, a command that was not run, or an inference
+   from the agent's intention is NOT evidence.
+3. A requirement with no concrete evidence is NOT done, even if the agent says
+   it is. Missing, ambiguous or contradictory evidence must be reported as
+   unfinished rather than assumed to work.
+4. Check that artefacts the task did not ask you to remove or replace still
+   exist. Do not treat a self-written test or the agent's own summary as proof
+   that the task's acceptance criteria are met.
+5. Keep the required final response format exactly; if you cannot prove
+   completion, the final status must be unfinished.
+""".strip()
+
+
+def plan_review_prompt(messages, goal, strict=False):
     """Build the completion-review prompt the loop sends once the work for a
     request looks finished (no further tool calls predicted).
 
@@ -361,11 +385,13 @@ def plan_review_prompt(messages, goal):
 
     ``messages`` is the full conversation list (used to see what was done);
     ``goal`` is the current user instruction, used as the bar to judge against.
+    ``strict`` adds the evidence checklist used by ``--strict-verify``.
     """
     # .get(): a tool-call-only assistant turn has content None / no key (see
     # compaction_prompt); indexing it here would abort the review.
     conversation = "\n".join(
         [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+    strict_rules = f"\n{_strict_verification_rules()}\n" if strict else ""
     prompt = f"""
 You are reviewing the current plan now that you have (apparently) finished
 acting. Using the full conversation so far, decide which tasks of the plan are
@@ -373,7 +399,7 @@ done and which are still outstanding.
 
 Mark every task: DONE if you have clearly completed it, or TODO / IN-PROGRESS
 if it is still outstanding.
-
+{strict_rules}
 Then output exactly ONE summary line. It must be one of these two, and nothing
 else:
 - If nothing is outstanding: "ALL TASKS DONE. Go back to user."
@@ -393,7 +419,7 @@ Conversation so far:
     return prompt.strip()
 
 
-def plan_verify_prompt(messages, goal):
+def plan_verify_prompt(messages, goal, strict=False, plan_document=""):
     """Build the machine-readable completion check for ``plan-verify2``.
 
     Like :func:`plan_review_prompt`, this is a tool-free request sent by the
@@ -414,6 +440,12 @@ def plan_verify_prompt(messages, goal):
     """
     conversation = "\n".join(
         [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+    strict_rules = f"\n{_strict_verification_rules()}\n" if strict else ""
+    plan_block = ""
+    if str(plan_document or "").strip():
+        plan_block = (
+            "\nThe agent's own plan document (open-plan mode):\n"
+            f"{str(plan_document).strip()}\n")
     prompt = f"""
 You are verifying whether the work for the current goal is complete. Use the
 full conversation and the plan the agent has been following. Check the actual
@@ -432,7 +464,7 @@ Rules:
   STATUS: DONE
   STATUS: INCOMPLETE
   STATUS: IN PROGRESS
-
+{strict_rules}{plan_block}
 Current goal:
 {goal}
 

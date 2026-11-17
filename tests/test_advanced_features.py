@@ -521,6 +521,77 @@ class PlanStrategyTest(_AdvancedCase):
         self.assertEqual(len(stub.calls), 4)
         self.assertIn("ending the turn", self.output())
 
+    def test_strict_verify_changes_the_review_prompt(self):
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="plan-verify",
+                                   strict_verify=True)
+        stub = StubLLM([
+            ("Plan:\n1. do the thing", [], USAGE),
+            ("Initial answer.", [], USAGE),
+            ("ALL TASKS DONE. Go back to user.", [], USAGE),
+            ("Final answer.", [], USAGE),
+        ])
+        run_loop(session, "do the thing", stub)
+
+        review_prompt = stub.calls[2][0]["content"]
+        self.assertIn("Strict verification is enabled", review_prompt)
+        self.assertIn("concrete evidence", review_prompt)
+
+    def test_strict_verify_also_verifies_open_plan(self):
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="open-plan",
+                                   strict_verify=True)
+        stub = StubLLM([
+            ("I did the work.", [], USAGE),          # settles -> strict verify
+            ("Evidence checks out.\nSTATUS: DONE", [], USAGE),
+        ])
+        run_loop(session, "do the thing", stub)
+
+        self.assertEqual(len(stub.calls), 2)
+        verify_prompt = stub.calls[1][0]["content"]
+        self.assertIn("Strict verification is enabled", verify_prompt)
+        self.assertIn("STATUS: DONE", verify_prompt)
+        self.assertFalse(os.path.exists(session.plan_manager.plan_path))
+
+    def test_runtime_prompt_change_after_three_failed_calls(self):
+        session = self.new_session(start=False, plan=False,
+                                   runtime_strategy="prompt-change")
+        missing = os.path.join(self.workdir, "missing.txt")
+        failing = ("", [tool_call("r1", "read_file",
+                                  {"file_path": missing})], USAGE)
+        stub = StubLLM([failing, failing, failing,
+                        ("Switching approach.", [], USAGE)])
+        run_loop(session, "read the file", stub)
+
+        prompts = [m.get("content") for m in session.messages
+                   if m.get("role") == "user"
+                   and "Rethink your approach" in (m.get("content") or "")]
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("read_file", prompts[0])
+        self.assertIn("3 times", prompts[0])
+
+    def test_runtime_prompt_change_plan_starts_a_fresh_plan(self):
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="open-plan",
+                                   runtime_strategy="prompt-change-plan")
+        missing = os.path.join(self.workdir, "missing.txt")
+        failing = ("", [tool_call("r1", "read_file",
+                                  {"file_path": missing})], USAGE)
+        stub = StubLLM([
+            failing, failing, failing,
+            ("Recovery plan:\n1. list the directory first", [], USAGE),
+            ("Done via the new approach.", [], USAGE),
+        ])
+        run_loop(session, "read the file", stub)
+
+        texts = [m.get("content") or "" for m in session.messages
+                 if m.get("role") == "user"]
+        self.assertTrue(any("Rethink your approach" in text for text in texts))
+        self.assertTrue(any("Recovery plan for the goal:" in text
+                            for text in texts))
+        # open-plan owns its document: the loop must not overwrite it.
+        self.assertFalse(os.path.exists(session.plan_manager.plan_path))
+
     def test_plan_verify_keeps_a_post_review_tool_step(self):
         target = os.path.join(self.workdir, "data.txt")
         with open(target, "w", encoding="utf-8") as handle:
@@ -569,6 +640,25 @@ class PromptStrategyTest(unittest.TestCase):
         self.assertIn("STATUS: INCOMPLETE", text)
         self.assertIn("STATUS: IN PROGRESS", text)
         self.assertIn("final line", text)
+
+    def test_strict_verify_prompts_demand_evidence(self):
+        verify = prompts.plan_verify_prompt(
+            [{"role": "user", "content": "do X"}], "do X", strict=True)
+        review = prompts.plan_review_prompt(
+            [{"role": "user", "content": "do X"}], "do X", strict=True)
+        for text in (verify, review):
+            self.assertIn("Strict verification is enabled", text)
+            self.assertIn("concrete evidence", text)
+            self.assertIn("NOT done", text)
+        self.assertIn("STATUS: DONE", verify)
+        self.assertIn("ALL TASKS DONE", review)
+
+    def test_strict_open_plan_verification_includes_the_agent_plan(self):
+        text = prompts.plan_verify_prompt(
+            [{"role": "user", "content": "do X"}], "do X", strict=True,
+            plan_document="1. my own plan")
+        self.assertIn("agent's own plan document", text)
+        self.assertIn("1. my own plan", text)
 
     def test_compaction_strategy_prompts_are_actionable(self):
         files = prompts.compaction_predict_files_prompt("SUMMARY", "do X")
@@ -641,18 +731,31 @@ class ParseArgsTest(unittest.TestCase):
         self.assertIsNone(args.max_tokens)      # resolved from the model later
         self.assertFalse(args.allow_nudge)
         self.assertEqual(args.nudge_limit, 1)
+        self.assertFalse(args.strict_verify)
+        self.assertEqual(args.runtime_strategy, "normal")
 
     def test_new_flags_are_accepted(self):
         with mock.patch.object(
                 sys, "argv",
                 ["mini-code", "--scratchpad", "--compaction-strategy",
                  "predict-files", "--plan-strategy", "plan-verify",
-                 "--allow-nudge", "--nudge-limit", "2"]):
+                 "--allow-nudge", "--nudge-limit", "2",
+                 "--strict-verify", "--runtime-strategy",
+                 "prompt-change-plan"]):
             args = agent_loop.parse_args()
         self.assertTrue(args.scratchpad)
         self.assertEqual(args.compaction_strategy, "predict-files")
         self.assertEqual(args.plan_strategy, "plan-verify")
         self.assertTrue(args.allow_nudge)
         self.assertEqual(args.nudge_limit, 2)
+        self.assertTrue(args.strict_verify)
+        self.assertEqual(args.runtime_strategy, "prompt-change-plan")
         # A strategy implies plan mode so the banner and the session agree.
         self.assertTrue(args.plan)
+
+    def test_strict_verify_alone_implies_plan_mode(self):
+        with mock.patch.object(sys, "argv",
+                               ["mini-code", "--strict-verify"]):
+            args = agent_loop.parse_args()
+        self.assertTrue(args.plan)
+        self.assertTrue(args.strict_verify)

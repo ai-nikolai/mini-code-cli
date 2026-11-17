@@ -90,6 +90,8 @@ given a reference implementation.
 | `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify2`, `plan-verify-step` or `open-plan` (implies `--plan`) |
 | `--allow-nudge` | off | plan mode only: ask the model to continue (or reply DONE) when it stops without a tool call, before running the plan review |
 | `--nudge-limit N` | 1 | maximum continuation nudges per text-only stop with `--allow-nudge` |
+| `--strict-verify` | off | use the evidence-based verification prompt for every plan review/verify stage; also verifies after `open-plan` work settles. Unproven requirements count as unfinished |
+| `--runtime-strategy NAME` | `normal` | `normal`, `prompt-change` or `prompt-change-plan`: recover after 3 consecutive failures of the same call/tool |
 | `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
 | `--compaction-strategy NAME` | `summarise` | `summarise`, `predict-files` or `predict-messages` |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
@@ -389,7 +391,13 @@ on for later turns).
 > same goal. With `open-plan`, the agent's `.mini/PLAN.md` is re-injected instead. When the work
 > looks done the plan is reviewed (or, with `plan-verify2`, verified with a DONE/INCOMPLETE
 > verdict) and any outstanding task is re-queued before the agent returns to you (except with
-> `open-plan`).
+> `open-plan`, unless `--strict-verify` is on).
+
+`--strict-verify` makes the completion check evidence-based instead of trust-based. The verifier
+must restate the goal as concrete requirements, cite the tool call/output that proves each one, and
+mark missing or ambiguous evidence as unfinished. It applies to `plan-verify`, `plan-verify2` and
+`plan-verify-step`, and with `open-plan` it adds a verification pass after the work settles without
+taking ownership of the agent's plan document.
 
 `--allow-nudge` adds a completion checkpoint to any plan strategy. When the model replies without
 a tool call and the text does not explicitly say `DONE` / complete / finished, the loop appends a
@@ -397,6 +405,21 @@ short “continue with the next tool call, or reply DONE” message instead of i
 plan review. `--nudge-limit N` controls how many nudges are allowed per text-only stop (default 1).
 After the limit, the normal plan strategy takes over. This is useful for thinking models that tend
 to emit an intermediate “let me do X” message and stop.
+
+### Runtime recovery — `--runtime-strategy`
+
+The runtime strategy decides what happens when tool use keeps failing. It is independent of plan
+mode and applies to every turn:
+
+| Strategy | What happens |
+| --- | --- |
+| `normal` (default) | No automatic prompts; the model sees tool errors and decides. |
+| `prompt-change` | After three consecutive failures of the same call (same command/path/query) or of the same tool with different inputs, the loop injects: “You have tried TOOL N times and it failed. Rethink your approach and try something else.” It also shows the last failure. A success resets the streak; at most three prompts are issued per turn. |
+| `prompt-change-plan` | The same prompt, then a fresh planning request for the current goal. In `open-plan` the loop injects the recovery plan but does not overwrite the agent's `.mini/PLAN.md`. |
+
+Both recovery strategies are heuristics: they are meant to break repetitive command/tool loops
+without changing the model's overall instruction. `runtime-strategy` and `strict-verify` are also
+available in `/settings`.
 
 ### Scratchpad — `--scratchpad`
 

@@ -779,6 +779,16 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertEqual(self.session.settings.values["plan_strategy"],
                          "plan-verify-step")
 
+    def test_strict_verify_and_runtime_strategy_apply_at_runtime(self):
+        self.session._handle_settings_command("strict-verify on")
+        self.assertTrue(self.session.strict_verify)
+        self.session._handle_settings_command(
+            "runtime-strategy prompt-change-plan")
+        self.assertEqual(self.session.runtime_strategy,
+                         "prompt-change-plan")
+        self.assertEqual(self.session.settings.values["runtime_strategy"],
+                         "prompt-change-plan")
+
     def test_immutable_setting_is_rejected(self):
         self.session._handle_settings_command("tui on")
         self.assertIn("unknown setting", self.console.stream.getvalue().lower())
@@ -799,9 +809,17 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertEqual(rows["model"]["group"], "Model & connection")
         self.assertEqual(rows["temperature"]["group"], "Generation")
         self.assertEqual(rows["plan"]["group"], "Planning")
+        self.assertEqual(rows["strict-verify"]["group"], "Planning")
+        self.assertEqual(rows["runtime-strategy"]["group"], "Agent behaviour")
         self.assertEqual(rows["verbose"]["group"], "Display")
         self.assertEqual(rows["auto-mode"]["group"], "Agent behaviour")
         self.assertEqual(rows["enable-shell"]["group"], "Tools & permissions")
+        self.assertIn("normal",
+                      rows["runtime-strategy"]["spec"].choices)
+        self.assertIn("prompt-change",
+                      rows["runtime-strategy"]["spec"].choices)
+        self.assertIn("prompt-change-plan",
+                      rows["runtime-strategy"]["spec"].choices)
 
         table = "\n".join(self.session._settings_lines())
         for group in ("Model & connection:", "Generation:", "Planning:",

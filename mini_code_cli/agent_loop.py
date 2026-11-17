@@ -42,6 +42,7 @@ from . import skills
 from . import agent_files
 from . import compaction as compaction_mod
 from . import planning
+from . import recovery
 from . import plan as plan_utils
 from . import settings as settings_mod
 from . import tokens as tokens_mod
@@ -170,6 +171,11 @@ def parse_args():
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
                         help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify2: verify with a machine-readable DONE/INCOMPLETE verdict and skip the final step on DONE. plan-verify-step: same as plan-verify, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+    parser.add_argument("--strict-verify", action="store_true",
+                        help="Use the evidence-based strict verification prompt for every planning verify/review stage (plan-verify, plan-verify2, plan-verify-step) and also verify after open-plan work settles. Unproven requirements count as unfinished.")
+    parser.add_argument("--runtime-strategy", choices=recovery.RUNTIME_STRATEGIES,
+                        default=recovery.DEFAULT_RUNTIME_STRATEGY,
+                        help="Runtime recovery strategy. normal (default): no automatic prompts. prompt-change: after 3 consecutive failures of the same call or tool, prompt the model to rethink its approach. prompt-change-plan: also start a fresh plan for the current goal.")
     parser.add_argument("--allow-nudge", action="store_true",
                         help="Plan mode only: when the model replies without a tool call, ask it to continue (or reply DONE) before running the plan review. Works with every --plan-strategy.")
     parser.add_argument("--nudge-limit", type=int, default=1,
@@ -203,6 +209,10 @@ def parse_args():
     # A planning strategy is only meaningful in plan mode, so asking for one
     # implies the flag (the banner and help then agree with the session).
     if getattr(args, "plan_strategy", None):
+        args.plan = True
+    # Strict verification only runs in plan mode; enabling it alone should not
+    # silently do nothing.
+    if getattr(args, "strict_verify", False):
         args.plan = True
 
     return args
@@ -333,8 +343,10 @@ def _compaction_trigger(messages, token_limit, reserved_output_tokens, current_t
 #: ``plan-verify2`` branch of ``_run_turn``.
 _LOOP_INJECTED_USER_PREFIXES = (
     "Current plan for the goal (from CURRENT_PLAN.md):",
+    "Recovery plan for the goal:",
     "Plan completion summary (from CURRENT_PLAN.md):",
     "Plan verification (from CURRENT_PLAN.md):",
+    "Plan verification (open-plan):",
 )
 
 
@@ -783,6 +795,16 @@ class AgentSession:
             self.console.note(
                 "--allow-nudge only applies in plan mode; ignoring it.", "warn")
         self._text_only_nudges = 0
+        self.strict_verify = bool(getattr(self.args, "strict_verify", False))
+        self.runtime_strategy = recovery.normalise(
+            getattr(self.args, "runtime_strategy",
+                    recovery.DEFAULT_RUNTIME_STRATEGY))
+        self._reset_runtime_recovery()
+        self._runtime_prompts_this_turn = 0
+        self._runtime_pending_prompt = None
+        self._runtime_pending_replan = False
+        self._last_tool_result_text = ""
+        self._turn_goal = ""
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = (self.tui_mode != "off"
@@ -1991,10 +2013,20 @@ class AgentSession:
         a text-only reply without an explicit completion marker gets up to
         ``--nudge-limit`` continuation messages before the strategy's normal
         review/end path runs.
+
+        ``--strict-verify`` swaps in evidence-based review/verify prompts and,
+        with ``open-plan``, adds a verification pass after the work settles.
+        ``--runtime-strategy`` may inject a recovery prompt after repeated tool
+        failures, and ``prompt-change-plan`` then starts a fresh plan.
         """
         self.messages.append({"role": "user", "content": user_input})
         self._text_only_nudges = 0
         verify_pending_action = False
+        self._runtime_prompts_this_turn = 0
+        self._turn_goal = user_input
+        self._reset_runtime_recovery()
+        self._runtime_pending_prompt = None
+        self._runtime_pending_replan = False
 
         if self.plan_mode and not skip_plan:
             self._record_goal_request(user_input)
@@ -2037,10 +2069,14 @@ class AgentSession:
                                       "content": TEXT_ONLY_NUDGE})
                 self._persist()
                 continue
-            if (not self.plan_mode or skip_plan
-                    or self.plan_strategy == planning.OPEN_PLAN):
+            if (not self.plan_mode or skip_plan):
                 return
-            if self.plan_strategy == planning.PLAN_VERIFY2:
+            if (self.plan_strategy == planning.OPEN_PLAN
+                    and not self.strict_verify):
+                return
+            if (self.plan_strategy == planning.PLAN_VERIFY2
+                    or (self.plan_strategy == planning.OPEN_PLAN
+                        and self.strict_verify)):
                 if verify_pending_action:
                     # The previous verdict said the plan was unfinished, but the
                     # agent then stopped without a tool call. Verifying the same
@@ -2064,11 +2100,12 @@ class AgentSession:
                     # Loop bookkeeping, not user-authored (see
                     # _LOOP_INJECTED_USER_PREFIXES). The next _step sees the
                     # outstanding tasks and can act on them.
+                    label = ("Plan verification (open-plan):"
+                             if self.plan_strategy == planning.OPEN_PLAN
+                             else "Plan verification (from CURRENT_PLAN.md):")
                     self.messages.append({
                         "role": "user",
-                        "content":
-                            "Plan verification (from CURRENT_PLAN.md):\n%s"
-                            % summary.strip(),
+                        "content": label + "\n%s" % summary.strip(),
                     })
                     self._persist()
                 verify_pending_action = True
@@ -2181,14 +2218,21 @@ class AgentSession:
             return
         self.plan_manager.write_goal(stripped)
 
-    def _generate_plan_and_inject(self, current_instruction):
+    def _generate_plan_and_inject(self, current_instruction, recovery=False):
         """Ask the model to author a plan for the current instruction.
+
+        ``recovery`` marks the plan as a post-failure re-plan: it gets its own
+        label and, in ``open-plan`` mode, is not written into
+        ``CURRENT_PLAN.md`` because that document belongs to the agent.
         """
         plan_prompt_text = prompts.plan_prompt(self.messages, current_instruction)
         plan_text = ""
         self._begin_activity("generating plan")
         try:
-            self.console.note("Generating a plan for the current goal...", "info")
+            self.console.note(
+                ("Generating a recovery plan for the current goal..."
+                 if recovery else "Generating a plan for the current goal..."),
+                "info")
             self.console.start_thinking("planning")
             # The loop's own bookkeeping requests (plan authoring / review /
             # compaction) are single user turns with no ``tools``, so the
@@ -2222,28 +2266,44 @@ class AgentSession:
             self.console.stop_thinking()
             self._end_activity()
 
-        self.plan_manager.write_plan(plan_text)
+        if not (recovery and self.plan_mode
+                and self.plan_strategy == planning.OPEN_PLAN):
+            # open-plan owns its document; the loop must not overwrite it.
+            self.plan_manager.write_plan(plan_text)
         if plan_text and plan_text.strip():
             # Show the plan immediately; otherwise the user only sees it via
             # /plan or the file on disk.
-            self.console.plan_box(plan_text.strip().splitlines(),
-                                  title="Plan for the current goal")
+            self.console.plan_box(
+                plan_text.strip().splitlines(),
+                title=("Recovery plan for the current goal" if recovery
+                       else "Plan for the current goal"))
         else:
             self.console.note("No plan text was generated.", "warn")
         if plan_text and plan_text.strip():
             # Loop bookkeeping, not a user instruction: the leading text is one
             # of _LOOP_INJECTED_USER_PREFIXES, so the compaction tail scan skips
             # it when looking for the turn being answered.
+            label = ("Recovery plan for the goal:\n" if recovery
+                     else "Current plan for the goal (from CURRENT_PLAN.md):\n")
             self.messages.append({
                 "role": "user",
-                "content": "Current plan for the goal (from CURRENT_PLAN.md):\n%s" % plan_text.strip(),
+                "content": label + plan_text.strip(),
             })
+
+    def _open_plan_document(self):
+        """The agent-authored plan document, for strict open-plan verification."""
+        try:
+            return agent_files.read_text(
+                agent_files.open_plan_path(self.allowed_dir), limit=8000)
+        except Exception:
+            return ""
 
     def _review_plan_completion(self):
         """Once the work looks done, review the plan's completion.
         """
         plan_prompt_text = prompts.plan_review_prompt(
-            self.messages, self.plan_manager.goal or "")
+            self.messages, self.plan_manager.goal or "",
+            strict=self.strict_verify)
         summary = ""
         self._begin_activity("reviewing plan")
         try:
@@ -2295,7 +2355,10 @@ class AgentSession:
         done, so a DONE turn ends without leaving an orphan user message.
         """
         prompt_text = prompts.plan_verify_prompt(
-            self.messages, self.plan_manager.goal or "")
+            self.messages, self.plan_manager.goal or "",
+            strict=self.strict_verify,
+            plan_document=self._open_plan_document()
+            if self.plan_strategy == planning.OPEN_PLAN else "")
         summary = ""
         self._begin_activity("verifying plan")
         try:
@@ -2303,7 +2366,7 @@ class AgentSession:
             response, _, usage, _ = utils.unpack_llm_result(
                 utils.call_openai_server(
                     [{"role": "user", "content": prompt_text}],
-                    max_tokens=1024,
+                    max_tokens=2048 if self.strict_verify else 1024,
                     temperature=0.0,
                     model=self.model,
                     server_url=self.server_url,
@@ -2321,7 +2384,9 @@ class AgentSession:
             self._end_activity()
 
         status = planning.parse_verify_status(summary)
-        self.plan_manager.write_plan_summary(summary)
+        if not (self.plan_mode and self.plan_strategy == planning.OPEN_PLAN):
+            # open-plan owns its document; do not add loop-authored sections.
+            self.plan_manager.write_plan_summary(summary)
         return status, summary
 
 
@@ -2905,6 +2970,13 @@ class AgentSession:
         self.plan_mode = bool(self.args.plan)
         self.allow_nudge = bool(self.args.allow_nudge)
         self.nudge_limit = max(0, int(self.args.nudge_limit))
+        self.strict_verify = bool(getattr(self.args, "strict_verify", False))
+        self.runtime_strategy = recovery.normalise(
+            getattr(self.args, "runtime_strategy",
+                    recovery.DEFAULT_RUNTIME_STRATEGY))
+        self._reset_runtime_recovery()
+        self._runtime_pending_prompt = None
+        self._runtime_pending_replan = False
         self.compaction_strategy = self.args.compaction_strategy
         if not compaction_mod.is_strategy(self.compaction_strategy):
             self.compaction_strategy = compaction_mod.DEFAULT_COMPACTION_STRATEGY
@@ -3383,6 +3455,93 @@ class AgentSession:
 
     # -- tool execution ----------------------------------------------------
 
+    def _reset_runtime_recovery(self):
+        """Forget the current consecutive-failure streak (not the prompt cap)."""
+        self._runtime_fail_key = None
+        self._runtime_fail_key_count = 0
+        self._runtime_fail_tool = None
+        self._runtime_fail_tool_count = 0
+
+    def _note_tool_outcome(self, name, params, result):
+        """Track consecutive tool failures for the runtime strategy.
+
+        A success is progress and resets the streak. A failure counts towards
+        two streaks: the *same call* (tool + normalised arguments) and the same
+        *tool* with different arguments. Either reaching three triggers one
+        recovery prompt, at most ``MAX_PROMPTS_PER_TURN`` times per turn.
+        """
+        if self.runtime_strategy == recovery.NORMAL:
+            return
+        if not recovery.tool_result_failed(result):
+            self._reset_runtime_recovery()
+            return
+
+        key = recovery.approach_key(name, params)
+        if key == self._runtime_fail_key:
+            self._runtime_fail_key_count += 1
+        else:
+            self._runtime_fail_key = key
+            self._runtime_fail_key_count = 1
+        if name == self._runtime_fail_tool:
+            self._runtime_fail_tool_count += 1
+        else:
+            self._runtime_fail_tool = name
+            self._runtime_fail_tool_count = 1
+
+        if (self._runtime_prompts_this_turn
+                >= recovery.MAX_PROMPTS_PER_TURN):
+            return
+        same_call = (self._runtime_fail_key_count
+                     >= recovery.FAILURE_THRESHOLD)
+        same_tool = (self._runtime_fail_tool_count
+                     >= recovery.FAILURE_THRESHOLD)
+        if not (same_call or same_tool):
+            return
+
+        attempts = max(self._runtime_fail_key_count,
+                       self._runtime_fail_tool_count)
+        self._runtime_pending_prompt = recovery.recovery_prompt(
+            name, attempts, same_call=same_call, result=result)
+        self._runtime_pending_replan = (
+            self.runtime_strategy == recovery.PROMPT_CHANGE_PLAN)
+        self._runtime_prompts_this_turn += 1
+        # Start a new streak after speaking up: the next prompt should describe
+        # the next three failures, not keep firing on the same one.
+        self._runtime_fail_key = None
+        self._runtime_fail_key_count = 0
+        self._runtime_fail_tool = None
+        self._runtime_fail_tool_count = 0
+
+    def _inject_runtime_recovery(self):
+        """Append the pending recovery prompt (and re-plan when configured).
+
+        Called after a whole tool batch so a batch with several calls produces
+        one message, not one per call.
+        """
+        prompt = self._runtime_pending_prompt
+        if not prompt:
+            return
+        self._runtime_pending_prompt = None
+        self.console.note(
+            "Repeated failed tool use; prompting a change of approach.", "warn")
+        self.messages.append({"role": "user", "content": prompt})
+        if self._runtime_pending_replan:
+            self._runtime_pending_replan = False
+            self._generate_recovery_plan()
+
+    def _generate_recovery_plan(self):
+        """Start a fresh planning session after repeated failures."""
+        goal = (getattr(self.plan_manager, "goal", "")
+                or getattr(self, "_turn_goal", ""))
+        if not str(goal or "").strip():
+            self.console.note(
+                "No current goal is recorded; skipping the recovery plan.",
+                "warn")
+            return
+        self.console.note(
+            "Starting a fresh plan after repeated failed attempts.", "info")
+        self._generate_plan_and_inject(goal, recovery=True)
+
     def _run_tool_calls(self, tool_calls):
         self.console.note(f"LLM is trying to call {len(tool_calls)} tool(s).", "info")
         # Show a "… calling tool" spinner (in-place, non-scrolling) while the
@@ -3391,14 +3550,25 @@ class AgentSession:
 
         try:
             for call in tool_calls:
-                name = ((call or {}).get("function") or {}).get("name", "?")
+                function = (call or {}).get("function") or {}
+                name = function.get("name", "?")
+                try:
+                    params = json.loads(function.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    params = {}
+                if not isinstance(params, dict):
+                    params = {}
                 self._begin_activity(f"running tool {name}")
+                self._last_tool_result_text = ""
                 try:
                     self._run_one_tool_call(call)
                 finally:
                     self._end_activity()
+                self._note_tool_outcome(name, params,
+                                        self._last_tool_result_text)
         finally:
             self.console.stop_tool_call()
+        self._inject_runtime_recovery()
 
     def _run_one_tool_call(self, call):
 
@@ -3580,6 +3750,7 @@ class AgentSession:
             raise _Abort
 
     def _append_tool_result(self, call_id, content):
+        self._last_tool_result_text = str(content)
         self.messages.append({"role": "tool", "tool_call_id": call_id, "content": str(content)})
 
     def _print_assistant(self, text):

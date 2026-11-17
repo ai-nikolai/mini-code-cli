@@ -24,6 +24,7 @@ from typing import Any
 
 from . import compaction as compaction_mod
 from . import planning
+from . import recovery
 from . import ui
 from . import utils
 from .config import (
@@ -77,14 +78,15 @@ class SettingSpec:
 SETTINGS_GROUPS = (
     ("Model & connection", ("model", "url", "api_key")),
     ("Generation", ("temperature", "max_tokens", "max_context_tokens")),
-    ("Planning", ("plan", "plan_strategy", "allow_nudge", "nudge_limit")),
+    ("Planning", ("plan", "plan_strategy", "strict_verify", "allow_nudge",
+                  "nudge_limit")),
     ("Compaction", ("compaction_strategy",)),
     ("Tools & permissions",
      ("enable_shell", "enable_subagents", "enable_skills", "sudo",
       "ask_permission", "background")),
     ("Runtime limits", ("tool_timeout", "llm_timeout")),
     ("Display", ("verbose",)),
-    ("Agent behaviour", ("auto_mode", "scratchpad")),
+    ("Agent behaviour", ("runtime_strategy", "auto_mode", "scratchpad")),
 )
 
 GROUP_BY_ATTR = {
@@ -108,6 +110,7 @@ def _specs():
         SettingSpec("plan-strategy", "plan_strategy", "choice",
                     planning.DEFAULT_PLAN_STRATEGY,
                     choices=planning.PLAN_STRATEGIES, cache="prompt"),
+        SettingSpec("strict-verify", "strict_verify", "bool", False),
         SettingSpec("allow-nudge", "allow_nudge", "bool", False),
         SettingSpec("nudge-limit", "nudge_limit", "int", 1),
         SettingSpec("compaction-strategy", "compaction_strategy", "choice",
@@ -126,6 +129,9 @@ def _specs():
                     DEFAULT_TOOL_TIMEOUT),
         SettingSpec("llm-timeout", "llm_timeout", "int", DEFAULT_HTTP_TIMEOUT),
         SettingSpec("verbose", "verbose", "bool", False),
+        SettingSpec("runtime-strategy", "runtime_strategy", "choice",
+                    recovery.DEFAULT_RUNTIME_STRATEGY,
+                    choices=recovery.RUNTIME_STRATEGIES),
         SettingSpec("auto-mode", "auto_mode", "bool", False),
         SettingSpec("scratchpad", "scratchpad", "bool", False, cache="prompt"),
     )
@@ -485,6 +491,9 @@ class Settings:
             != DEFAULT_TOOL_TIMEOUT,
             "llm_timeout": getattr(args, "llm_timeout", DEFAULT_HTTP_TIMEOUT)
             != DEFAULT_HTTP_TIMEOUT,
+            "runtime_strategy": getattr(
+                args, "runtime_strategy", recovery.DEFAULT_RUNTIME_STRATEGY)
+            != recovery.DEFAULT_RUNTIME_STRATEGY,
         }
         for spec in SPECS:
             if spec.attr == "api_key":
