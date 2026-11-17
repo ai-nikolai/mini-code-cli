@@ -135,6 +135,20 @@ class MiniCodeAdapterTests(unittest.TestCase):
         # The bare preset adds no agent flags.
         self.assertNotIn("--auto-mode", argv)
 
+    def test_package_path_override_is_used_for_harbor_upload(self):
+        adapter = self.adapter(options={"package_path": "/tmp/settings-package"})
+        self.assertEqual(adapter.harbor_python_path(), "/tmp/settings-package")
+
+    def test_settings_branch_presets_are_registered(self):
+        expected = {
+            "swe-plan-verify2": "plan-verify2",
+            "swe-plan-verify-strict": "plan-verify",
+            "swe-plan-verify2-prompt-change-strict-todos-nudge": "plan-verify2",
+        }
+        for setting, strategy in expected.items():
+            adapter = self.adapter(setting)
+            self.assertEqual(adapter.options().get("plan_strategy"), strategy)
+
     def test_url_with_v1_is_trimmed(self):
         argv = self.adapter().argv("p", local_model(base="http://host:8000/v1"))
         self.assertEqual(argv[argv.index("--url") + 1], "http://host:8000")

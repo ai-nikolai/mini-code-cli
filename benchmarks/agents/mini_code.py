@@ -110,6 +110,44 @@ class MiniCodeAgent(AgentAdapter):
             _SWE, flags=_SWE["flags"] + ["--plan", "--allow-nudge",
                                         "--nudge-limit", "1"],
             plan_strategy="plan-verify"),
+        # Settings-branch matrix: verify2, strict verification, dynamic todos
+        # and the runtime recovery strategy, each changing one capability.
+        "swe-plan-verify-strict": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--strict-verify"],
+            plan_strategy="plan-verify"),
+        "swe-plan-verify2": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan"],
+            plan_strategy="plan-verify2"),
+        "swe-plan-verify2-strict": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--strict-verify"],
+            plan_strategy="plan-verify2"),
+        "swe-plan-verify2-todos": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan",
+                                        "--dynamic-todo-tracking"],
+            plan_strategy="plan-verify2"),
+        "swe-plan-verify2-strict-todos": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--strict-verify",
+                                        "--dynamic-todo-tracking"],
+            plan_strategy="plan-verify2"),
+        "swe-plan-verify2-prompt-change": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--runtime-strategy",
+                                        "prompt-change"],
+            plan_strategy="plan-verify2"),
+        "swe-plan-verify2-prompt-change-strict": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--strict-verify",
+                                        "--runtime-strategy", "prompt-change"],
+            plan_strategy="plan-verify2"),
+        "swe-plan-verify2-prompt-change-strict-todos": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--strict-verify",
+                                        "--dynamic-todo-tracking",
+                                        "--runtime-strategy", "prompt-change"],
+            plan_strategy="plan-verify2"),
+        "swe-plan-verify2-prompt-change-strict-todos-nudge": dict(
+            _SWE, flags=_SWE["flags"] + ["--plan", "--strict-verify",
+                                        "--dynamic-todo-tracking",
+                                        "--runtime-strategy", "prompt-change",
+                                        "--allow-nudge", "--nudge-limit", "1"],
+            plan_strategy="plan-verify2"),
         "swe-open-plan": dict(
             _SWE, flags=_SWE["flags"] + ["--plan"],
             plan_strategy="open-plan"),
@@ -188,7 +226,9 @@ class MiniCodeAgent(AgentAdapter):
         made the TB environment start hit its one-hour budget while the server sat
         idle at "Uvicorn running". Only the package needs to travel.
         """
-        return os.path.join(_REPO_ROOT, "mini_code_cli")
+        package_path = self.options().get("package_path")
+        return (str(package_path) if package_path
+                else os.path.join(_REPO_ROOT, "mini_code_cli"))
 
     def container_mounts(self):
         return [(_REPO_ROOT, "/opt/mini-code:ro")]
