@@ -705,16 +705,18 @@ class TuiConsoleTest(unittest.TestCase):
             console.stop_tui()
         self.assertIn("__  __", content)
         self.assertIn("version 1.0", content)
-        # The mark is a separate, centered boxed banner above the dashboard
-        # box; its borders fully enclose the ASCII art.
+        # The mark is a full-width boxed banner above the dashboard box; its
+        # borders fully enclose the ASCII art and the art is centered.
         art = next(line for line in lines if "__  __" in line)
-        self.assertTrue(art.startswith(" "))
+        self.assertEqual(len(art), 80)
         art_index = lines.index(art)
         header_index = next(index for index, line in enumerate(lines)
                             if "Mini-Code" in line)
         self.assertLess(art_index, header_index)
-        self.assertTrue(art.strip().startswith("|"))
+        self.assertTrue(art.startswith("|"))
         self.assertTrue(art.rstrip().endswith("|"))
+        inner = art.strip()[1:-1]
+        self.assertGreater(len(inner) - len(inner.lstrip(" ")), 2)
         top = lines[art_index - 1].strip()
         bottom = lines[art_index + len(tui.LOGO)].strip()
         self.assertTrue(top.startswith("+") and top.endswith("+"))

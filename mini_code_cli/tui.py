@@ -762,27 +762,18 @@ class TuiConsole(Console):
         label is boxed instead so it always fits.
         """
         art_width = max(_visual_len(line) for line in LOGO)
+        inner = max(cols - 4, 1)
         if rows >= 18 and cols >= art_width + 8:
-            box_width = art_width + 6
-            inner = box_width - 4
             # Center the block once: centering each logo line separately would
             # misalign the 42- and 43-column rows relative to each other.
             pad = max((inner - art_width) // 2, 0)
             body = [" " * pad + self.style(line, fg="cyan", bold=True)
                     for line in LOGO]
-        elif rows >= 10:
-            label = self.style("MINI CODE", fg="cyan", bold=True)
-            box_width = min(max(_visual_len(label) + 6, 12),
-                            max(cols, 8))
-            inner = max(box_width - 4, 1)
-            body = [self._center(label, inner)]
         else:
-            # A 3-line box would crowd out the conversation and input on a
-            # very short terminal; keep the mark as one centered line.
-            label = self.style("[ MINI CODE ]", fg="cyan", bold=True)
-            return [self._center(label, cols)]
-        box = self._box(None, body, box_width, fg="cyan")
-        return [self._center(line, cols) for line in box]
+            label = self.style("MINI CODE", fg="cyan", bold=True)
+            body = [self._center(label, inner)]
+        # Span the terminal; the box border itself is the separator.
+        return self._box(None, body, cols, fg="cyan")
 
     def _render_edit_locked(self, cols, rows):
         """Draw the focused setting window plus the persistent banner."""
