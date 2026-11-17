@@ -20,6 +20,11 @@ _CONFIGS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 from .preamble import load_agent_preamble
 from .base import AgentAdapter, which
 
+#: Pin the npm release: a bare install follows ``latest``, so a version published
+#: mid-campaign silently changes the agent under a running benchmark. 1.5.2 was
+#: the release used by the aligned run and has not changed since 2026-11-10.
+PI_NPM_VERSION = "1.5.2"
+
 
 class PiAgent(AgentAdapter):
     name = "pi"
@@ -94,7 +99,8 @@ class PiAgent(AgentAdapter):
     def install_commands(self):
         """Node + ``pi`` from npm (no apt: the .sif overlay breaks dpkg)."""
         return container_setup.node_commands() + container_setup.npm_global_commands(
-            "@earendil-works/pi-coding-agent", "pi")
+            "@earendil-works/pi-coding-agent", "pi",
+            version=PI_NPM_VERSION)
 
     def container_mounts(self):
         """No file to mount: the provider list is written per run (see below).
@@ -138,9 +144,9 @@ class PiAgent(AgentAdapter):
         # The harness can only record that as a 0.0 reward, which reads exactly
         # like a model that tried and failed. vLLM serves the chat-completions
         # API, so that is the protocol to name.
-        selection = {"agent": "pi"}
+        selection = {"agent": "pi", "kwargs": {"version": PI_NPM_VERSION}}
         if model.api == "openai":
-            selection["kwargs"] = {"model_api": "openai-completions"}
+            selection["kwargs"]["model_api"] = "openai-completions"
         return selection
 
     def metadata(self):

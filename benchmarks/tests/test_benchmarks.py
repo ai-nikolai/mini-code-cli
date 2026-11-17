@@ -500,8 +500,38 @@ class TerminalBenchSuiteTests(unittest.TestCase):
         model = ModelSpec(name="c", model="m",
                           base_url="http://127.0.0.1:1", api="anthropic")
         # The current harbor ClaudeCode schema has no ``model_name`` option; it
-        # resolves the model from ``-m`` / MODEL_CONNECTION.
-        self.assertEqual(adapter.harbor_selection(model), {"agent": "claude-code"})
+        # resolves the model from ``-m`` / MODEL_CONNECTION. Only the npm
+        # version pin is passed.
+        selection = adapter.harbor_selection(model)
+        self.assertEqual(selection["agent"], "claude-code")
+        self.assertNotIn("model_name", selection.get("kwargs", {}))
+        self.assertEqual(selection["kwargs"], {"version": "2.1.326"})
+
+    def test_pi_harbor_selection_pins_the_npm_version(self):
+        adapter = get_adapter(AgentSpec(name="pi"))
+        model = local_model(api="openai")
+        self.assertEqual(adapter.harbor_selection(model), {
+            "agent": "pi",
+            "kwargs": {"version": "1.5.2",
+                       "model_api": "openai-completions"},
+        })
+
+    def test_npm_agent_installs_are_pinned(self):
+        # A bare `npm install -g <package>` follows `latest`; a release published
+        # mid-campaign must not change the agent under a running benchmark.
+        pinned = {
+            "claude-code": "@anthropic-ai/claude-code@2.1.326",
+            "pi": "@earendil-works/pi-coding-agent@1.5.2",
+            "opencode": "opencode-ai@1.19.5",
+        }
+        for name, needle in pinned.items():
+            adapter = get_adapter(AgentSpec(name=name))
+            try:
+                commands = adapter.install_commands(local_model())
+            except TypeError:
+                commands = adapter.install_commands()
+            self.assertTrue(any(needle in command for command in commands),
+                            f"{name}: no install command pins {needle}")
 
     def test_harbor_uses_its_own_agents_for_claude_code_and_pi(self):
         for name, expected in (("claude-code", "claude-code"), ("pi", "pi")):

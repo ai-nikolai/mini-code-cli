@@ -34,6 +34,13 @@ DEFAULT_ALLOWED_TOOLS = (
     "NotebookEdit", "TodoWrite",
 )
 
+#: Pin the npm release for the same reason OpenCode is pinned (see
+#: ``opencode.py``): an unpinned ``npm install`` follows ``latest`` and a release
+#: published mid-campaign changes the agent under a running benchmark. 2.1.326
+#: appeared at 2026-11-16T18:43Z, just after the aligned run started, and was
+#: used by essentially all of its trials.
+CLAUDE_CODE_NPM_VERSION = "2.1.326"
+
 
 class ClaudeCodeAgent(AgentAdapter):
     name = "claude-code"
@@ -150,7 +157,8 @@ class ClaudeCodeAgent(AgentAdapter):
         :mod:`benchmarks.agents.container_setup`).
         """
         return container_setup.node_commands() + container_setup.npm_global_commands(
-            "@anthropic-ai/claude-code", "claude")
+            "@anthropic-ai/claude-code", "claude",
+            version=CLAUDE_CODE_NPM_VERSION)
 
     def harness_selection(self, model):
         # Terminal-Bench ships a claude-code agent; use it rather than our own
@@ -162,9 +170,11 @@ class ClaudeCodeAgent(AgentAdapter):
         # Harbor ships a Claude Code agent; the baseline should be the one the
         # leaderboard uses, not a re-implementation of it. The current harbor
         # schema resolves the model from the ``-m`` value / MODEL_CONNECTION and
-        # rejects a ``model_name`` agent-kwarg ("Unknown option 'model_name'"),
-        # so pass no kwargs at all.
-        return {"agent": "claude-code"}
+        # rejects a ``model_name`` agent-kwarg ("Unknown option 'model_name'").
+        # ``version`` is a real BaseInstalledAgent option and pins the npm
+        # release harbor installs.
+        return {"agent": "claude-code",
+                "kwargs": {"version": CLAUDE_CODE_NPM_VERSION}}
 
     def metadata(self):
         payload = super().metadata()
