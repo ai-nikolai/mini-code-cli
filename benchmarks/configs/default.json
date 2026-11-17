@@ -1,0 +1,112 @@
+{
+  "_comment": [
+    "The academic matrix: two benchmarks, four agents, two models.",
+    "`plan` shows every command; `run` executes them.",
+    "",
+    "Terminal-Bench 2.x is executed by harbor (its official harness), so the",
+    "suite carries options.harness='harbor'; set it to 'tb' for the 1.x",
+    "'terminal-bench-core' datasets, which use the tb CLI instead.",
+    "",
+    "Models: `h200-ornith` is served locally with vLLM (see",
+    "`python -m benchmarks models`), `anthropic-sonnet` is the hosted baseline.",
+    "A containerised agent must be able to route to the local endpoint, so bind",
+    "vLLM to 0.0.0.0 and use a LAN address rather than 127.0.0.1.",
+    "",
+    "SWE-bench pins by HuggingFace revision (set `version` once you have looked",
+    "it up); every run records the resolved revision in manifest.json."
+  ],
+  "output_dir": "benchmarks/runs",
+  "concurrency": 1,
+  "timeouts": {
+    "instance_seconds": 5400,
+    "agent_seconds": 3600,
+    "test_seconds": 1800
+  },
+  "docker": {
+    "cpus": 4,
+    "memory": "16g",
+    "pids_limit": 2048,
+    "network": "bridge"
+  },
+  "suites": [
+    {
+      "name": "terminal-bench",
+      "dataset": "terminal-bench",
+      "version": "2.1",
+      "limit": 10,
+      "options": {
+        "harness": "harbor",
+        "n_concurrent": 2
+      }
+    },
+    {
+      "name": "swebench",
+      "dataset": "SWE-bench/SWE-bench_Verified",
+      "split": "test",
+      "limit": 10,
+      "options": {
+        "max_workers": 4,
+        "test_timeout_sec": 1800
+      }
+    }
+  ],
+  "models": [
+    {
+      "name": "h200-ornith",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "openai",
+      "notes": "served by vLLM on the H200 (bash scripts/bench_vllm.sh or `python -m benchmarks models`)"
+    },
+    {
+      "name": "anthropic-sonnet",
+      "model": "claude-sonnet-4-5",
+      "base_url": "https://api.anthropic.com",
+      "api": "anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "notes": "needs the key in the environment; nothing else in this config does"
+    }
+  ],
+  "agents": [
+    {
+      "name": "mock",
+      "settings": [
+        "empty",
+        "touch"
+      ],
+      "_comment": "no model needed; run this first to check the plumbing",
+      "models": [
+        "h200-ornith"
+      ]
+    },
+    {
+      "name": "mini-code",
+      "settings": [
+        "default",
+        "auto-shell",
+        "plan"
+      ],
+      "models": [
+        "h200-ornith"
+      ]
+    },
+    {
+      "name": "claude-code",
+      "settings": [
+        "default"
+      ],
+      "models": [
+        "anthropic-sonnet"
+      ]
+    },
+    {
+      "name": "pi",
+      "settings": [
+        "default"
+      ],
+      "models": [
+        "h200-ornith"
+      ]
+    }
+  ]
+}
