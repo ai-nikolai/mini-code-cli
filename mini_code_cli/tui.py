@@ -1482,20 +1482,45 @@ class TuiConsole(Console):
         """
         if not self._active or not rows:
             return None
+        # Immutable settings are part of the same scrollable table so they can
+        # be reached with the arrows on a small screen. They are selectable but
+        # reject every edit.
+        immutable_rows = []
+        for offset, line in enumerate(immutable_lines):
+            display = str(line)
+            immutable_rows.append({
+                "number": len(rows) + offset + 1,
+                "name": display.split(":", 1)[0].strip(),
+                "value": display,
+                "display": display,
+                "raw": None,
+                "mutable": False,
+                "cache": "none",
+                "spec": None,
+                "immutable": True,
+            })
+
+        def combined():
+            return list(rows) + immutable_rows
+
+        total = len(rows) + len(immutable_rows)
         self._picker_top = 0
-        start = max(0, min(int(selected), len(rows) - 1))
+        start = max(0, min(int(selected), total - 1))
 
         def draw(selected):
             body = []
-            for index, row in enumerate(rows):
+            for index, row in enumerate(combined()):
                 marker = ">" if index == selected else " "
+                if row.get("immutable"):
+                    body.append(self.style(
+                        f"{marker} {row['number']:2}. {row['display']}",
+                        dim=True))
+                    continue
                 cache = (f"  cache:{row['cache']}"
                          if row.get("cache", "none") != "none" else "")
                 body.append(f"{marker} {row['number']:2}. "
                             f"{row['name']:22} {row.get('display', row['value']):28}"
                             f"{cache}")
-            for line in immutable_lines:
-                body.append(self.style("  " + str(line), dim=True))
             is_dirty = dirty() if callable(dirty) else bool(dirty)
             status = (("unsaved", "yellow") if is_dirty
                       else ("saved", "green"))
@@ -1504,7 +1529,7 @@ class TuiConsole(Console):
                 "s save · q quit", body, selected, status=status)
 
         def change(selected, step):
-            row = rows[selected]
+            row = combined()[selected]
             spec = row.get("spec")
             if spec is None or not row.get("mutable") or not spec.mutable:
                 return selected
@@ -1536,9 +1561,9 @@ class TuiConsole(Console):
                 on_save(rows)
 
         index = self._pick_index(
-            draw, len(rows), start, on_left=left, on_right=right,
+            draw, total, start, on_left=left, on_right=right,
             on_save=save if on_save is not None else None)
-        return None if index is None else rows[index]
+        return None if index is None else combined()[index]
 
     def read_secret(self, prompt_text="API key: "):
         """Read a secret into the fixed-view input line without echoing it."""

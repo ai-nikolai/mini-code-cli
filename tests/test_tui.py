@@ -434,6 +434,25 @@ class TuiConsoleTest(unittest.TestCase):
         # The between-prompt listener must not compete for the arrow keys.
         self.assertEqual(picker_events, ["stop", "start"])
 
+    def test_settings_picker_reaches_immutable_rows(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        immutable = ["tui: cannot change (fixed-screen UI)"]
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            selected = self._feed_pick(
+                console, b"\x1b[B\r",
+                lambda: console.settings_pick(
+                    rows, immutable, selected=len(rows) - 1))
+            console.stop_tui()
+
+        self.assertEqual(selected["name"], "tui")
+        self.assertFalse(selected["mutable"])
+        self.assertEqual(selected["number"], len(rows) + 1)
+
     def test_settings_picker_left_right_changes_bool_in_place(self):
         console = self.console()
         rows = settings.Settings().rows()
