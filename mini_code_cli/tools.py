@@ -16,6 +16,7 @@ exact-match edit) and nothing more. Every optional parameter has a default, so a
 call that omits it behaves exactly as a call that never had it.
 """
 import fnmatch
+import html
 import functools
 import glob as glob_module
 import inspect
@@ -687,65 +688,219 @@ def glob(pattern, root=None, *args, **kwargs):
 # web tools
 # ---------------------------------------------------------------------------
 
+def _post(url, data, timeout=DEFAULT_TOOL_TIMEOUT,
+          max_bytes=DEFAULT_MAX_FETCH_BYTES):
+    """POST a form and return the decoded body (DuckDuckGo's HTML endpoint)."""
+    _validate_http_url(url)
+    payload = urllib.parse.urlencode(data).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=payload,
+        headers={"User-Agent": _USER_AGENT,
+                 "Accept": "text/html,application/xhtml+xml",
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    with _HTTP_OPENER.open(request, timeout=_coerce_timeout(timeout)) as response:
+        limit = max(_coerce_int(max_bytes, 0), 0)
+        body = response.read(limit) if limit else response.read()
+    return body.decode("utf-8", errors="replace")
+
+
+def _strip_html(value):
+    value = re.sub(r"<[^>]+>", " ", str(value or ""))
+    value = html.unescape(value)
+    return " ".join(value.split())
+
+
+def _ddg_target(url):
+    """Unwrap DuckDuckGo's ``/l/?uddg=...`` redirect links."""
+    url = html.unescape(str(url or ""))
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urllib.parse.urlparse(url)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        target = urllib.parse.parse_qs(parsed.query).get("uddg")
+        if target:
+            return target[0]
+    return url
+
+
+def _links_with_class(body, class_name):
+    """Return ``(url, inner_html)`` for anchors carrying ``class_name``."""
+    results = []
+    pattern = (r'<a\b[^>]*class=["\'][^"\']*'
+               + re.escape(class_name)
+               + r'[^"\']*["\'][^>]*>(.*?)</a>')
+    for match in re.finditer(pattern, body, re.S | re.I):
+        tag = match.group(0)
+        href = re.search(r'href=["\']([^"\']+)["\']', tag, re.I)
+        if href:
+            results.append((href.group(1), match.group(1)))
+    return results
+
+
+def _cells_with_class(body, class_name):
+    pattern = (r'<td\b[^>]*class=["\'][^"\']*'
+               + re.escape(class_name)
+               + r'[^"\']*["\'][^>]*>(.*?)</td>')
+    return re.findall(pattern, body, re.S | re.I)
+
+
+def _ddg_lite_results(query, limit=8):
+    """Search DuckDuckGo Lite's no-JavaScript HTML endpoint (POST form)."""
+    body = _post("https://lite.duckduckgo.com/lite/", {"q": query})
+    lowered = body.lower()
+    if "anomaly" in lowered or "captcha" in lowered:
+        raise RuntimeError("DuckDuckGo Lite returned an anti-bot challenge page")
+    anchors = _links_with_class(body, "result-link")
+    snippets = _cells_with_class(body, "result-snippet")
+    results = []
+    for index, (url, title) in enumerate(anchors):
+        title = _strip_html(title)
+        target = _ddg_target(url)
+        if not title or not target.startswith(("http://", "https://")):
+            continue
+        snippet = _strip_html(snippets[index]) if index < len(snippets) else ""
+        if len(snippet) > 320:
+            snippet = snippet[:320] + "..."
+        results.append((title[:160], target, snippet))
+        if len(results) >= max(1, int(limit)):
+            break
+    return results
+
+
+def _ddg_html_results(query, limit=8):
+    """Search DuckDuckGo's no-JavaScript HTML endpoint.
+
+    POST is deliberate: the GET endpoint frequently answers with an anti-bot
+    challenge page, while the POST form (the one the Lite page submits) returns
+    normal results from the same network. A challenge/anomaly page raises so
+    the caller can fall back instead of reporting it as "no results".
+    """
+    body = _post("https://html.duckduckgo.com/html/", {"q": query})
+    lowered = body.lower()
+    if ("anomaly" in lowered or "captcha" in lowered
+            or "challenge" in lowered and "result__a" not in lowered):
+        raise RuntimeError("DuckDuckGo returned an anti-bot challenge page")
+
+    anchors = _links_with_class(body, "result__a")
+    snippets = _links_with_class(body, "result__snippet")
+    results = []
+    for index, (url, title) in enumerate(anchors):
+        title = _strip_html(title)
+        target = _ddg_target(url)
+        if not title or not target.startswith(("http://", "https://")):
+            continue
+        snippet = _strip_html(snippets[index][1]) if index < len(snippets) else ""
+        if len(snippet) > 320:
+            snippet = snippet[:320] + "..."
+        results.append((title[:160], target, snippet))
+        if len(results) >= max(1, int(limit)):
+            break
+    return results
+
+
+def _format_search_results(results):
+    lines = []
+    for index, (title, url, snippet) in enumerate(results, 1):
+        lines.append(f"{index}. {title}")
+        lines.append(f"   {url}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines)
+
+
+def _ddg_instant_results(query):
+    """DuckDuckGo's Instant Answer API: abstracts and related topics."""
+    data = json.loads(_fetch(
+        "https://api.duckduckgo.com/?q="
+        f"{urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"))
+    results = []
+    abstract = str(data.get("AbstractText") or "").strip()
+    if abstract:
+        url = str(data.get("AbstractURL") or "")
+        results.append((data.get("Heading") or query, url or
+                        "https://duckduckgo.com/?q=" + urllib.parse.quote(query),
+                        abstract[:320]))
+    answer = str(data.get("Answer") or "").strip()
+    if answer:
+        results.append((f"{query} (answer)", "https://duckduckgo.com/?q="
+                        + urllib.parse.quote(query), answer[:320]))
+    for topic in data.get("RelatedTopics") or []:
+        if isinstance(topic, dict) and topic.get("Text"):
+            url = str(topic.get("FirstURL") or "")
+            if url:
+                results.append((str(topic.get("Text"))[:120], url,
+                                str(topic.get("Text"))[:320]))
+        if len(results) >= 6:
+            break
+    return results
+
+
+def _wikipedia_results(query, limit=3):
+    search_url = (
+        "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch="
+        f"{urllib.parse.quote(query)}&format=json&srlimit={int(limit)}")
+    data = json.loads(_fetch(search_url))
+    results = []
+    for hit in (data.get("query", {}).get("search", []) or [])[:limit]:
+        title = hit.get("title") or query
+        pageid = hit.get("pageid")
+        extract_url = (
+            "https://en.wikipedia.org/w/api.php?action=query&pageids="
+            f"{pageid}&prop=extracts&exintro&explaintext&format=json")
+        try:
+            extract = json.loads(_fetch(extract_url))
+            pages = extract.get("query", {}).get("pages", {})
+            snippet = next((page.get("extract", "") for page in pages.values()
+                            if page.get("extract")), "")
+        except Exception:
+            snippet = ""
+        results.append((title, "https://en.wikipedia.org/wiki/"
+                        + urllib.parse.quote(title.replace(" ", "_")),
+                        " ".join(snippet.split())[:320]))
+    return results
+
+
 def web_search(query, *args, **kwargs):
-    """Search the web for `query` and return a plain-text summary of results.
+    """Search the web for `query` and return a plain-text list of results.
 
     Param: query (required)
 
-    This is a best-effort, dependency-free lookup. It tries, in order:
-
-    1. DuckDuckGo's autocomplete API, which returns popular related queries and
-       the top related website for the term.
-    2. The Wikipedia search API, which returns matching article titles plus a
-       short plain-text extract of the best match.
-
-    Every source is wrapped in its own try/except so one failing endpoint can't
-    mask the others, and the function always returns a string (results joined by
-    newlines, or an "Error: ..." message).
+    DuckDuckGo Lite's HTML endpoint is tried first, then the full HTML
+    endpoint (both POST; their GET forms are routinely replaced by an anti-bot
+    challenge). If both are blocked,
+    the Instant Answer API and Wikipedia are used as fallbacks. Each source is
+    isolated: one failing endpoint cannot hide results from another.
     """
-    results = []
     query = _coerce_text(query)
     if not query.strip():
         return "Error: query must not be empty."
 
-    # 1) DuckDuckGo autocomplete: fast, no-keyword related queries.
+    errors = []
+    for name, search in (("DuckDuckGo Lite", _ddg_lite_results),
+                         ("DuckDuckGo HTML", _ddg_html_results)):
+        try:
+            results = search(query)
+            if results:
+                return _format_search_results(results)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+
+    fallback = []
     try:
-        ddg_url = f"https://duckduckgo.com/ac/?q={urllib.parse.quote(query)}&type=list"
-        data = json.loads(_fetch(ddg_url))
-        suggestions = data[1] if (isinstance(data, list) and len(data) > 1) else []
-        if suggestions:
-            results.append("Related queries: " + ", ".join(suggestions[:10]))
-    except Exception as e:
-        results.append(f"(DuckDuckGo suggestion lookup failed: {e})")
+        fallback.extend(_ddg_instant_results(query))
+    except Exception as exc:
+        errors.append(f"DuckDuckGo answers: {exc}")
+    if len(fallback) < 3:
+        try:
+            fallback.extend(_wikipedia_results(query))
+        except Exception as exc:
+            errors.append(f"Wikipedia: {exc}")
 
-    # 2) Wikipedia: matching article titles + a short extract of the best match.
-    try:
-        search_url = (
-            "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch="
-            f"{urllib.parse.quote(query)}&format=json&srlimit=5"
-        )
-        data = json.loads(_fetch(search_url))
-        hits = data.get("query", {}).get("search", [])
-        if hits:
-            best = hits[0]
-            results.append(f"Wikipedia: {best.get('title')}")
-            extract_url = (
-                "https://en.wikipedia.org/w/api.php?action=query&pageids="
-                f"{best.get('pageid')}&prop=extracts&exintro&explaintext&format=json"
-            )
-            extract = json.loads(_fetch(extract_url))
-            pages = extract.get("query", {}).get("pages", {})
-            for page in pages.values():
-                snippet = page.get("extract", "")
-                if snippet:
-                    snippet = "\n".join(line.strip() for line in snippet.splitlines() if line.strip())
-                    results.append("  " + snippet[:500])
-                    break
-    except Exception as e:
-        results.append(f"(Wikipedia lookup failed: {e})")
-
-    return '\n'.join(results) if results else "No results found."
-
+    if fallback:
+        return _format_search_results(fallback[:8])
+    if errors:
+        return ("No search results. " + " | ".join(errors[:2]))
+    return "No results found."
 
 def read_website(url, timeout: int = DEFAULT_TOOL_TIMEOUT,
                  max_chars: int = DEFAULT_MAX_WEBPAGE_CHARS, *args, **kwargs):

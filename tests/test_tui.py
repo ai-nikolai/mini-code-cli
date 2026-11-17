@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 
-from mini_code_cli import agent_loop, tui, ui
+from mini_code_cli import agent_loop, settings, tui, ui
 from mini_code_cli.agent_loop import AgentSession
 
 from test_e2e_agent_loop import make_args
@@ -182,6 +182,62 @@ class TuiConsoleTest(unittest.TestCase):
                 mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
             return console.read_line("", multiline=True, tui=True)
 
+    def _feed_secret(self, console, data):
+        """Drive the masked secret editor with ``data`` bytes, then EOF."""
+        calls = [bytes([byte]) for byte in data] + [b""]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"), \
+                mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
+            return console.read_secret("API key: ")
+
+    def _feed_pick(self, console, data, call):
+        """Drive an arrow-key picker with ``data`` bytes."""
+        calls = [bytes([byte]) for byte in data]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"):
+            return call()
+
+    def _feed_edit(self, console, data, name="temperature", current="1.0",
+                   secret=False):
+        """Drive the focused setting editor with ``data`` bytes, then EOF."""
+        calls = [bytes([byte]) for byte in data] + [b""]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"), \
+                mock.patch("termios.tcflush"), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"), \
+                mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
+            return console.settings_edit(name, current=current, secret=secret)
+
+    def _feed_choose(self, console, data, name, options, current=""):
+        """Drive the focused fixed-value picker with ``data`` bytes."""
+        calls = [bytes([byte]) for byte in data] + [b""]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"), \
+                mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
+            return console.settings_choose(name, options, current=current)
+
     @staticmethod
     def _caret(output):
         matches = re.findall(r"\x1b\[(\d+);(\d+)H\x1b\[\?25h", output)
@@ -230,6 +286,403 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertEqual(text, "abc")
         self.assertEqual(console._input_buffer, [])
         self.assertFalse(console._input_active)
+
+    def test_read_secret_masks_the_value_and_keeps_it_out_of_history(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            text = self._feed_secret(console, b"sk-123")
+            output = console.stream.getvalue()
+            history = list(console._input_history)
+            console.stop_tui()
+
+        self.assertEqual(text, "sk-123")
+        self.assertNotIn("sk-123", output)
+        self.assertIn("******", output)
+        self.assertEqual(history, [])
+
+    def test_choose_accepts_a_number_and_enter(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"2\r",
+                lambda: console.choose("Provider", ["localhost", "deepseek",
+                                                    "custom URL"]))
+            output = console.stream.getvalue()
+            console.stop_tui()
+
+        self.assertEqual(result, 2)
+        self.assertIn("deepseek", output)
+        self.assertIn("custom URL", output)
+
+    def test_choose_supports_arrows_and_cancel(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"\x1b[B\r",
+                lambda: console.choose("Provider", ["a", "b", "c"]))
+            cancelled = self._feed_pick(
+                console, b"q",
+                lambda: console.choose("Provider", ["a", "b", "c"]))
+            console.stop_tui()
+
+        self.assertEqual(result, 2)
+        self.assertIsNone(cancelled)
+
+    def test_picker_starts_at_the_top_and_scrolls_with_the_selection(self):
+        console = self.console()
+        console._last_body_height = 6
+        body = [f"row-{index:02d}" for index in range(20)]
+
+        console._picker_window("[settings]", body, 0)
+        first_view = "\n".join(console._overlay_lines)
+        self.assertIn("row-00", first_view)
+        self.assertNotIn("row-19", first_view)
+
+        console._picker_window("[settings]", body, 12)
+        scrolled_view = "\n".join(console._overlay_lines)
+        self.assertIn("row-12", scrolled_view)
+        self.assertNotIn("row-00", scrolled_view)
+
+    def test_tiny_picker_window_keeps_the_selected_row_visible(self):
+        console = self.console()
+        body = [f"row-{index:02d}" for index in range(20)]
+
+        console._last_body_height = 2
+        console._picker_window("[settings]", body, 19)
+        view = "\n".join(console._body_lines(2, 40))
+        self.assertIn("row-19", view)
+
+        console._last_body_height = 1
+        console._picker_window("[settings]", body, 19,
+                               status=("unsaved", "yellow"))
+        view = "\n".join(console._body_lines(1, 40))
+        self.assertIn("row-19", view)
+        self.assertIn("unsaved", view)
+
+    def test_command_overlay_keeps_its_title_line_while_scrolling(self):
+        console = self.console()
+        console._overlay_lines = ["[help]"] + [
+            f"line-{index}" for index in range(30)]
+        console._scroll_offset = 5
+        view = console._body_lines(4, 40)
+        self.assertIn("[help]", view[0])
+        self.assertNotIn("[help]", "\n".join(view[1:]))
+        self.assertGreater(len(view), 1)
+
+    def test_prompt_arrows_scroll_a_command_overlay(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console._overlay_lines = [
+                f"history line {index}" for index in range(60)]
+            console._scroll_offset = 0
+            console.render()
+            self.assertGreater(console._total_body_lines,
+                               console._last_body_height)
+            self._feed_input(console, b"\x1b[A\x04")
+            offset = console._scroll_offset
+            console.stop_tui()
+
+        self.assertEqual(offset, 1)
+
+    def test_top_anchored_overlay_is_not_pushed_to_the_bottom(self):
+        console = self.console()
+        console._overlay_lines = ["header", "row-00", "row-01"]
+        console._overlay_top = True
+        self.assertEqual(console._body_lines(3, 40),
+                         ["header", "row-00", "row-01"])
+
+    def test_settings_picker_owns_stdin_and_handles_arrows(self):
+        console = self.console()
+        rows = [
+            {"number": 1, "name": "model", "value": "m", "cache": "none"},
+            {"number": 2, "name": "temperature", "value": "1.0",
+             "cache": "none"},
+        ]
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            events = []
+            console.stop_scroll_listener = mock.Mock(
+                side_effect=lambda: events.append("stop"))
+            console.start_scroll_listener = mock.Mock(
+                side_effect=lambda: events.append("start"))
+            selected = self._feed_pick(
+                console, b"\x1b[B\r",
+                lambda: console.settings_pick(rows))
+            picker_events = list(events)
+            console.stop_tui()
+
+        self.assertEqual(selected["name"], "temperature")
+        # The between-prompt listener must not compete for the arrow keys.
+        self.assertEqual(picker_events, ["stop", "start"])
+
+    def test_settings_picker_d_requests_defaults(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        events = []
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"dq",
+                lambda: console.settings_pick(
+                    rows, on_defaults=lambda current: events.append("defaults")))
+            console.stop_tui()
+
+        self.assertEqual(events, ["defaults"])
+
+    def test_settings_picker_reaches_immutable_rows(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        immutable = ["tui: cannot change (fixed-screen UI)"]
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            selected = self._feed_pick(
+                console, b"\x1b[B\r",
+                lambda: console.settings_pick(
+                    rows, immutable, selected=len(rows) - 1))
+            console.stop_tui()
+
+        self.assertEqual(selected["name"], "tui")
+        self.assertFalse(selected["mutable"])
+        self.assertEqual(selected["number"], len(rows) + 1)
+
+    def test_settings_picker_a_requests_the_all_preset(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        events = []
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"aq",
+                lambda: console.settings_pick(
+                    rows, on_all=lambda current: events.append("all")))
+            console.stop_tui()
+
+        self.assertEqual(events, ["all"])
+
+    def test_settings_picker_p_requests_the_super_preset(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        events = []
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"pq",
+                lambda: console.settings_pick(
+                    rows, on_super=lambda current: events.append("super")))
+            console.stop_tui()
+
+        self.assertEqual(events, ["super"])
+
+    def test_settings_picker_left_right_changes_bool_in_place(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        index = next(i for i, row in enumerate(rows)
+                     if row["name"] == "plan")
+        changes = []
+
+        def on_change(row, value, rows):
+            changes.append((row["name"], value))
+            row["value"] = "on" if value else "off"
+            return True
+
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"\x1b[Cq",
+                lambda: console.settings_pick(
+                    rows, selected=index, on_change=on_change))
+            console.stop_tui()
+
+        self.assertIsNone(result)
+        self.assertEqual(changes, [("plan", True)])
+        self.assertEqual(rows[index]["value"], "on")
+
+    def test_settings_picker_left_right_rotates_choices(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        index = next(i for i, row in enumerate(rows)
+                     if row["name"] == "plan-strategy")
+        spec = rows[index]["spec"]
+        current = rows[index]["raw"]
+        expected = spec.choices[
+            (list(spec.choices).index(current) + 1) % len(spec.choices)]
+        changes = []
+
+        def on_change(row, value, rows):
+            changes.append((row["name"], value))
+            return True
+
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"\x1b[Cq",
+                lambda: console.settings_pick(
+                    rows, selected=index, on_change=on_change))
+            console.stop_tui()
+
+        self.assertEqual(changes, [("plan-strategy", expected)])
+
+    def test_settings_picker_s_saves_and_stays_in_the_table(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        saved = []
+
+        def on_save(current_rows):
+            saved.append(list(current_rows))
+
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"sq",
+                lambda: console.settings_pick(rows, on_save=on_save))
+            console.stop_tui()
+
+        self.assertIsNone(result)
+        self.assertEqual(len(saved), 1)
+
+    def test_settings_status_badge_reflects_dirty_state(self):
+        console = self.console(color=True)
+        rows = settings.Settings().rows()
+        statuses = []
+        original = console._picker_window
+
+        def spy(header, body, selected, status=None):
+            statuses.append(status)
+            return original(header, body, selected, status=status)
+
+        console._picker_window = spy
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"q",
+                lambda: console.settings_pick(rows, dirty=True))
+            self._feed_pick(
+                console, b"q",
+                lambda: console.settings_pick(rows, dirty=False))
+            console.stop_tui()
+
+        self.assertIn(("unsaved", "yellow"), statuses)
+        self.assertIn(("saved", "green"), statuses)
+
+    def test_settings_edit_shows_only_the_focused_box(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console.stream.seek(0)
+            console.stream.truncate(0)
+            text = self._feed_edit(console, b"0.5\r")
+            output = console.stream.getvalue()
+            console.stop_tui()
+
+        self.assertEqual(text, "0.5")
+        # The edit frame is a full repaint that contains no dashboard/chat
+        # boxes; the normal frame rendered afterwards is separate.
+        edit_frames = [chunk for chunk in output.split("\x1b[2J\x1b[H")
+                       if "Setting: temperature" in chunk]
+        self.assertTrue(edit_frames)
+        edit_output = "\n".join(edit_frames)
+        self.assertIn("Value", edit_output)
+        # The persistent ASCII banner stays visible while editing a setting
+        # (the compact boxed label is used on a 20-row terminal).
+        self.assertTrue("MINI CODE" in edit_output
+                        or "__  __" in edit_output)
+        self.assertNotIn("Mini-Code", edit_output)
+        self.assertNotIn("You", edit_output)
+
+    def test_settings_edit_escape_returns_to_the_menu(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            text = self._feed_edit(console, b"\x1b")
+            console.stop_tui()
+        self.assertIsNone(text)
+
+    def test_settings_secret_uses_a_focused_masked_box(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console.stream.seek(0)
+            console.stream.truncate(0)
+            text = self._feed_edit(
+                console, b"sk-123\r", name="api-key", secret=True)
+            output = console.stream.getvalue()
+            console.stop_tui()
+
+        self.assertEqual(text, "sk-123")
+        edit_frames = [chunk for chunk in output.split("\x1b[2J\x1b[H")
+                       if "Setting: api-key" in chunk]
+        self.assertTrue(edit_frames)
+        edit_output = "\n".join(edit_frames)
+        self.assertIn("******", edit_output)
+        self.assertNotIn("sk-123", edit_output)
+
+    def test_settings_choose_returns_the_picked_value_or_exit(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            picked = self._feed_choose(
+                console, b"\x1b[B\r", "plan", ["off", "on"],
+                current="off")
+            back = self._feed_choose(
+                console, b"exit", "plan", ["off", "on"], current="off")
+            console.stop_tui()
+        self.assertEqual(picked, "on")
+        self.assertIsNone(back)
 
     def test_caret_column_uses_display_width_for_cjk(self):
         console = self.console()
@@ -363,9 +816,22 @@ class TuiConsoleTest(unittest.TestCase):
             console.set_summary(["version 1.0", "model test"])
             console.render()
             content = "\n".join(console._last_frame_lines)
+            lines = list(console._last_frame_lines)
             console.stop_tui()
         self.assertIn("__  __", content)
         self.assertIn("version 1.0", content)
+        # The mark is the same centered, unboxed banner as --tui off, above
+        # the dashboard box.
+        art = next(line for line in lines if "__  __" in line)
+        self.assertTrue(art.strip().startswith("__"))
+        self.assertGreater(len(art) - len(art.lstrip(" ")), 2)
+        art_index = lines.index(art)
+        header_index = next(index for index, line in enumerate(lines)
+                            if "Mini-Code" in line)
+        self.assertLess(art_index, header_index)
+        tagline_index = next(index for index, line in enumerate(lines)
+                             if "minimal coding agent CLI" in line)
+        self.assertLess(tagline_index, header_index)
 
     def test_the_middle_pane_scrolls(self):
         console = self.console()
@@ -406,6 +872,8 @@ class TuiConsoleTest(unittest.TestCase):
                 tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((50, 16))):
             console.start_tui()
+            # Once a turn exists, notes are the transient bottom notices.
+            console.turn("You", "hello")
             console.note("first warning", "warn")
             console.note("second warning", "warn")
             console.note("third warning", "warn")
@@ -422,6 +890,25 @@ class TuiConsoleTest(unittest.TestCase):
             self.assertTrue(any(set(line.strip()) == {separator}
                                 for line in plain[:warning_index]))
             console.stop_tui()
+
+    def test_startup_notes_are_above_the_first_turn(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.note("API key found for test-model.", "ok")
+            console.note("Shell execution is ENABLED.", "warn")
+            plain = [ui._ANSI_RE.sub("", line)
+                     for line in console._content_lines(50)]
+            console.stop_tui()
+        text = "\n".join(plain)
+        self.assertIn("API key found for test-model.", text)
+        self.assertIn("Shell execution is ENABLED.", text)
+        self.assertLess(text.index("API key found"),
+                        text.index("No conversation yet"))
+        self.assertLess(text.index("Shell execution"),
+                        text.index("No conversation yet"))
 
     def test_escape_does_not_dismiss_an_active_question(self):
         console = self.console()
@@ -503,6 +990,21 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertIn("Plan", last_screen)
         self.assertIn("1. inspect", last_screen)
         self.assertIn("working on it", last_screen)
+
+    def test_empty_hint_can_be_hidden_before_a_session_starts(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console.set_empty_hint(False)
+            hidden = "\n".join(console._content_lines(50))
+            console.set_empty_hint(True)
+            shown = "\n".join(console._content_lines(50))
+            console.stop_tui()
+        self.assertNotIn("No conversation yet", hidden)
+        self.assertIn("No conversation yet", shown)
 
     def test_load_history_populates_the_core_view(self):
         console = self.console()
@@ -643,7 +1145,7 @@ args = argparse.Namespace(
     enable_subagents=False, skills=False, llm_timeout=30, tool_timeout=30,
     max_context_tokens=None, plan=False, verbose=False, scratchpad=False,
     background=False, compaction_strategy="summarise", plan_strategy=None,
-    tui="on")
+    no_settings=True, tui="on")
 
 def slow(messages, *a, **k):
     time.sleep(30)
@@ -720,7 +1222,7 @@ args = argparse.Namespace(
     enable_subagents=False, skills=False, llm_timeout=30, tool_timeout=30,
     max_context_tokens=None, plan=False, verbose=False, scratchpad=False,
     background=False, compaction_strategy="summarise", plan_strategy=None,
-    tui="on")
+    no_settings=True, tui="on")
 
 def fake(messages, *a, **k):
     return ("Hello from stub.", [], {"prompt_tokens": 1,
@@ -1092,6 +1594,27 @@ class TuiHeaderRefreshTest(unittest.TestCase):
             next(line for line in after.splitlines()
                  if line.startswith("context:")),
         )
+
+    def test_all_preset_refreshes_permissions_and_shell_header(self):
+        with tempfile.TemporaryDirectory() as work, \
+                tempfile.TemporaryDirectory() as cache:
+            console = tui.TuiConsole(stream=_FakeTty(), color=False,
+                                     unicode=False)
+            args = make_args(work, cache)
+            args.tui = True
+            session = AgentSession(args, console=console)
+            with mock.patch.object(
+                    tui.shutil, "get_terminal_size",
+                    return_value=os.terminal_size((80, 24))), \
+                    mock.patch.object(tui.TuiConsole,
+                                      "start_scroll_listener"):
+                console.start_tui()
+                session.start_new_session()
+                session._apply_all_settings()
+                summary = "\n".join(console._summary_lines)
+                console.stop_tui()
+
+        self.assertIn("permissions: sudo | shell: on", summary)
 
 
 class TuiInfoAndColorTest(unittest.TestCase):

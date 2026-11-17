@@ -80,6 +80,9 @@ except ModuleNotFoundError:  # pragma: no cover - bare images (Terminal-Bench)
     requests = _RequestsShim
 
 
+from . import media
+
+
 def oneline(text, limit=None):
     """Collapse ``text`` onto a single line, optionally truncated to ``limit``.
 
@@ -129,14 +132,14 @@ def usage_int(usage, key):
     return coerce_usage_int((usage or {}).get(key))
 
 
-def determine_vllm_model(server_url, api_key=None, timeout=120):
-    """In case of a vLLm local server, read the first served model id from
-    ``{server_url}/v1/models`` so the caller does not have to name the model.
+def list_served_models(server_url, api_key=None, timeout=120):
+    """Return the model ids advertised by an OpenAI-compatible server.
 
-    Returns the model id, or ``None`` if the server could not be reached or
-    did not return a usable response (never raises).
+    The probe is best-effort and never raises: an unreachable server, a bad
+    response or a non-JSON body returns ``None`` so callers can tell "could not
+    check" apart from "the server serves no models" (``[]``).
     """
-    url = f"{server_url}/v1/models"
+    url = f"{str(server_url).rstrip('/')}/v1/models"
 
     headers = {
         "Content-Type": "application/json"
@@ -151,9 +154,11 @@ def determine_vllm_model(server_url, api_key=None, timeout=120):
             timeout=timeout
         )
         response.raise_for_status()
-
-        result = response.json().get('data', [{}])[0]
-        return result.get("id", "")
+        data = response.json().get("data", [])
+        if not isinstance(data, list):
+            return None
+        return [item.get("id") for item in data
+                if isinstance(item, dict) and item.get("id")]
 
     except requests.exceptions.RequestException:
         # Silent by design: this is a best-effort probe, and the caller already
@@ -161,8 +166,46 @@ def determine_vllm_model(server_url, api_key=None, timeout=120):
         # scribble over the session banner.
         return None
 
-    except (json.JSONDecodeError, KeyError, IndexError):
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError,
+            AttributeError):
         return None
+
+
+def probe_api_key(server_url, api_key, timeout=5):
+    """Check whether an API key is accepted by ``{server_url}/v1/models``.
+
+    Returns ``True`` when the server accepts the key (2xx), ``False`` when it
+    explicitly rejects it (401/403), and ``None`` when the result is unknown
+    (network failure, endpoint missing, server error). Never raises.
+    """
+    if not api_key:
+        return None
+    url = f"{str(server_url).rstrip('/')}/v1/models"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+    except requests.exceptions.RequestException:
+        return None
+    status = getattr(response, "status_code", None)
+    if status in (401, 403):
+        return False
+    if isinstance(status, int) and 200 <= status < 300:
+        return True
+    return None
+
+
+def determine_vllm_model(server_url, api_key=None, timeout=120):
+    """In case of a vLLm local server, read the first served model id from
+    ``{server_url}/v1/models`` so the caller does not have to name the model.
+
+    Returns the model id, or ``None`` if the server could not be reached or
+    did not return a usable response (never raises).
+    """
+    models = list_served_models(server_url, api_key=api_key, timeout=timeout)
+    return models[0] if models else None
 
 
 def unpack_llm_result(result):
@@ -249,7 +292,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
     # unexpected keys.
     payload = {
         "model": model,
-        "messages": messages,
+        "messages": media.materialize_messages(messages),
         "temperature": temperature,
     }
 

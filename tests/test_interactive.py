@@ -1165,6 +1165,100 @@ class FarewellBoxTest(_SessionCase):
         self.assertIn("resume", text)
         self.assertIn("--load-last-session", text)
 
+    def test_the_ascii_mark_is_centered_above_the_goodbye_box(self):
+        session = self.make()
+        session.console.emit("")
+
+        session.shutdown()
+
+        text = self.output()
+        self.assertIn("__  __", text)
+        lines = text.splitlines()
+        top = next(index for index, line in enumerate(lines)
+                   if "MiniCodeCLI v" in line and line.startswith("+"))
+        art_index = next(index for index, line in enumerate(lines)
+                         if "__  __" in line)
+        tagline_index = next(index for index, line in enumerate(lines)
+                             if "minimal coding agent CLI" in line)
+        sign_index = next(index for index, line in enumerate(lines)
+                          if "Goodbye, and thanks" in line)
+        art = lines[art_index]
+        tagline = lines[tagline_index]
+        self.assertLess(art_index, top)
+        self.assertLess(tagline_index, top)
+        self.assertLess(art_index, sign_index)
+        self.assertTrue(art.strip().startswith("__"))
+        self.assertGreater(len(art) - len(art.lstrip(" ")), 2)
+        # The mark is centered over the box width, not the terminal width.
+        box_width = len(lines[top])
+        art_width = max(len(line) for line in ui.LOGO)
+        expected = max((box_width - art_width) // 2, 0)
+        self.assertEqual(len(tagline) - len(tagline.lstrip(" ")), expected)
+        bottom = [line for line in lines if line.startswith("+")][-1]
+        self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
+
+    def test_api_key_found_is_announced_for_the_selected_model(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+        session.api_key = "sk-test"
+        session.settings.api_key_env = "MINI_CODE_API_KEY"
+        session.model = "test-model"
+
+        session.print_announcements()
+
+        self.assertIn(
+            "API key found for test-model (MINI_CODE_API_KEY).",
+            self.output())
+
+    def test_plain_startup_prints_the_mark_before_and_after_the_decision(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+        original = session.start_session
+        before_start = {}
+
+        def marked_start():
+            before_start["text"] = self.output()
+            original()
+
+        with mock.patch.object(session, "start_session",
+                               side_effect=marked_start), \
+                mock.patch.object(session, "_read_user_line",
+                                  return_value="quit"):
+            session.run()
+
+        before = before_start["text"]
+        self.assertIn("__  __", before)
+        self.assertIn("minimal coding agent CLI", before)
+        after = self.output()[len(before):]
+        self.assertIn("__  __", after)
+        self.assertIn("minimal coding agent CLI", after)
+
+    def test_shutdown_before_a_session_prints_the_no_session_farewell(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+
+        session.shutdown()
+
+        text = self.output()
+        self.assertIn("No session was started. Goodbye!", text)
+        self.assertIn("__  __", text)
+        self.assertIn("not started", text)
+        self.assertNotIn("Saved session to", text)
+
+    def test_exiting_at_the_resume_prompt_prints_the_goodbye_box(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+        with mock.patch.object(AgentSession, "show_resume_choice",
+                               return_value="exit"):
+            with self.assertRaises(SystemExit):
+                session._resume_previous(self.cache_dir)
+
+        text = self.output()
+        self.assertIn("User chose to exit! Exiting.", text)
+        self.assertIn("No session was started. Goodbye!", text)
+        self.assertIn("__  __", text)
+        self.assertIn("MiniCodeCLI", text)
+
     def test_it_is_not_the_startup_banner(self):
         # The welcome box lists how the session *will* run; the farewell box
         # must not repeat any of that once it is over.

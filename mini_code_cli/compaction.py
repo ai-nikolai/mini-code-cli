@@ -25,6 +25,8 @@ in-flight-tail wiring for every strategy.
 
 import json
 import re
+
+from . import media
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -50,7 +52,7 @@ FALLBACK_SUMMARY_CHARS = 6_000
 
 
 def _clip(text, limit):
-    text = " ".join(str(text or "").split())
+    text = " ".join(media.content_text(text).split())
     return text if len(text) <= limit else text[:limit] + " [...]"
 
 
@@ -201,6 +203,9 @@ def cap_messages(messages, limit=MAX_STRATEGY_CHARS):
         message = dict(message) if isinstance(message, dict) else message
         if isinstance(message, dict):
             content = message.get("content")
+            if isinstance(content, list):
+                content = media.content_text(content)
+                message["content"] = content
             if isinstance(content, str) and len(content) > remaining:
                 message["content"] = (content[:remaining]
                                       + "\n[... truncated for compaction ...]")

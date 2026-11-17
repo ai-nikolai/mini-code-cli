@@ -23,6 +23,7 @@ a unit test) for full control.
 
 from __future__ import annotations
 
+import getpass
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ import threading
 import unicodedata
 from collections import deque
 
+from . import media
 from .planning import DEFAULT_PLAN_STRATEGY
 from .utils import oneline, plural
 
@@ -112,6 +114,8 @@ def _read_escape_sequence(fd, read_one, pending, select_module):
             if not ready:
                 break
         byte = read_one()
+        if not byte:
+            break
         sequence += byte
         if len(sequence) == 1:
             if byte not in (b"[", b"O"):
@@ -359,11 +363,17 @@ class Console:
         self._render_transient_block(text)
 
     # -- building blocks ----------------------------------------------------
-    def box(self, lines, title=None, fg="cyan"):
-        """Render *lines* inside a bordered box and return it as a string."""
+    def box(self, lines, title=None, fg="cyan", min_width=None):
+        """Render *lines* inside a bordered box and return it as a string.
+
+        ``min_width`` is a minimum inner width, used to keep the good-bye box
+        wide enough for the ASCII mark above it.
+        """
         lines = ["" if line is None else str(line) for line in lines]
         content_w = max((_visual_len(line) for line in lines), default=0)
         inner = min(max(content_w + 2, 12), max(self.width - 2, 12))
+        if min_width is not None:
+            inner = max(inner, min(int(min_width), max(self.width - 2, 12)))
         if title is not None:
             inner = max(inner, _visual_len(title) + 4)
 
@@ -429,8 +439,9 @@ class Console:
         return oneline(text, limit)
 
     # -- semantic renderers -------------------------------------------------
-    def banner(self, title, lines, fg="cyan"):
-        self.print_box(lines, title=title, fg=fg)
+    def banner(self, title, lines, fg="cyan", min_width=None):
+        self.emit(self.box(lines, title=title, fg=fg,
+                           min_width=min_width))
 
     def turn(self, role, content, accent="cyan", badge=None):
         """Render a single conversation turn (user / assistant / system).
@@ -783,12 +794,12 @@ class Console:
         self.emit(self.style("-" * self.width, fg="gray", dim=True))
         for msg in messages:
             role = msg.get("role", "?")
-            content = msg.get("content", "")
+            content = media.content_text(msg.get("content"))
             self.emit(self.style(f"{self.glyph('role')} {role}", fg="magenta", bold=True))
             if role == "tool":
                 self.emit(f"    tool result for id {msg.get('tool_call_id', '')}: {self._oneline(content, 200)}")
             elif content:
-                for line in str(content).splitlines():
+                for line in content.splitlines():
                     self.emit(f"    {line}")
             else:
                 self.emit("    (no content)")
@@ -819,23 +830,26 @@ class Console:
             f"compaction  : {compaction_strategy or 'summarise'}",
             f"planning    : {planning}",
         ]
-        self._print_logo()
+        self.print_mark()
         self.banner(f"MiniCodeCLI v{version}", lines, fg="cyan")
 
-    def _print_logo(self):
-        """Print the ASCII mark above the welcome box.
+    def print_mark(self, fg="cyan", tagline_fg=None, center_width=None):
+        """Print the centered ASCII mark and tagline (no box).
 
-        The art is skipped on very narrow terminals; wrapping a logo is worse
-        than omitting it. Colour is optional, so piped logs still show the
-        plain mark.
+        ``center_width`` centers the mark over a narrower box (the good-bye
+        box) instead of the whole terminal. The art is skipped on very narrow
+        targets; wrapping a logo is worse than omitting it. Colour is optional,
+        so piped logs still show the plain mark.
         """
         art_width = max(len(line) for line in LOGO)
-        if self.width < art_width + 4:
+        width = (self.width if center_width is None
+                 else min(int(center_width), self.width))
+        if width < art_width + 4:
             return
-        pad = " " * max((self.width - art_width) // 2, 0)
+        pad = " " * max((width - art_width) // 2, 0)
         for line in LOGO:
-            self.emit(pad + self.style(line, fg="cyan", bold=True))
-        self.emit(pad + self.style(TAGLINE, dim=True))
+            self.emit(pad + self.style(line, fg=fg, bold=True))
+        self.emit(pad + self.style(TAGLINE, fg=tagline_fg, dim=True))
         self.emit()
 
     def farewell(self, version, rows, sign_off=None):
@@ -855,18 +869,38 @@ class Console:
         policy).
         """
         label_w = max((len(str(label)) for label, _ in rows), default=0)
-        lines = [sign_off or "Goodbye, and thanks for using MiniCodeCLI!", ""]
-        lines += [f"{str(label).ljust(label_w)} : {value}" for label, value in rows]
+        sign = sign_off or "Goodbye, and thanks for using MiniCodeCLI!"
+        row_lines = [f"{str(label).ljust(label_w)} : {value}"
+                     for label, value in rows]
+
+        # Center the mark over the *box*, not the whole terminal, so it sits
+        # directly above the good-bye frame. Compute the same width `box` will
+        # use for the content and title.
+        title = f"MiniCodeCLI v{version} - goodbye"
+        art_width = max(len(line) for line in LOGO)
+        content_width = max(
+            [_visual_len(sign)] + [_visual_len(line) for line in row_lines])
+        inner = min(max(content_width + 2, 12), max(self.width - 2, 12))
+        # Keep the box wide enough for the mark above it, so the mark can be
+        # centered over the box rather than over the whole terminal.
+        inner = max(inner, min(art_width + 2, max(self.width - 2, 12)))
+        inner = max(inner, _visual_len(title) + 4)
+        box_width = inner + 2
+        self.print_mark(fg="yellow", tagline_fg="yellow",
+                        center_width=box_width)
+        lines = [sign, ""] + row_lines
         # Yellow, not the welcome banner's cyan: this is the one box that
         # *closes* the session, so it reads as a distinct, valedictory note
         # rather than the startup banner reappearing. Colours only apply on a
         # colour-capable TTY (see :meth:`box`), so piped/ASCII output is
         # unchanged.
-        self.banner(f"MiniCodeCLI v{version} - goodbye", lines, fg="yellow")
+        self.banner(title, lines, fg="yellow", min_width=inner)
 
-    def announce_api_key(self, present):
+    def announce_api_key(self, present, source="", model=""):
         if present:
-            self.note("API key found (MINI_CODE_API_KEY).", "ok")
+            where = f" for {model}" if model else ""
+            origin = f" ({source})" if source else ""
+            self.note(f"API key found{where}{origin}.", "ok")
         else:
             self.note("No API key found. Set MINI_CODE_API_KEY='sk-...' if your server needs one.",
                       "warn")
@@ -882,6 +916,80 @@ class Console:
                   "warn")
 
     # -- interactive input --------------------------------------------------
+    def choose(self, title, options, default=1, prompt="> ",
+               allow_exit=False):
+        """Render a numbered choice and return the 1-based selection.
+
+        A blank answer, an unknown answer or EOF falls back to ``default``.
+        The fixed TUI overrides this with an arrow-key picker.
+        """
+        options = list(options or [])
+        if not options:
+            return None
+        if title:
+            self.emit(title)
+        for index, option in enumerate(options, 1):
+            self.emit(f"  {index}. {option}")
+        answer = self.read_line(prompt)
+        if answer is not None:
+            text = answer.strip()
+            if allow_exit and text.lower() in ("exit", "back"):
+                return None
+            if not text:
+                return default
+            if text.isdigit() and 1 <= int(text) <= len(options):
+                return int(text)
+            for index, option in enumerate(options, 1):
+                if text.lower() == str(option).lower():
+                    return index
+        return default
+
+    def settings_edit(self, name, current="", choices=(), secret=False,
+                      current_label=None):
+        """Prompt for one setting's value (plain console fallback)."""
+        if secret:
+            return self.read_secret(
+                f"{name} (hidden; type 'exit' to go back): ")
+        label = current if current_label is None else current_label
+        suffix = f" [{label}]" if label not in ("", None) else ""
+        if choices:
+            suffix += " (choices: " + ", ".join(str(c) for c in choices) + ")"
+        prompt = f"{name}{suffix} (or 'exit'): "
+        return self.read_line(prompt)
+
+    def settings_secret(self, name, current="", current_label=None):
+        return self.settings_edit(name, current=current,
+                                  current_label=current_label, secret=True)
+
+    def settings_choose(self, name, options, current="", current_label=None):
+        """Prompt for a fixed-value setting; ``None`` means "go back"."""
+        options = list(options)
+        if not options:
+            return None
+        default = (options.index(current) + 1
+                   if current in options else 1)
+        label = current if current_label is None else current_label
+        choice = self.choose(f"{name} (current: {label})", options,
+                             default=default, allow_exit=True)
+        return None if choice is None else options[choice - 1]
+
+    def read_secret(self, prompt_text="API key: "):
+        """Read a secret without echoing it.
+
+        Uses :mod:`getpass` on a real terminal and falls back to a normal line
+        read when stdin is not a TTY (tests, piped input).
+        """
+        if self.parent_console is not None:
+            return self.parent_console.read_secret(prompt_text)
+        try:
+            return getpass.getpass(prompt_text)
+        except (EOFError, KeyboardInterrupt):
+            return None
+        except Exception:
+            # getpass can fail on unusual terminals; a plain read is better
+            # than aborting the first-run wizard.
+            return self.read_line(prompt_text)
+
     def read_line(self, prompt_text="", multiline=False, tui=False):
         """Print an (already-styled) prompt and read one line from stdin.
 

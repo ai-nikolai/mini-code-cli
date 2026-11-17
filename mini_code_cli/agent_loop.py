@@ -41,9 +41,13 @@ from . import subagents
 from . import skills
 from . import agent_files
 from . import compaction as compaction_mod
+from . import media
 from . import planning
+from . import recovery
 from . import plan as plan_utils
+from . import settings as settings_mod
 from . import tokens as tokens_mod
+from . import todos as todos_mod
 from .config import (
     DEFAULT_CACHE_LOCATION,
     DEFAULT_MODEL_URL,
@@ -143,6 +147,7 @@ def parse_args():
 
     # Other settings:
     parser.add_argument("--cache-dir", type=str, help=f"The cache dir for the session histories. default={DEFAULT_CACHE_LOCATION}")
+    parser.add_argument("--no-settings", action="store_true", help="Do not load, prompt for, or save session settings. Useful for CI and benchmark runs.")
     parser.add_argument("--restore-session", type=str, help="A previous session to continue: its directory (e.g. ~/.cache/mini/sessions/1792028090823027-a9d77653/) or a bare session id under --cache-dir. A session folder must hold a summary_history.json recorder plus the history_{n}.json segment it names; anything else starts a fresh session.")
     parser.add_argument("-l","--load-last-session", action="store_true", help="Continue the most recent previous session recorded in the --allowed-dir .mini pointer, in place and without the resume prompt, instead of starting fresh. --restore-session takes precedence if also given.")
 
@@ -167,12 +172,18 @@ def parse_args():
                         help="How to compact history. summarise: summary only (default). predict-files: summary + re-read the files the model predicts it needs. predict-messages: summary + the original messages the model predicts are worth keeping.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
-                        help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify-step: same, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+                        help="Planning strategy (implies --plan when given). plan-verify2 (default): author a plan, verify with a machine-readable DONE/INCOMPLETE verdict and skip the final step on DONE. plan-verify: author a plan, review it, and keep the final step only when it calls a tool. plan-verify-step: same as plan-verify, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+    parser.add_argument("--strict-verify", action="store_true",
+                        help="Use the evidence-based strict verification prompt for every planning verify/review stage (plan-verify, plan-verify2, plan-verify-step) and also verify after open-plan work settles. Unproven requirements count as unfinished.")
+    parser.add_argument("--runtime-strategy", choices=recovery.RUNTIME_STRATEGIES,
+                        default=recovery.DEFAULT_RUNTIME_STRATEGY,
+                        help="Runtime recovery strategy. normal (default): no automatic prompts. prompt-change: after 3 consecutive failures of the same call or tool, prompt the model to rethink its approach. prompt-change-plan: also start a fresh plan for the current goal.")
     parser.add_argument("--allow-nudge", action="store_true",
                         help="Plan mode only: when the model replies without a tool call, ask it to continue (or reply DONE) before running the plan review. Works with every --plan-strategy.")
     parser.add_argument("--nudge-limit", type=int, default=1,
                         help="Maximum continuation nudges per text-only stop with --allow-nudge. default=1")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
+    parser.add_argument("--dynamic-todo-tracking", action="store_true", help="Give the agent a structured, session-local todo list (todo_write/todo_update/todo_list) and a /todo view. Works independently of plan mode and the scratchpad.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
     parser.add_argument("--tui", nargs="?", const="on", default="auto",
                         choices=("auto", "on", "off"),
@@ -180,6 +191,8 @@ def parse_args():
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
     parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
+    parser.add_argument("--super", action="store_true",
+                        help="The kitchen-sink behaviour preset: --plan with plan-verify2 and strict verification, --enable-shell/--enable-subagents/--skills/--sudo/--background, --auto-mode, --runtime-strategy prompt-change, --dynamic-todo-tracking, and the default nudge/compaction/timeouts/verbose/scratchpad values. It leaves the model, URL and API key untouched.")
 
     # Output verbosity
     parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
@@ -198,9 +211,19 @@ def parse_args():
     if args.all_last:
         args.load_last_session = True
 
+    if args.super:
+        # A behaviour preset: the model, URL and API key stay exactly as
+        # configured on the command line/environment.
+        for attr, value in settings_mod.SUPER_PRESET.items():
+            setattr(args, attr, value)
+
     # A planning strategy is only meaningful in plan mode, so asking for one
     # implies the flag (the banner and help then agree with the session).
     if getattr(args, "plan_strategy", None):
+        args.plan = True
+    # Strict verification only runs in plan mode; enabling it alone should not
+    # silently do nothing.
+    if getattr(args, "strict_verify", False):
         args.plan = True
 
     return args
@@ -226,8 +249,11 @@ def print_help(args, console=None):
         ("/history <n>", "show the full messages recorded for turn n"),
         ("/history last", "...for the most recent turn"),
         ("/plan", "show the current goal + plan (plan mode only)"),
+        ("/todo", "show the dynamic todo list (/todo clear empties it)"),
+        ("/image <path>", "stage an image for the next message (/image clear)"),
         ("/context", "show how the context window is used (tokens + percentages)"),
         ("/background [id]", "show foreground activity + background tasks (or one task's output)"),
+        ("/settings", "show/change session settings (number or name)"),
         ("/expand [n]", "show the full detail of the nth most recent tool call"),
         ("/skip-plan <prompt>", "send a prompt without generating/reviewing a plan"),
         ("/reset [<n>|last]", "rewind to the end of turn n (drops everything after it);"),
@@ -320,16 +346,21 @@ def _compaction_trigger(messages, token_limit, reserved_output_tokens, current_t
     return False, ""
 
 
-#: Prefixes of user messages the *loop* injects (plan authoring and plan
-#: review). They are loop bookkeeping, not instructions from the user, so the
-#: in-flight-tail scan must skip them when it looks for the turn to carry across
-#: a compaction -- otherwise, right after a plan is generated, the plan text
-#: would be treated as the user's request and the real instruction summarised
-#: away. The matching injection points are in ``_generate_plan_and_inject`` and
-#: ``_review_plan_completion``.
+#: Prefixes of user messages the *loop* injects (plan authoring, review and
+#: verification). They are loop bookkeeping, not instructions from the user, so
+#: the in-flight-tail scan must skip them when it looks for the turn to carry
+#: across a compaction -- otherwise, right after a plan is generated, the plan
+#: text would be treated as the user's request and the real instruction
+#: summarised away. The matching injection points are in
+#: ``_generate_plan_and_inject``, ``_review_plan_completion`` and the
+#: ``plan-verify2`` branch of ``_run_turn``.
 _LOOP_INJECTED_USER_PREFIXES = (
     "Current plan for the goal (from CURRENT_PLAN.md):",
+    "Recovery plan for the goal:",
     "Plan completion summary (from CURRENT_PLAN.md):",
+    "Plan verification (from CURRENT_PLAN.md):",
+    "Plan verification (open-plan):",
+    "Image read from the task:",
 )
 
 
@@ -337,7 +368,7 @@ def _is_loop_injected(message):
     """Whether ``message`` is a user turn this loop injected, not the user's own."""
     if not isinstance(message, dict) or message.get("role") != "user":
         return False
-    content = message.get("content") or ""
+    content = media.content_text(message.get("content") or "")
     return str(content).lstrip().startswith(_LOOP_INJECTED_USER_PREFIXES)
 
 
@@ -652,6 +683,33 @@ def _looks_complete(text):
 
 
 
+def print_no_session_farewell(console, model=None, started_at=None):
+    """Print the good-bye mark/box when an interactive startup is cancelled."""
+    from . import __version__ as version
+
+    elapsed = max(time.monotonic() - (started_at or time.monotonic()), 0.0)
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    duration = (f"{hours}h {minutes:02d}m" if hours
+                else f"{minutes}m {seconds:02d}s")
+    rows = [
+        ("model", model or "(auto)"),
+        ("session", "not started"),
+        ("duration", duration),
+        ("resume", "mini-code"),
+    ]
+    console.farewell(
+        version, rows, sign_off="No session was started. Goodbye!")
+
+
+def build_console(args):
+    """Return ``(console, tui_mode)`` for these args."""
+    mode = tui_mod.tui_mode(getattr(args, "tui", "auto"))
+    use_tui = (mode == "on"
+               or (mode == "auto" and tui_mod.TuiConsole.supported()))
+    return (tui_mod.TuiConsole() if use_tui else ui.console), mode
+
+
 class AgentSession:
     """A single interactive agent session.
 
@@ -664,8 +722,12 @@ class AgentSession:
     EXIT_COMMANDS = {"quit", "exit", "/quit", "/exit", "exit()", "quit()"}
     CLEAR_COMMANDS = {"clear", "/clear"}
 
-    def __init__(self, args, console=None, background_mode = False):
+    def __init__(self, args, console=None, background_mode = False,
+                 settings=None, defer_model=False):
         self.args = args
+        self.settings = settings or settings_mod.Settings.from_args(args)
+        if settings is None:
+            self.settings.apply_to_args(args)
         self.allowed_dir = os.path.abspath(args.allowed_dir)
         self.cache_dir = args.cache_dir if args.cache_dir else DEFAULT_CACHE_LOCATION
 
@@ -680,20 +742,28 @@ class AgentSession:
 
         self.tui_mode = tui_mod.tui_mode(getattr(args, "tui", "auto"))
         if console is None:
-            use_tui = (self.tui_mode == "on"
-                       or (self.tui_mode == "auto" and tui_mod.TuiConsole.supported()))
-            console = tui_mod.TuiConsole() if use_tui else ui.console
+            console, _mode = build_console(args)
         self.console = console
         self.console.verbose = getattr(args, "verbose", False)
 
         # LLM / server configuration.
         self.server_url = f"{args.url}"
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
-        self.model = self._resolve_model(args)
+        # Startup construction may defer model resolution until the session
+        # decision, so no settings/model probe output precedes the resume offer.
+        self.model = (args.model if defer_model
+                      else self._resolve_model(args))
         # A higher reply budget is the CLI default; an explicit --max-tokens
         # always wins, and a small-window model gets at most half its window.
-        if getattr(args, "max_tokens", None) is None:
+        # With deferred settings/model resolution this is filled in after the
+        # session decision, so a saved --max-tokens value is not shadowed.
+        if not defer_model and getattr(args, "max_tokens", None) is None:
             args.max_tokens = default_max_output_tokens(self.model)
+        self.settings.capture_from_args(args)
+        if self.settings.api_key or self.settings.api_key_env:
+            # The model may have been detected from the server, so associate
+            # the active key with the model actually in use.
+            self.settings.remember_key()
 
         # Background task registry. It is independent of the foreground loop;
         # tools and /background read snapshots from it.
@@ -706,6 +776,9 @@ class AgentSession:
         self._activity_label = None
         self._activity_started = None
         self._last_activity = None
+        self.dynamic_todo_tracking = bool(
+            getattr(args, "dynamic_todo_tracking", False))
+        self.todo_store = None
 
         self._register_tools(args)
 
@@ -739,6 +812,17 @@ class AgentSession:
             self.console.note(
                 "--allow-nudge only applies in plan mode; ignoring it.", "warn")
         self._text_only_nudges = 0
+        self.strict_verify = bool(getattr(self.args, "strict_verify", False))
+        self.runtime_strategy = recovery.normalise(
+            getattr(self.args, "runtime_strategy",
+                    recovery.DEFAULT_RUNTIME_STRATEGY))
+        self._reset_runtime_recovery()
+        self._runtime_prompts_this_turn = 0
+        self._runtime_pending_prompt = None
+        self._runtime_pending_replan = False
+        self._last_tool_result_text = ""
+        self._turn_goal = ""
+        self._pending_images = []
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = (self.tui_mode != "off"
@@ -757,6 +841,9 @@ class AgentSession:
         # funnel through there (quit, exit, EOF, a /quit command) and a repeated
         # box would read like a second session had ended.
         self._farewell_shown = False
+        # False until start_new_session/restore_previous_session has produced
+        # a real session. shutdown() must not try to persist an unstarted one.
+        self._session_started = False
 
         # Token accounting. ``token_stats`` covers the *current history
         # segment* and is reset when compaction rolls over to a new one;
@@ -837,6 +924,11 @@ class AgentSession:
         """
         try:
             if self.restore_previous_session(restore_directory):
+                ask = (settings_mod.interactive_startup(self.args)
+                       and not self.background_mode)
+                self._adopt_settings(settings_mod.resolve_for_startup(
+                    self.args, self.console, source_dir=restore_directory,
+                    new_session=False, ask=ask))
                 return True
         except Exception as e:
             self.console.note(
@@ -861,7 +953,13 @@ class AgentSession:
 
         answer = self.show_resume_choice()
         if answer == "exit":
+            # This exit happens before a session exists, so it cannot use
+            # shutdown() (which persists an empty session). Print the same
+            # good-bye mark/box directly instead.
+            if self.tui_active:
+                self.console.stop_tui()
             self.console.note("User chose to exit! Exiting.", "warn")
+            self._farewell_no_session()
             raise SystemExit("")
         if answer != "resume":
             self.console.note("Will start with new session!", "warn")
@@ -886,12 +984,28 @@ class AgentSession:
         self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
         self.restored_session = False
+        # A new session starts from defaults (plus CLI/environment), not from
+        # the previous session in this folder. The previous API-key archive is
+        # the one thing retained; selecting a model can load its stored key.
+        source = None
+        if not self.background_mode:
+            try:
+                source = find_last_session_dir(self.allowed_dir)
+            except Exception as e:
+                self.console.note(
+                    f"Could not load previous API keys: {e}", "warn")
+        ask = (settings_mod.interactive_startup(self.args)
+               and not self.background_mode)
+        self._adopt_settings(settings_mod.resolve_for_startup(
+            self.args, self.console, source_dir=source, new_session=True,
+            ask=ask, keep_saved_values=False))
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
         self.background_tasks.set_log_dir(
             os.path.join(self.session_dir, "background"))
         self._prepare_agent_files()
+        self._save_settings()
 
         self.history_index = 0
         self.summary = []
@@ -907,6 +1021,7 @@ class AgentSession:
         # Record this session in --allowed-dir/.mini so a later
         # --load-last-session (or the interactive resume offer) can find it.
         self._save_last_session_pointer()
+        self._session_started = True
 
 
     def restore_previous_session(self, restore_directory):
@@ -974,6 +1089,9 @@ class AgentSession:
                 self.session_dir, enabled=self.plan_mode)
             self.background_tasks.set_log_dir(
                 os.path.join(self.session_dir, "background"))
+            if self.dynamic_todo_tracking:
+                # Rebind the todo tools to the restored session's store.
+                self._register_tools(self.args)
             self._prepare_agent_files()
             self.messages = restored
             self.summary = records
@@ -998,6 +1116,7 @@ class AgentSession:
             self.last_prompt_message_count = 0
             self._restore_usage_if_available(restore_directory)
             self.restored_session = True
+            self._session_started = True
 
             # Continuing a session in place makes it the latest one again: keep
             # the pointer aimed at it so a later --load-last-session finds the
@@ -1018,6 +1137,7 @@ class AgentSession:
         """
         self.unique_id = None
         self.session_dir = None
+        self._session_started = False
         self.plan_manager = None
         self.messages = []
         self.summary = []
@@ -1111,6 +1231,23 @@ class AgentSession:
                 self.background_tasks, self._run_background_subagent))
             self.llm_tools.extend(background_mod.background_tools())
 
+        # Structured dynamic todo tracking is orthogonal to plan mode, shell
+        # and the scratchpad. Its store lives in the session cache, not the
+        # worktree.
+        self.dynamic_todo_tracking = bool(
+            getattr(args, "dynamic_todo_tracking", False))
+        if self.dynamic_todo_tracking:
+            expected = os.path.join(self.session_dir, todos_mod.TODO_FILENAME)
+            if self.todo_store is None or self.todo_store.path != expected:
+                self.todo_store = todos_mod.TodoStore(self.session_dir)
+            todo_functions = todos_mod.todo_functions(self.todo_store)
+            self.tools_dict.update(
+                tools.util_get_tools_dict(functions=todo_functions))
+            self.llm_tools.extend(
+                tools.util_get_tools(functions=todo_functions))
+        else:
+            self.todo_store = None
+
 
     def _prepare_agent_files(self):
         """Create the opt-in agent-owned files under ``--allowed-dir/.mini``.
@@ -1127,27 +1264,37 @@ class AgentSession:
             path = agent_files.ensure_open_plan(self.allowed_dir)
             self.console.note(f"Open-plan document: {path}", "info")
 
+    def _render_system_prompt(self):
+        """Return the effective system prompt for the current settings.
+
+        A user-supplied ``--system-prompt`` is never regenerated. Everything
+        else (the tool list, plan/skills/scratchpad blocks) is built from the
+        live session state, so a settings change can rebuild it deliberately.
+        """
+        if self.args.system_prompt:
+            return self.args.system_prompt
+        scratch_path = (agent_files.scratchpad_path(self.allowed_dir)
+                        if self.scratchpad else None)
+        open_plan_path = None
+        if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
+            open_plan_path = agent_files.open_plan_path(self.allowed_dir)
+        todo_path = (self.todo_store.path
+                     if self.dynamic_todo_tracking and self.todo_store else None)
+        return prompts.system_prompt(
+            tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
+            plan_mode=self.plan_mode,
+            skills_dir=self.allowed_dir if self.enable_skills else None,
+            session_dir=self.session_dir,
+            scratchpad_path=scratch_path,
+            scratchpad_dir=(agent_files.mini_dir(self.allowed_dir)
+                            if self.scratchpad else None),
+            open_plan_path=open_plan_path,
+            todo_path=todo_path,
+        )
+
     def _build_initial_messages(self):
         """Assemble the system prompt and optional Agent.md into the first turns."""
-        if self.args.system_prompt:
-            system_prompt = self.args.system_prompt
-        else:
-            scratch_path = (agent_files.scratchpad_path(self.allowed_dir)
-                            if self.scratchpad else None)
-            open_plan_path = None
-            if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
-                open_plan_path = agent_files.open_plan_path(self.allowed_dir)
-            system_prompt = prompts.system_prompt(
-                tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
-                plan_mode=self.plan_mode,
-                skills_dir=self.allowed_dir if self.enable_skills else None,
-                session_dir=self.session_dir,
-                scratchpad_path=scratch_path,
-                scratchpad_dir=(agent_files.mini_dir(self.allowed_dir)
-                                if self.scratchpad else None),
-                open_plan_path=open_plan_path,
-            )
-
+        system_prompt = self._render_system_prompt()
         messages = [{"role": "system", "content": system_prompt}]
         self._persistent_messages = []
 
@@ -1573,16 +1720,17 @@ class AgentSession:
         the DENY-tier limits). We render it as a red box so it stands out on any
         real terminal (it degrades to a plain ASCII box when colour is off).
         """
-        self.console.print_box(
-            [
-                "SUDO MODE: the agent will NEVER ask for permission.",
-                "All tool calls and shell commands run automatically and unattended.",
-                "Only clearly-destructive (DENY-tier) commands are still refused.",
-                "You are responsible for everything it does on this machine.",
-            ],
-            title="DANGER",
-            fg="red",
-        )
+        lines = [
+            "SUDO MODE: the agent will NEVER ask for permission.",
+            "All tool calls and shell commands run automatically and unattended.",
+            "Only clearly-destructive (DENY-tier) commands are still refused.",
+            "You are responsible for everything it does on this machine.",
+        ]
+        if self.tui_active:
+            for line in lines:
+                self.console.note(line, "error")
+        else:
+            self.console.print_box(lines, title="DANGER", fg="red")
 
     def _tui_info_line(self):
         """A one-line session summary for the fixed dashboard."""
@@ -1639,7 +1787,7 @@ class AgentSession:
         turns = []
         for message in self.messages:
             role = message.get("role")
-            content = message.get("content")
+            content = media.content_text(message.get("content"))
             if role not in ("user", "assistant") or not content:
                 continue
             if id(message) in persistent:
@@ -1663,7 +1811,10 @@ class AgentSession:
         API key, unrestricted shell execution and --sudo are exactly the things
         that must not be hidden behind --verbose.
         """
-        self.console.announce_api_key(present=bool(self.api_key))
+        self.console.announce_api_key(
+            present=bool(self.api_key),
+            source=self.settings.api_key_env,
+            model=self.model or "")
 
         if shell_execution_enabled(self.args):
             self.console.announce_shell(
@@ -1735,16 +1886,12 @@ class AgentSession:
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
-        # Startup output comes FIRST, before the session is resolved. The banner
-        # and the flag-dependent warnings (API key / shell / --sudo / an unknown
-        # model) describe how this process is configured -- how much the agent
-        # may do unattended -- so the user must see them *before* being asked
-        # whether to resume an older conversation (and before anything can
-        # consume stdin). None of them depends on which session is finally used:
-        # they read args, allowed_dir, cache_dir, server_url and the resolved
-        # model, plus the provisional id minted in __init__.
+        if isinstance(self.console, tui_mod.TuiConsole):
+            # Before a session exists we are still answering resume/settings
+            # questions; "No conversation yet" would be misleading.
+            self.console.set_empty_hint(False)
         if self.tui and isinstance(self.console, tui_mod.TuiConsole):
-            if not self.console.start_tui():
+            if not self.console.active and not self.console.start_tui():
                 # --tui on requested the fixed view, but this terminal cannot
                 # host it (piped output, an unsupported TERM, ...). Fall back
                 # to the scrolling console instead of leaving self.tui true
@@ -1753,20 +1900,24 @@ class AgentSession:
                 self.console.note(
                     "TUI is not available on this terminal; using the "
                     "scrolling console.", "warn")
-        if not self.tui_active:
-            self.print_welcome()
 
-        # Startup (including the resume offer, which may raise SystemExit) is
-        # inside the guarded region so the alternate screen is always restored.
+        # The plain console shows the mark immediately, even before the resume
+        # offer; print_welcome() shows it again with the session info once a
+        # session has actually started. The TUI has the persistent banner.
+        if not self.tui_active:
+            self.console.print_mark()
+
+        # The resume offer comes first. Settings are loaded only after the
+        # user chooses to resume or start a session, so the banner and the
+        # announcements describe the session that was actually chosen.
         try:
+            self.start_session()
+            if isinstance(self.console, tui_mod.TuiConsole):
+                self.console.set_empty_hint(True)
+            if not self.tui_active:
+                self.print_welcome()
             self.print_announcements()
             self._warn_compaction_budget()
-
-            # Only now resolve the session (resume offer / restore / fresh start),
-            # because all of that can consume input and can replace the id. The id
-            # line and the tip therefore come after it and show the id actually in
-            # use (the banner may have shown the provisional one).
-            self.start_session()
             if self.tui_active:
                 self.console.set_summary(self._tui_header_lines())
                 self.console.set_info_provider(self._tui_info_line)
@@ -1883,10 +2034,16 @@ class AgentSession:
 
         The planning *strategy* changes the plan/review wiring only:
 
-          * ``plan-verify`` (default) -- author a plan, review it when the work
-            settles, then keep the post-review step only when it calls a tool.
-            A no-tool response is shown to the user and ends the turn without
-            being appended.
+          * ``plan-verify2`` (default) -- author a plan, then verify completion with one
+            machine-readable verdict (``STATUS: DONE`` / ``INCOMPLETE``). DONE
+            ends the turn immediately, with no post-review step. An unfinished
+            verdict re-queues the outstanding work and lets the agent act; a
+            second verify follows when the work settles again. If the agent
+            makes no tool call after an unfinished verdict, the turn ends
+            instead of verifying forever.
+          * ``plan-verify`` -- author a plan, review it when the work settles,
+            then keep the post-review step only when it calls a tool. A no-tool
+            answer is shown to the user and ends the turn without being stored.
           * ``plan-verify-step`` -- same plan and review, but always run one
             extra step and keep whatever that step says.
           * ``open-plan`` -- the agent owns a plan document and maintains it
@@ -1896,9 +2053,24 @@ class AgentSession:
         a text-only reply without an explicit completion marker gets up to
         ``--nudge-limit`` continuation messages before the strategy's normal
         review/end path runs.
+
+        ``--strict-verify`` swaps in evidence-based review/verify prompts and,
+        with ``open-plan``, adds a verification pass after the work settles.
+        ``--runtime-strategy`` may inject a recovery prompt after repeated tool
+        failures, and ``prompt-change-plan`` then starts a fresh plan.
         """
         self.messages.append({"role": "user", "content": user_input})
+        if self._pending_images:
+            content = media.user_content(user_input, self._pending_images)
+            self.messages[-1]["content"] = content
+            self._pending_images = []
         self._text_only_nudges = 0
+        verify_pending_action = False
+        self._runtime_prompts_this_turn = 0
+        self._turn_goal = user_input
+        self._reset_runtime_recovery()
+        self._runtime_pending_prompt = None
+        self._runtime_pending_replan = False
 
         if self.plan_mode and not skip_plan:
             self._record_goal_request(user_input)
@@ -1921,6 +2093,7 @@ class AgentSession:
                 # A tool call or a recovered reply means the text-only nudge
                 # budget starts fresh at the next settle.
                 self._text_only_nudges = 0
+                verify_pending_action = False
                 self.console.note(
                     "Continuing with LLM calls until no more tool calls.", "info")
                 continue
@@ -1940,9 +2113,47 @@ class AgentSession:
                                       "content": TEXT_ONLY_NUDGE})
                 self._persist()
                 continue
-            if (not self.plan_mode or skip_plan
-                    or self.plan_strategy == planning.OPEN_PLAN):
+            if (not self.plan_mode or skip_plan):
                 return
+            if (self.plan_strategy == planning.OPEN_PLAN
+                    and not self.strict_verify):
+                return
+            if (self.plan_strategy == planning.PLAN_VERIFY2
+                    or (self.plan_strategy == planning.OPEN_PLAN
+                        and self.strict_verify)):
+                if verify_pending_action:
+                    # The previous verdict said the plan was unfinished, but the
+                    # agent then stopped without a tool call. Verifying the same
+                    # transcript again would loop forever, so end the turn.
+                    self.console.note(
+                        "Plan verification reports unfinished work, but the "
+                        "model made no tool call; ending the turn.", "warn")
+                    return
+                self.console.note("Verifying the plan status.", "info")
+                status, summary = self._verify_plan_completion()
+                self._persist()
+                if status == planning.VERIFY_DONE:
+                    self.console.note("Plan verification: DONE.", "ok")
+                    return
+                label = ("INCOMPLETE" if status == planning.VERIFY_INCOMPLETE
+                         else "UNKNOWN")
+                self.console.note(
+                    f"Plan verification: {label}; letting the agent continue.",
+                    "info")
+                if summary and summary.strip():
+                    # Loop bookkeeping, not user-authored (see
+                    # _LOOP_INJECTED_USER_PREFIXES). The next _step sees the
+                    # outstanding tasks and can act on them.
+                    label = ("Plan verification (open-plan):"
+                             if self.plan_strategy == planning.OPEN_PLAN
+                             else "Plan verification (from CURRENT_PLAN.md):")
+                    self.messages.append({
+                        "role": "user",
+                        "content": label + "\n%s" % summary.strip(),
+                    })
+                    self._persist()
+                verify_pending_action = True
+                continue
             self.console.note("Reviewing the plan, if everything is done.", "info")
             self._review_plan_completion()
             self._persist()
@@ -1956,6 +2167,13 @@ class AgentSession:
             self._persist()
             if not should_continue:
                 return
+
+    def _save_settings(self):
+        """Persist the effective settings into this session's cache folder."""
+        try:
+            self.settings.save(self.session_dir)
+        except OSError as e:
+            self.console.note(f"Could not save session settings: {e}", "warn")
 
     def _save_last_session_pointer(self):
         """Record this session's directory in --allowed-dir/.mini.
@@ -2031,7 +2249,7 @@ class AgentSession:
         """Return the content of the most recent assistant (non tool-call) turn."""
         for m in reversed(self.messages):
             if m.get("role") == "assistant" and not m.get("tool_calls"):
-                return m.get("content") or ""
+                return media.content_text(m.get("content"))
         return ""
 
     # -- plan mode ---------------------------------------------------------
@@ -2044,14 +2262,21 @@ class AgentSession:
             return
         self.plan_manager.write_goal(stripped)
 
-    def _generate_plan_and_inject(self, current_instruction):
+    def _generate_plan_and_inject(self, current_instruction, recovery=False):
         """Ask the model to author a plan for the current instruction.
+
+        ``recovery`` marks the plan as a post-failure re-plan: it gets its own
+        label and, in ``open-plan`` mode, is not written into
+        ``CURRENT_PLAN.md`` because that document belongs to the agent.
         """
         plan_prompt_text = prompts.plan_prompt(self.messages, current_instruction)
         plan_text = ""
         self._begin_activity("generating plan")
         try:
-            self.console.note("Generating a plan for the current goal...", "info")
+            self.console.note(
+                ("Generating a recovery plan for the current goal..."
+                 if recovery else "Generating a plan for the current goal..."),
+                "info")
             self.console.start_thinking("planning")
             # The loop's own bookkeeping requests (plan authoring / review /
             # compaction) are single user turns with no ``tools``, so the
@@ -2085,28 +2310,44 @@ class AgentSession:
             self.console.stop_thinking()
             self._end_activity()
 
-        self.plan_manager.write_plan(plan_text)
+        if not (recovery and self.plan_mode
+                and self.plan_strategy == planning.OPEN_PLAN):
+            # open-plan owns its document; the loop must not overwrite it.
+            self.plan_manager.write_plan(plan_text)
         if plan_text and plan_text.strip():
             # Show the plan immediately; otherwise the user only sees it via
             # /plan or the file on disk.
-            self.console.plan_box(plan_text.strip().splitlines(),
-                                  title="Plan for the current goal")
+            self.console.plan_box(
+                plan_text.strip().splitlines(),
+                title=("Recovery plan for the current goal" if recovery
+                       else "Plan for the current goal"))
         else:
             self.console.note("No plan text was generated.", "warn")
         if plan_text and plan_text.strip():
             # Loop bookkeeping, not a user instruction: the leading text is one
             # of _LOOP_INJECTED_USER_PREFIXES, so the compaction tail scan skips
             # it when looking for the turn being answered.
+            label = ("Recovery plan for the goal:\n" if recovery
+                     else "Current plan for the goal (from CURRENT_PLAN.md):\n")
             self.messages.append({
                 "role": "user",
-                "content": "Current plan for the goal (from CURRENT_PLAN.md):\n%s" % plan_text.strip(),
+                "content": label + plan_text.strip(),
             })
+
+    def _open_plan_document(self):
+        """The agent-authored plan document, for strict open-plan verification."""
+        try:
+            return agent_files.read_text(
+                agent_files.open_plan_path(self.allowed_dir), limit=8000)
+        except Exception:
+            return ""
 
     def _review_plan_completion(self):
         """Once the work looks done, review the plan's completion.
         """
         plan_prompt_text = prompts.plan_review_prompt(
-            self.messages, self.plan_manager.goal or "")
+            self.messages, self.plan_manager.goal or "",
+            strict=self.strict_verify)
         summary = ""
         self._begin_activity("reviewing plan")
         try:
@@ -2144,6 +2385,53 @@ class AgentSession:
             })
 
         return True
+
+
+    def _verify_plan_completion(self):
+        """Run the ``plan-verify2`` check and return ``(status, summary)``.
+
+        The verdict is parsed from the reply by
+        :func:`mini_code_cli.planning.parse_verify_status`; a missing or
+        unreadable verdict returns ``None`` as the status. The reply is always
+        written to ``CURRENT_PLAN.md`` for inspection. Unlike the review path,
+        this method does not inject anything into the transcript: the caller
+        only re-queues the outstanding work when the verdict says it is not
+        done, so a DONE turn ends without leaving an orphan user message.
+        """
+        prompt_text = prompts.plan_verify_prompt(
+            self.messages, self.plan_manager.goal or "",
+            strict=self.strict_verify,
+            plan_document=self._open_plan_document()
+            if self.plan_strategy == planning.OPEN_PLAN else "")
+        summary = ""
+        self._begin_activity("verifying plan")
+        try:
+            self.console.start_thinking("verifying plan")
+            response, _, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": prompt_text}],
+                    max_tokens=2048 if self.strict_verify else 1024,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                    console=self.console,
+                ))
+            self._record_usage(usage)
+            self._note_prompt_size(usage, len(self.messages))
+            summary = response or ""
+        except Exception as exc:
+            self.console.note(f"Could not verify the plan: {exc}", "warn")
+        finally:
+            self.console.stop_thinking()
+            self._end_activity()
+
+        status = planning.parse_verify_status(summary)
+        if not (self.plan_mode and self.plan_strategy == planning.OPEN_PLAN):
+            # open-plan owns its document; do not add loop-authored sections.
+            self.plan_manager.write_plan_summary(summary)
+        return status, summary
 
 
     def _handle_compaction(self, compacted, tail=()):
@@ -2212,7 +2500,7 @@ class AgentSession:
         for message in reversed(list(tail or ())):
             if (isinstance(message, dict) and message.get("role") == "user"
                     and not _is_loop_injected(message)):
-                return message.get("content") or ""
+                return media.content_text(message.get("content"))
         return ""
 
     # -- compaction strategies --------------------------------------------
@@ -2465,8 +2753,606 @@ class AgentSession:
         if cmd in ("skip-plan", "skip_plan", "skipplan"):
             self._run_skipped_plan(arg)
             return True
+        if cmd == "image":
+            self._handle_image_command(arg)
+            return True
+        if cmd == "todo":
+            self._show_todos(arg)
+            return True
+        if cmd == "settings":
+            self._handle_settings_command(arg)
+            return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
+
+    def _show_todos(self, arg):
+        """Show or clear the dynamic todo list."""
+        if self.todo_store is None:
+            self.console.note(
+                "Dynamic todo tracking is off (--dynamic-todo-tracking).",
+                "info")
+            return
+        if (arg or "").strip().lower() in ("clear", "reset"):
+            self.todo_store.replace([])
+            self.console.note("Todo list cleared.", "info")
+            return
+        self.console.rule("todo", fg="cyan")
+        for line in self.todo_store.render().splitlines():
+            self.console.emit(line)
+        self.console.rule(char="═", fg="cyan")
+
+    def _handle_image_command(self, arg):
+        """Stage an image for the next user message (``/image PATH``)."""
+        arg = (arg or "").strip().strip("'\"")
+        if not arg:
+            self.console.note(
+                "Usage: /image PATH (PNG/JPEG/WEBP/GIF), or /image clear.",
+                "warn")
+            return
+        if arg.lower() == "clear":
+            self._pending_images = []
+            self.console.note("Pending images cleared.", "info")
+            return
+        try:
+            ref = media.stage_image(arg, self.session_dir)
+        except (OSError, ValueError) as exc:
+            self.console.note(f"Could not attach image: {exc}", "error")
+            return
+        self._pending_images.append(ref)
+        self.console.note(
+            f"Image staged for the next message: {ref['name']} "
+            f"({ref['mime']}, {ref['bytes']} bytes).", "ok")
+
+    def _attach_image_from_read(self, path):
+        """Prepare an image read by the agent's ``read_file`` tool.
+
+        Returns ``(tool_text, ref)``; the caller appends the tool result first
+        and then the user content block, because OpenAI-style tool messages are
+        text-only.
+        """
+        ref = media.stage_image(path, self.session_dir)
+        text = (f"Image read from {path}; it is attached in the next message "
+                f"so you can inspect it.")
+        return text, ref
+
+    # -- settings ---------------------------------------------------------
+
+    def _settings_lines(self):
+        rows = self.settings.rows()
+        lines = ["Settings:"]
+        group_seen = None
+        for row in rows:
+            group = row.get("group", "Other")
+            if group != group_seen:
+                group_seen = group
+                lines.append(f"  {group}:")
+            mutable = "" if row["mutable"] else "  [immutable]"
+            cache = f"  cache:{row['cache']}" if row["cache"] != "none" else ""
+            lines.append(f"  {row['number']:2}. {row['name']:22} "
+                         f"{row.get('display', row['value']):28}"
+                         f"{cache}{mutable}")
+        lines.append("  Immutable / session:")
+        for name, description in settings_mod.IMMUTABLE:
+            lines.append(f"     {name:22} (cannot change: {description})")
+        return lines
+
+    def _read_setting_value(self, name):
+        """Read one setting's new value; ``None`` means "go back"."""
+        spec = settings_mod.BY_NAME.get(name) or settings_mod.BY_NAME.get(
+            settings_mod.ALIASES.get(name, ""))
+        row = next((item for item in self.settings.rows()
+                    if item["name"] == name), None)
+        current = row["value"] if row else ""
+        current_label = row.get("display", current) if row else ""
+        if name == "api-key":
+            # A focused, masked sub-window in the TUI; getpass on the plain
+            # console. Both accept ``exit`` to go back.
+            key = self.console.settings_secret(
+                "api-key", current=current, current_label=current_label)
+            key = "" if key is None else key.strip()
+            if key.lower() == "exit":
+                return None
+            if not key:
+                return ""
+            keep = "No — keep it in memory for this session only"
+            write = "Yes — write it to settings.json (mode 0600)"
+            answer = self.console.settings_choose(
+                "Store this API key?", [keep, write], current=keep)
+            if answer is None:
+                return None
+            self.settings.persist_api_key = answer == write
+            return key
+        if spec is not None and spec.kind in ("bool", "choice"):
+            options = (["on", "off"] if spec.kind == "bool"
+                       else list(spec.choices))
+            value = self.console.settings_choose(
+                name, options, current=current,
+                current_label=current_label)
+            return None if value is None else str(value)
+        value = self.console.settings_edit(
+            name, current=current,
+            choices=spec.choices if spec is not None else (),
+            current_label=current_label)
+        if value is None:
+            return None
+        text = value.strip()
+        return None if text.lower() == "exit" else text
+
+    def _ensure_key_for_current_model(self, stage=False):
+        """Load/ask for and validate the key after a model/url selection."""
+        provider = settings_mod.provider_name(self.settings)
+        key, env, _persisted = self.settings.key_for()
+        if (key or env
+                or (self.settings.api_key and self.settings.key_entered)):
+            before = (self.settings.api_key, self.settings.api_key_env)
+            settings_mod._validate_key(self.console, self.settings, provider)
+            after = (self.settings.api_key, self.settings.api_key_env)
+            if not stage and after != before:
+                # _validate_key prompted for a replacement (or cleared a
+                # rejected key); apply that result to the runtime.
+                self._apply_settings(
+                    {"api-key": after[0]}, confirm_cache=False,
+                    announce=False)
+            return
+        if provider == "localhost":
+            return
+        key_text = self._read_setting_value("api-key")
+        if not key_text:
+            return
+        self._apply_settings({"api-key": key_text}, confirm_cache=False,
+                             announce=False, stage=stage)
+        applied = self.settings.api_key
+        settings_mod._validate_key(self.console, self.settings, provider)
+        if not stage and self.settings.api_key != applied:
+            self._apply_settings(
+                {"api-key": self.settings.api_key}, confirm_cache=False,
+                announce=False)
+
+    def _change_setting_inline(self, row, value, rows):
+        """Stage a left/right settings change and refresh the visible table."""
+        if not self._apply_settings({row["name"]: value},
+                                    confirm_cache=False, announce=False,
+                                    stage=True):
+            return False
+        rows[:] = self.settings.rows()
+        return True
+
+    def _snapshot_settings(self):
+        """Capture the values needed to cancel a staged settings edit."""
+        return (dict(self.settings.values), self.settings.api_key,
+                self.settings.api_key_env, self.settings.persist_api_key,
+                dict(self.settings.api_keys),
+                dict(self.settings.api_key_envs),
+                set(self.settings.persisted_key_ids),
+                self.settings.key_entered, self.settings.key_asked)
+
+    def _restore_settings(self, snapshot):
+        (values, api_key, api_key_env, persist_api_key, api_keys,
+         api_key_envs, persisted_key_ids, key_entered, key_asked) = snapshot
+        self.settings.values = dict(values)
+        self.settings.api_key = api_key
+        self.settings.api_key_env = api_key_env
+        self.settings.persist_api_key = persist_api_key
+        self.settings.api_keys = dict(api_keys)
+        self.settings.api_key_envs = dict(api_key_envs)
+        self.settings.persisted_key_ids = set(persisted_key_ids)
+        self.settings.key_entered = key_entered
+        self.settings.key_asked = key_asked
+
+    def _commit_staged_settings(self, snapshot):
+        """Apply all staged changes to the runtime and persist them."""
+        (values, api_key, api_key_env, persist_api_key, _api_keys,
+         _api_key_envs, _persisted_key_ids, _key_entered,
+         _key_asked) = snapshot
+        parsed = []
+        for spec in settings_mod.SPECS:
+            if spec.attr == "api_key":
+                if (self.settings.api_key != api_key
+                        or self.settings.persist_api_key != persist_api_key
+                        or self.settings.api_key_env != api_key_env):
+                    parsed.append((spec, self.settings.api_key))
+                continue
+            value = self.settings.values.get(spec.attr, spec.default)
+            if value != values.get(spec.attr):
+                parsed.append((spec, value))
+        if not parsed:
+            self._save_settings()
+            return True
+        return self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+
+    def _apply_settings(self, changes, confirm_cache=True, announce=True,
+                        stage=False):
+        """Validate and apply (or stage) one or more settings.
+
+        Cache-impacting changes are applied as one transaction, so a batch of
+        tool/prompt edits rebuilds the prompt once. ``stage`` keeps the change
+        in ``settings.values`` without touching the runtime or the disk; the
+        TUI settings menu commits the batch with ``s``.
+        """
+        parsed = []
+        for name, raw in changes.items():
+            canonical = settings_mod.BY_NAME.get(name)
+            if canonical is None:
+                canonical = settings_mod.BY_NAME.get(
+                    settings_mod.ALIASES.get(name, ""))
+            if canonical is None:
+                self.console.note(f"Unknown setting {name!r}.", "warn")
+                return False
+            if not canonical.mutable:
+                self.console.note(f"{canonical.name} cannot be changed.",
+                                  "warn")
+                return False
+            try:
+                value = settings_mod.parse_value(canonical, raw)
+            except (TypeError, ValueError) as exc:
+                self.console.note(f"{canonical.name}: {exc}", "warn")
+                return False
+            parsed.append((canonical, value))
+
+        if stage:
+            for spec, value in parsed:
+                if spec.attr == "api_key":
+                    self.settings.api_key = value
+                    self.settings.key_entered = True
+                    self.settings.remember_key()
+                else:
+                    self.settings.values[spec.attr] = value
+            names = {spec.attr for spec, _ in parsed}
+            if ("api-key" not in names and names & {"model", "url"}
+                    and not self.settings.key_entered):
+                # A different model can have its own stored key. If it has
+                # none, do not silently keep another model's key; the menu
+                # will ask for one. An explicit CLI/env/typed key wins over a
+                # stored key for the new model.
+                if not self.settings.load_key_for():
+                    self.settings.api_key = ""
+                    self.settings.api_key_env = ""
+                    self.settings.persist_api_key = False
+            return True
+
+        cache_effects = {spec.cache for spec, _ in parsed
+                         if spec.cache != "none"}
+        if confirm_cache and cache_effects:
+            answer = self.console.read_line(
+                "Changing " + ", ".join(sorted(cache_effects)) +
+                " rebuilds the generated system prompt/tool list and "
+                "invalidates the LLM prompt cache for the next request. "
+                "Apply now? [y/N] ")
+            if answer is None or answer.strip().lower() not in ("y", "yes"):
+                self.console.note("Settings were not applied.", "warn")
+                return False
+
+        return self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=announce)
+
+    def _apply_parsed_settings(self, parsed, changed_names=None, announce=True):
+        """Apply already-validated values and rebuild what they affect."""
+        changed_names = set(changed_names or ())
+        cache_effects = {spec.cache for spec, _ in parsed
+                         if spec.cache != "none"}
+        old_model = self.model
+        for spec, value in parsed:
+            if spec.attr == "api_key":
+                self.settings.api_key = value
+                self.settings.key_entered = True
+                # persist_api_key is set by _read_setting_value; an inline
+                # /settings api-key value is not persisted unless confirmed.
+                self.settings.remember_key()
+            else:
+                self.settings.values[spec.attr] = value
+        if ("api-key" not in changed_names and changed_names & {"model", "url"}
+                and not self.settings.key_entered):
+            # Load the stored key for the newly selected endpoint/model. If
+            # there is none, drop a key that belonged to the previous model.
+            # An explicit CLI/env/typed key wins over a stored key.
+            if not self.settings.load_key_for():
+                self.settings.api_key = ""
+                self.settings.api_key_env = ""
+                self.settings.persist_api_key = False
+        self.settings.apply_to_args(self.args)
+        self.console.verbose = bool(getattr(self.args, "verbose", False))
+        self.server_url = str(self.args.url).rstrip("/")
+        self.api_key = self.args.api_key or ""
+        if self.args.model:
+            self.model = self.args.model
+        elif old_model and "model" not in changed_names:
+            self.model = old_model
+        else:
+            self.model = self._resolve_model(self.args)
+
+        self.plan_strategy = self.args.plan_strategy or planning.DEFAULT_PLAN_STRATEGY
+        if self.plan_strategy not in planning.PLAN_STRATEGIES:
+            self.plan_strategy = planning.DEFAULT_PLAN_STRATEGY
+        # Plan mode is its own on/off setting; choosing a strategy does not
+        # silently enable it (the CLI --plan-strategy implication is handled
+        # once at startup, not by every settings edit).
+        self.plan_mode = bool(self.args.plan)
+        self.allow_nudge = bool(self.args.allow_nudge)
+        self.nudge_limit = max(0, int(self.args.nudge_limit))
+        self.strict_verify = bool(getattr(self.args, "strict_verify", False))
+        self.runtime_strategy = recovery.normalise(
+            getattr(self.args, "runtime_strategy",
+                    recovery.DEFAULT_RUNTIME_STRATEGY))
+        self._reset_runtime_recovery()
+        self._runtime_pending_prompt = None
+        self._runtime_pending_replan = False
+        self.compaction_strategy = self.args.compaction_strategy
+        if not compaction_mod.is_strategy(self.compaction_strategy):
+            self.compaction_strategy = compaction_mod.DEFAULT_COMPACTION_STRATEGY
+        self.scratchpad = bool(self.args.scratchpad)
+        self.dynamic_todo_tracking = bool(
+            getattr(self.args, "dynamic_todo_tracking", False))
+
+        if ("model" in changed_names
+                and self.settings.values.get("max_tokens") is None):
+            self.args.max_tokens = default_max_output_tokens(self.model)
+        self._register_tools(self.args)
+        self._prepare_agent_files()
+        if getattr(self, "plan_manager", None) is not None:
+            goal = getattr(self.plan_manager, "goal", None)
+            self.plan_manager = plan_utils.PlanManager(
+                self.session_dir, enabled=self.plan_mode, goal=goal)
+        self.compaction_budget = compaction_budget(
+            model=self.model,
+            explicit_limit=getattr(self.args, "max_context_tokens", None),
+            max_output_tokens=getattr(self.args, "max_tokens", None),
+        )
+        if getattr(self, "messages", None) and not self.args.system_prompt:
+            self.messages[0]["content"] = self._render_system_prompt()
+        elif (announce and cache_effects & {"tools", "prompt"}
+              and self.args.system_prompt):
+            self.console.note(
+                "The custom system prompt is kept verbatim; tool/prompt "
+                "changes affect the tool registry only.", "warn")
+        self.settings.capture_from_args(self.args)
+        self._save_settings()
+        if self.tui_active:
+            # Permission/shell/planning/model lines live in the static header
+            # summary; refresh them after any applied settings change.
+            self.console.set_summary(self._tui_header_lines())
+        if announce:
+            self.console.note("Settings updated.", "ok")
+        return True
+
+    def _stage_all_preset(self):
+        for attr, value in settings_mod.ALL_PRESET.items():
+            self.settings.values[attr] = value
+
+    def _stage_super_preset(self):
+        for attr, value in settings_mod.SUPER_PRESET.items():
+            self.settings.values[attr] = value
+
+    def _apply_super_settings(self):
+        self._stage_super_preset()
+        parsed = [(spec, self.settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+        self.console.note("--super preset applied.", "ok")
+
+    def _apply_all_settings(self):
+        self._stage_all_preset()
+        parsed = [(spec, self.settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+        self.console.note("--all preset applied.", "ok")
+
+    def _apply_default_settings(self):
+        """Reset ordinary settings to defaults, keeping the API key."""
+        self.settings.reset_to_defaults()
+        parsed = [(spec, self.settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+        self.console.note("Settings reset to defaults (API key kept).", "ok")
+
+    def _adopt_settings(self, settings):
+        """Replace the session's settings and rebuild everything they affect.
+
+        Called only after the resume/new-session decision: startup runs with
+        CLI/environment/defaults so it cannot print or prompt with stale
+        previous-session settings.
+        """
+        self.settings = settings
+        parsed = [(spec, settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        if parsed:
+            self._apply_parsed_settings(
+                parsed, {spec.name for spec, _ in parsed}, announce=False)
+        else:
+            settings.apply_to_args(self.args)
+            self._save_settings()
+        return settings
+
+    def _handle_settings_command(self, arg):
+        arg = (arg or "").strip()
+        preset = arg.lower()
+        tui_preset = preset in ("all", "a", "default", "def", "super")
+        if ((not arg or tui_preset) and self.tui_active
+                and hasattr(self.console, "settings_pick")):
+            immutable = [f"{name}: cannot change ({desc})"
+                         for name, desc in settings_mod.IMMUTABLE]
+            snapshot = self._snapshot_settings()
+            state = {"dirty": False}
+            selected = 0
+            if preset in ("default", "def"):
+                # Stage defaults so the user can review/save or cancel them.
+                self.settings.reset_to_defaults()
+                state["dirty"] = True
+            elif preset in ("all", "a"):
+                # Stage the same feature flags as the CLI --all preset.
+                self._stage_all_preset()
+            elif preset == "super":
+                self._stage_super_preset()
+                state["dirty"] = True
+
+            def stage_change(row, value, rows):
+                if not self._change_setting_inline(row, value, rows):
+                    return False
+                state["dirty"] = True
+                return True
+
+            def defaults(rows):
+                self.settings.reset_to_defaults()
+                state["dirty"] = True
+                rows[:] = self.settings.rows()
+                self.console.note(
+                    "Defaults staged (API key kept); press s to save.", "info")
+
+            def all_preset(rows):
+                self._stage_all_preset()
+                state["dirty"] = True
+                rows[:] = self.settings.rows()
+                self.console.note(
+                    "--all preset staged; press s to save.", "info")
+
+            def super_preset(rows):
+                self._stage_super_preset()
+                state["dirty"] = True
+                rows[:] = self.settings.rows()
+                self.console.note(
+                    "--super preset staged; press s to save.", "info")
+
+            def save(rows):
+                nonlocal snapshot
+                if not self._commit_staged_settings(snapshot):
+                    self.console.note("Could not save settings.", "error")
+                    return
+                state["dirty"] = False
+                # Later cancels must restore to the last *saved* state, not
+                # to the state that existed when the menu first opened.
+                snapshot = self._snapshot_settings()
+                rows[:] = self.settings.rows()
+                self.console.note("Settings saved.", "ok")
+
+            while True:
+                row = self.console.settings_pick(
+                    self.settings.rows(), immutable, selected=selected,
+                    on_change=stage_change, on_save=save,
+                    dirty=lambda: state["dirty"], on_defaults=defaults,
+                    on_all=all_preset, on_super=super_preset)
+                if row is None:
+                    if not state["dirty"]:
+                        return
+                    choice = self.console.settings_choose(
+                        "Unsaved settings",
+                        ["Save and quit", "Cancel changes and quit"],
+                        current="Save and quit")
+                    if choice is None:
+                        # Esc/exit from the prompt: stay in the menu.
+                        continue
+                    if choice == "Save and quit":
+                        if self._commit_staged_settings(snapshot):
+                            return
+                        continue
+                    self._restore_settings(snapshot)
+                    return
+                selected = max(0, row["number"] - 1)
+                if not row["mutable"]:
+                    self.console.note(f"{row['name']} cannot be changed.",
+                                      "warn")
+                    continue
+                raw = self._read_setting_value(row["name"])
+                if raw is None or raw == "":
+                    continue
+                if not self._apply_settings({row["name"]: raw},
+                                            confirm_cache=False,
+                                            announce=False, stage=True):
+                    continue
+                state["dirty"] = True
+                if row["name"] in ("model", "url"):
+                    self._ensure_key_for_current_model(stage=True)
+            return
+        if preset in ("default", "def"):
+            self._apply_default_settings()
+            return
+        if preset in ("all", "a"):
+            self._apply_all_settings()
+            return
+        if preset == "super":
+            self._apply_super_settings()
+            return
+        if not arg:
+            for line in self._settings_lines():
+                self.console.emit(line)
+            self.console.emit(
+                "Use /settings <number|name> <value> or type it at the "
+                "settings prompt. Type q to leave; cache-impacting values "
+                "are staged until 'apply'.")
+            pending = {}
+            while True:
+                line = self.console.read_line("settings> ")
+                if line is None:
+                    return
+                text = line.strip()
+                if not text:
+                    continue
+                if text.lower() in ("q", "quit", "exit"):
+                    if pending:
+                        self.console.note("Pending settings discarded.", "warn")
+                    return
+                if text.lower() == "apply":
+                    if pending:
+                        self._apply_settings(pending)
+                        pending = {}
+                    continue
+                parts = text.split(None, 1)
+                key = parts[0]
+                if key.isdigit():
+                    try:
+                        row = self.settings.by_number(key)
+                    except (ValueError, TypeError) as exc:
+                        self.console.note(str(exc), "warn")
+                        continue
+                    key = row["name"]
+                raw = parts[1] if len(parts) > 1 else None
+                spec = settings_mod.BY_NAME.get(key) or settings_mod.BY_NAME.get(
+                    settings_mod.ALIASES.get(key, ""))
+                if spec is None:
+                    self.console.note(f"Unknown setting {key!r}.", "warn")
+                    continue
+                if not spec.mutable:
+                    self.console.note(f"{spec.name} cannot be changed.", "warn")
+                    continue
+                if raw is None:
+                    raw = self._read_setting_value(spec.name)
+                if raw is None or raw == "":
+                    continue
+                if spec.cache != "none":
+                    pending[spec.name] = raw
+                    self.console.note(
+                        f"{spec.name} staged (cache: {spec.cache}); type "
+                        f"'apply' to commit.", "info")
+                else:
+                    self._apply_settings({spec.name: raw}, confirm_cache=False)
+            return
+
+        parts = arg.split(None, 1)
+        key = parts[0]
+        if key.isdigit():
+            try:
+                key = self.settings.by_number(key)["name"]
+            except (ValueError, TypeError) as exc:
+                self.console.note(str(exc), "warn")
+                return
+        raw = parts[1] if len(parts) > 1 else None
+        spec = settings_mod.BY_NAME.get(key) or settings_mod.BY_NAME.get(
+            settings_mod.ALIASES.get(key, ""))
+        if spec is None:
+            self.console.note(f"Unknown setting {key!r}.", "warn")
+            return
+        if not spec.mutable:
+            self.console.note(f"{spec.name} cannot be changed.", "warn")
+            return
+        if raw is None:
+            raw = self._read_setting_value(spec.name)
+        if raw is None or raw == "":
+            return
+        self._apply_settings({spec.name: raw}, confirm_cache=True)
+        if spec.name in ("model", "url"):
+            self._ensure_key_for_current_model(stage=False)
 
     def _run_skipped_plan(self, prompt):
         """Handle ``/skip-plan PROMPT``: run the prompt without planning it."""
@@ -2682,7 +3568,7 @@ class AgentSession:
         last_role = last_text = None
         for m in reversed(self.messages):
             role = m.get("role")
-            content = m.get("content")
+            content = media.content_text(m.get("content"))
             if role == "assistant" and not m.get("tool_calls") and content:
                 last_role, last_text = "Assistant", content
                 break
@@ -2696,6 +3582,97 @@ class AgentSession:
 
     # -- tool execution ----------------------------------------------------
 
+    def _reset_runtime_recovery(self):
+        """Forget the current consecutive-failure streak (not the prompt cap)."""
+        self._runtime_fail_key = None
+        self._runtime_fail_key_count = 0
+        self._runtime_fail_tool = None
+        self._runtime_fail_tool_count = 0
+
+    def _note_tool_outcome(self, name, params, result):
+        """Track consecutive tool failures for the runtime strategy.
+
+        A success is progress and resets the streak. A failure counts towards
+        two streaks: the *same call* (tool + normalised arguments) and the same
+        *tool* with different arguments. Either reaching three triggers one
+        recovery prompt, at most ``MAX_PROMPTS_PER_TURN`` times per turn.
+        """
+        if self.runtime_strategy == recovery.NORMAL:
+            return
+        if not recovery.tool_result_failed(result):
+            self._reset_runtime_recovery()
+            return
+
+        key = recovery.approach_key(name, params)
+        if key == self._runtime_fail_key:
+            self._runtime_fail_key_count += 1
+        else:
+            self._runtime_fail_key = key
+            self._runtime_fail_key_count = 1
+        if name == self._runtime_fail_tool:
+            self._runtime_fail_tool_count += 1
+        else:
+            self._runtime_fail_tool = name
+            self._runtime_fail_tool_count = 1
+
+        if (self._runtime_prompts_this_turn
+                >= recovery.MAX_PROMPTS_PER_TURN):
+            return
+        same_call = (self._runtime_fail_key_count
+                     >= recovery.FAILURE_THRESHOLD)
+        same_tool = (self._runtime_fail_tool_count
+                     >= recovery.FAILURE_THRESHOLD)
+        if not (same_call or same_tool):
+            return
+
+        attempts = max(self._runtime_fail_key_count,
+                       self._runtime_fail_tool_count)
+        can_search = any(
+            tool_name in getattr(self, "tools_dict", {})
+            for tool_name in ("web_search", "read_website"))
+        self._runtime_pending_prompt = recovery.recovery_prompt(
+            name, attempts, same_call=same_call, result=result,
+            can_search=can_search)
+        self._runtime_pending_replan = (
+            self.runtime_strategy == recovery.PROMPT_CHANGE_PLAN)
+        self._runtime_prompts_this_turn += 1
+        # Start a new streak after speaking up: the next prompt should describe
+        # the next three failures, not keep firing on the same one.
+        self._runtime_fail_key = None
+        self._runtime_fail_key_count = 0
+        self._runtime_fail_tool = None
+        self._runtime_fail_tool_count = 0
+
+    def _inject_runtime_recovery(self):
+        """Append the pending recovery prompt (and re-plan when configured).
+
+        Called after a whole tool batch so a batch with several calls produces
+        one message, not one per call.
+        """
+        prompt = self._runtime_pending_prompt
+        if not prompt:
+            return
+        self._runtime_pending_prompt = None
+        self.console.note(
+            "Repeated failed tool use; prompting a change of approach.", "warn")
+        self.messages.append({"role": "user", "content": prompt})
+        if self._runtime_pending_replan:
+            self._runtime_pending_replan = False
+            self._generate_recovery_plan()
+
+    def _generate_recovery_plan(self):
+        """Start a fresh planning session after repeated failures."""
+        goal = (getattr(self.plan_manager, "goal", "")
+                or getattr(self, "_turn_goal", ""))
+        if not str(goal or "").strip():
+            self.console.note(
+                "No current goal is recorded; skipping the recovery plan.",
+                "warn")
+            return
+        self.console.note(
+            "Starting a fresh plan after repeated failed attempts.", "info")
+        self._generate_plan_and_inject(goal, recovery=True)
+
     def _run_tool_calls(self, tool_calls):
         self.console.note(f"LLM is trying to call {len(tool_calls)} tool(s).", "info")
         # Show a "… calling tool" spinner (in-place, non-scrolling) while the
@@ -2704,14 +3681,25 @@ class AgentSession:
 
         try:
             for call in tool_calls:
-                name = ((call or {}).get("function") or {}).get("name", "?")
+                function = (call or {}).get("function") or {}
+                name = function.get("name", "?")
+                try:
+                    params = json.loads(function.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    params = {}
+                if not isinstance(params, dict):
+                    params = {}
                 self._begin_activity(f"running tool {name}")
+                self._last_tool_result_text = ""
                 try:
                     self._run_one_tool_call(call)
                 finally:
                     self._end_activity()
+                self._note_tool_outcome(name, params,
+                                        self._last_tool_result_text)
         finally:
             self.console.stop_tool_call()
+        self._inject_runtime_recovery()
 
     def _run_one_tool_call(self, call):
 
@@ -2770,6 +3758,25 @@ class AgentSession:
             self._append_tool_result(call_id,
                 f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
             return
+
+        # 1b) read_file on a raster image: text tools cannot represent it, so
+        # attach the image as a user content block after the tool result.
+        if name == "read_file":
+            image_path = tool_params.get("file_path")
+            if media.is_image_path(image_path):
+                try:
+                    text, ref = self._attach_image_from_read(image_path)
+                except (OSError, ValueError) as exc:
+                    self._append_tool_result(
+                        call_id, f"Error: could not read image {image_path}: {exc}")
+                    return
+                self._append_tool_result(call_id, text)
+                self.messages.append({
+                    "role": "user",
+                    "content": media.user_content(
+                        f"Image read from the task: {image_path}", [ref]),
+                })
+                return
 
         # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
         background_action = (str(tool_params.get("action", "")).lower()
@@ -2893,6 +3900,7 @@ class AgentSession:
             raise _Abort
 
     def _append_tool_result(self, call_id, content):
+        self._last_tool_result_text = str(content)
         self.messages.append({"role": "tool", "tool_call_id": call_id, "content": str(content)})
 
     def _print_assistant(self, text):
@@ -2950,6 +3958,13 @@ class AgentSession:
         self.background_tasks.shutdown()
         self._exit_background = max(
             getattr(self, "_exit_background", 0), background_cancelled)
+        if not getattr(self, "_session_started", False):
+            # The user exited before a session was created (e.g. during the
+            # resume/settings questions). There is nothing to persist, but the
+            # good-bye box must still be shown.
+            if farewell:
+                self._farewell_no_session()
+            return
         self._persist()
         segments = history_segment_indices(self.session_dir)
         # List what is really on disk. The old message claimed
@@ -2972,6 +3987,13 @@ class AgentSession:
             self.console.usage_summary(self.total_usage)
         if farewell:
             self._farewell(segments)
+
+    def _farewell_no_session(self):
+        """Print a good-bye box when the user exits before a session starts."""
+        if self._farewell_shown:
+            return
+        self._farewell_shown = True
+        print_no_session_farewell(self.console, self.model, self.started_at)
 
     def _farewell(self, segments=None):
         """Print the good-bye box: version, sign-off and what the session left.
@@ -3251,7 +4273,9 @@ class _Abort(Exception):
 
 def main():
     args = parse_args()
-    session = AgentSession(args)
+    # Startup deliberately does not load previous-session settings: the resume
+    # offer comes first, then the chosen session imports its own settings.
+    session = AgentSession(args, defer_model=True)
     session.run(initial_prompt=args.prompt)
 
 

@@ -18,10 +18,14 @@ model:
   * :func:`plan_review_prompt` -- the completion-review request used once the
     work for a request is done, to mark each plan task done / outstanding and
     emit a summary (see :func:`plan_instructions`).
+  * :func:`plan_verify_prompt` -- the completion request for the
+    ``plan-verify2`` strategy; it ends with one machine-readable
+    ``STATUS:`` line so the loop can decide without another step.
 """
 
 import os
 
+from . import media
 from .tokens import CHARS_PER_TOKEN
 
 # ---------------------------------------------------------------------------
@@ -30,7 +34,7 @@ from .tokens import CHARS_PER_TOKEN
 
 def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir=None,
                   session_dir=None, scratchpad_path=None, scratchpad_dir=None,
-                  open_plan_path=None):
+                  open_plan_path=None, todo_path=None):
     """
     Takes a list of tool names and returns a system prompt string.
 
@@ -42,6 +46,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
     ``scratchpad_path`` enables the scratchpad block. ``open_plan_path`` selects
     the open-plan strategy: the agent owns that document and maintains it with
     the normal file tools instead of the loop authoring CURRENT_PLAN.md.
+    ``todo_path`` enables the structured dynamic-todo block.
     """
 
     if tools_dict:
@@ -81,6 +86,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
     if scratchpad_path:
         scratchpad_prompt = "\n" + scratchpad_instructions(scratchpad_path,
                                                             scratchpad_dir)
+    todo_prompt = "\n" + todo_instructions(todo_path) if todo_path else ""
 
     # The closing "do not create extra .md files" rule has an explicit
     # exception for the agent-owned files this run advertises.
@@ -93,7 +99,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
 
     prompt = f"""
 {base_prompt}
-{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{scratchpad_prompt}{skills_prompt}
+{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{scratchpad_prompt}{todo_prompt}{skills_prompt}
 Important: Follow the user instruction. Do not create additional .md files (unless asked to do so).{extra_files_note} Do not create unit tests (unless asked to do so), etc.
 """
     return prompt.strip()
@@ -180,6 +186,27 @@ def scratchpad_instructions(scratchpad_path, scratchpad_dir=None):
     )
 
 
+def todo_instructions(todo_path):
+    """The extra system-prompt block for ``--dynamic-todo-tracking``.
+
+    The list is structured and session-local; the agent uses the todo_* tools
+    rather than editing the JSON file, so statuses and ids stay valid.
+    """
+    return (
+        "DYNAMIC TODO TRACKING: Maintain a short todo list for the current "
+        "task using the todo tools.\n"
+        "- todo_write replaces the whole list with a JSON array of "
+        "{\"content\", \"status\"} objects; todo_update changes one item by "
+        "id; todo_list shows the current list.\n"
+        "- Use statuses pending, in_progress and completed. Keep at most one "
+        "item in_progress and mark an item completed only when you have "
+        "verified it.\n"
+        "- Update the list as work progresses instead of relying on prose. It "
+        "is working state stored in the session cache, not a project file.\n"
+        f"(Store: {todo_path})"
+    )
+
+
 def skills_instructions(skills_dir):
     """The extra system-prompt block when the skills feature is enabled.
 
@@ -240,7 +267,7 @@ def _bounded_conversation(messages, max_tokens):
     used = 0
     for message in reversed(messages):
         role = message.get("role", "?")
-        content = str(message.get("content") or "")
+        content = media.content_text(message.get("content"))
         if len(content) > per_message_chars:
             content = (content[:per_message_chars]
                        + "\n[... truncated to fit the summary request ...]")
@@ -255,7 +282,7 @@ def _bounded_conversation(messages, max_tokens):
         (message for message in messages
          if message.get("role") == "user" and message.get("content")), None)
     if first_user is not None:
-        content = str(first_user.get("content") or "")
+        content = media.content_text(first_user.get("content"))
         if len(content) > 2_000:
             content = content[:2_000] + "\n[... truncated ...]"
         selected.insert(0, f"user (initial request): {content}")
@@ -281,7 +308,7 @@ def compaction_prompt(messages, max_tokens=None):
         conversation = _bounded_conversation(messages, max_tokens)
     else:
         conversation = "\n".join(
-            [f"{msg.get('role', '?')}: {msg.get('content') or ''}"
+            [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}"
              for msg in messages])
     prompt = f"""
 Please analyze the following conversation and output a concise summary covering:
@@ -316,7 +343,7 @@ def plan_prompt(messages, current_instruction):
     # tool-call-only assistant turn has no content key, and a KeyError here
     # would silently drop plan-mode authoring for the rest of the session.
     conversation = "\n".join(
-        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+        [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}" for msg in messages])
     prompt = f"""
 You are planning how to complete the current user instruction. Using the
 full conversation so far, author a concrete, step-by-step plan for accomplishing
@@ -337,7 +364,31 @@ Conversation so far:
     return prompt.strip()
 
 
-def plan_review_prompt(messages, goal):
+def _strict_verification_rules():
+    """The extra rules shared by the strict verification prompts."""
+    return """
+Strict verification is enabled. Do not accept a summary or the agent's claim of
+completion as evidence.
+
+1. Restate the goal as a numbered list of concrete, checkable requirements and
+   deliverables (files at exact paths, formats, commands, numerical results,
+   preserved artefacts, ...).
+2. For each requirement, cite the specific evidence in the conversation: the
+   tool call that produced the artefact and the observed output/result. A file
+   mentioned but never verified, a command that was not run, or an inference
+   from the agent's intention is NOT evidence.
+3. A requirement with no concrete evidence is NOT done, even if the agent says
+   it is. Missing, ambiguous or contradictory evidence must be reported as
+   unfinished rather than assumed to work.
+4. Check that artefacts the task did not ask you to remove or replace still
+   exist. Do not treat a self-written test or the agent's own summary as proof
+   that the task's acceptance criteria are met.
+5. Keep the required final response format exactly; if you cannot prove
+   completion, the final status must be unfinished.
+""".strip()
+
+
+def plan_review_prompt(messages, goal, strict=False):
     """Build the completion-review prompt the loop sends once the work for a
     request looks finished (no further tool calls predicted).
 
@@ -358,11 +409,13 @@ def plan_review_prompt(messages, goal):
 
     ``messages`` is the full conversation list (used to see what was done);
     ``goal`` is the current user instruction, used as the bar to judge against.
+    ``strict`` adds the evidence checklist used by ``--strict-verify``.
     """
     # .get(): a tool-call-only assistant turn has content None / no key (see
     # compaction_prompt); indexing it here would abort the review.
     conversation = "\n".join(
-        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+        [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}" for msg in messages])
+    strict_rules = f"\n{_strict_verification_rules()}\n" if strict else ""
     prompt = f"""
 You are reviewing the current plan now that you have (apparently) finished
 acting. Using the full conversation so far, decide which tasks of the plan are
@@ -370,7 +423,7 @@ done and which are still outstanding.
 
 Mark every task: DONE if you have clearly completed it, or TODO / IN-PROGRESS
 if it is still outstanding.
-
+{strict_rules}
 Then output exactly ONE summary line. It must be one of these two, and nothing
 else:
 - If nothing is outstanding: "ALL TASKS DONE. Go back to user."
@@ -381,6 +434,61 @@ Do not take any action yourself -- only report the plan state.
 
 Be concise in your analysis.
 
+Current goal:
+{goal}
+
+Conversation so far:
+{conversation}
+"""
+    return prompt.strip()
+
+
+def plan_verify_prompt(messages, goal, strict=False, plan_document=""):
+    """Build the machine-readable completion check for ``plan-verify2``.
+
+    Like :func:`plan_review_prompt`, this is a tool-free request sent by the
+    loop after the work settles. Unlike the review, its reply is not re-sent to
+    the agent as advice: the loop only needs a verdict, so the prompt requires a
+    final line in one fixed form::
+
+        STATUS: DONE
+        STATUS: INCOMPLETE
+        STATUS: IN PROGRESS
+
+    The final line must be last and contain no extra text, which lets
+    :func:`mini_code_cli.planning.parse_verify_status` classify it with a
+    regular expression instead of a second model step.
+
+    ``messages`` is the full conversation; ``goal`` is the instruction the plan
+    must satisfy.
+    """
+    conversation = "\n".join(
+        [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}" for msg in messages])
+    strict_rules = f"\n{_strict_verification_rules()}\n" if strict else ""
+    plan_block = ""
+    if str(plan_document or "").strip():
+        plan_block = (
+            "\nThe agent's own plan document (open-plan mode):\n"
+            f"{str(plan_document).strip()}\n")
+    prompt = f"""
+You are verifying whether the work for the current goal is complete. Use the
+full conversation and the plan the agent has been following. Check the actual
+result against the goal -- do not take the agent's own claim of completion at
+face value.
+
+Rules:
+- DONE only when every part of the goal is satisfied and verified.
+- INCOMPLETE when required work is missing, failed, unverified, or the goal is
+  not fully met yet.
+- IN PROGRESS when work is actively underway and the goal is not finished.
+- Do not call tools and do not take any action. Only report the verdict.
+- Put your short reasoning first, then end with exactly one final line in one
+  of these three forms (the final line must contain the verdict and nothing
+  else):
+  STATUS: DONE
+  STATUS: INCOMPLETE
+  STATUS: IN PROGRESS
+{strict_rules}{plan_block}
 Current goal:
 {goal}
 
@@ -422,7 +530,8 @@ def compaction_keep_prompt(messages, summary):
     lines = []
     for index, message in enumerate(messages):
         role = message.get("role", "?") if isinstance(message, dict) else "?"
-        content = (message.get("content") if isinstance(message, dict) else "") or ""
+        content = (media.content_text(message.get("content"))
+                   if isinstance(message, dict) else "")
         content = " ".join(str(content).split())
         if len(content) > 400:
             content = content[:400] + "..."

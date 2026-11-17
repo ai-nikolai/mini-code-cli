@@ -87,15 +87,20 @@ given a reference implementation.
 | `--tui [auto\|on\|off]` | `auto` | fixed full-screen dashboard. `auto` enables it only on a known interactive TTY; `on` forces it; `off` uses the scrolling console |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
-| `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
+| `--super` | off | kitchen-sink behaviour preset: plan-verify2 + strict verification, all shell/sub-agent/skill/sudo/background features, auto-mode, prompt-change recovery and dynamic todos. The model, URL and API key are left untouched |
+| `--plan-strategy NAME` | `plan-verify2` | `plan-verify2`, `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
 | `--allow-nudge` | off | plan mode only: ask the model to continue (or reply DONE) when it stops without a tool call, before running the plan review |
 | `--nudge-limit N` | 1 | maximum continuation nudges per text-only stop with `--allow-nudge` |
+| `--strict-verify` | off | use the evidence-based verification prompt for every plan review/verify stage; also verifies after `open-plan` work settles. Unproven requirements count as unfinished |
+| `--runtime-strategy NAME` | `normal` | `normal`, `prompt-change` or `prompt-change-plan`: recover after 3 consecutive failures of the same call/tool |
 | `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
+| `--dynamic-todo-tracking` | off | give the agent a structured session-local todo list (`todo_write` / `todo_update` / `todo_list`), independent of plan mode and the scratchpad |
 | `--compaction-strategy NAME` | `summarise` | `summarise`, `predict-files` or `predict-messages` |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
 | `--tool-timeout S` | `120` | timeout for a single tool call |
 | `--max-context-tokens N` | derived | input-token budget before the history is compacted |
 | `--cache-dir DIR` | `~/.cache/mini/sessions/` | where session histories are stored |
+| `--no-settings` | off | do not load, prompt for, or save session settings (useful for CI/benchmark runs) |
 | `--restore-session PATH` | — | continue a specific previous session |
 | `-l`, `--load-last-session` | off | continue the session recorded in the `.mini` pointer |
 | `--all` | off | `--plan --enable-subagents --enable-shell --skills --auto-mode --sudo --background` |
@@ -115,7 +120,7 @@ parameter a model does not need is defaulted, so omitting it keeps the previous 
 | `edit` | replace an **exact** string (`old_string` → `new_string`); refuses a missing or ambiguous match unless `replace_all` |
 | `grep` | regex search a file or directory; `recursive`, `include`, `ignore_case`, `line_numbers`, `max_results` (noise dirs skipped). Output is capped at 100k characters |
 | `glob` | list files matching a glob (one per line, `**` supported), optionally against a `root`; capped at 2000 matches / 100k characters |
-| `web_search` | best-effort lookup: related queries + a short Wikipedia extract. Never raises |
+| `web_search` | DuckDuckGo Lite HTML search (POST), with DuckDuckGo Instant Answers and Wikipedia as fallbacks. Returns titles, URLs and snippets; never raises |
 | `read_website` | fetch raw text/HTML of a **public http/https** URL (other schemes and private/link-local hosts are rejected; `MINI_CODE_ALLOW_PRIVATE_URLS=1` overrides); `max_chars` caps size |
 | `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported. Output over 50k characters is capped in the reply and the full text is written to `.mini/tool-output/` so `read_file`/`grep` can page it |
 | `background` | start/list/output/wait/cancel background **shell** tasks (needs `--background --enable-shell`) or **sub-agent** tasks (needs `--background --enable-subagents`); output is captured in a per-task log |
@@ -201,8 +206,11 @@ steps; it shows the last/current blocking activity rather than live-during the c
 | `/reset [<n>]` | rewind to the end of turn `n` (`last` works too); drops everything after it |
 | `/clear` | clear the screen (keeps the conversation history) |
 | `/plan` | show the current goal + plan (plan mode only) |
+| `/todo` | show the dynamic todo list; `/todo clear` empties it |
+| `/image <path>` | stage a PNG/JPEG/WEBP/GIF for the next message; `/image clear` removes staged images |
 | `/context` | show how the context window is used: tokens and percentages by category (system prompt, user/assistant messages, tool calls/outputs, reasoning, overhead) |
 | `/background [id]` | show foreground activity + background tasks, or one task's output tail |
+| `/settings [name|number] [value]` | show or change session settings; bare `/settings` opens the settings prompt |
 | `/expand [n]` | show the full detail of the nth most recent tool call (default: the last one) |
 | `/skip-plan <prompt>` | send `<prompt>` once without generating or reviewing a plan |
 | `/help` | show this help |
@@ -252,6 +260,68 @@ scrolling console or `--tui=on` to force it. It is not part of `--all`.
 >   total is preserved. See
 >   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#rewinding-reset-and-what-it-does-to-the-files)
 >   for the files involved.
+
+### Session settings
+
+Settings are stored per session in the cache, never in the project’s `.mini`:
+
+```text
+<cache-dir>/<session-id>/settings.json
+```
+
+The file has a single current layout (`version`, `values`, `api_keys`,
+`api_key_envs`, with keys scoped by endpoint/model); older top-level key fields
+are ignored rather than migrated. Startup deliberately does **not** load
+previous-session settings: the resume offer
+uses the CLI/environment/default configuration, so no settings notes or questions
+appear before you choose. Settings are loaded only after that choice. Resuming
+adopts the restored session’s settings; starting a **new** session resets ordinary
+settings to their defaults (the previous per-model API-key archive is the one thing
+kept) and asks the provider/model questions again, pre-selecting the current provider
+so Enter keeps it. An explicit `--model` skips the questions. The saved model and API
+key are checked after the model is known (after the restore, or after the
+provider/model selection).
+
+The wizard asks for the model provider (`localhost`, `deepseek`, or a custom URL)
+and, when needed, the API key. For DeepSeek it then asks which model to use, offering
+the ids from the live `/v1/models` response when a key is available (otherwise the
+stable `deepseek-chat` / `deepseek-reasoner` aliases). The DeepSeek key prompt says
+where to create a key and that `MINI_CODE_API_KEY` is used first. When the fixed TUI
+applies, the wizard runs inside it (arrow keys or numbers select, and a typed key is
+masked). If you type a key, mini-code asks clearly whether to write it to the session
+file with mode `0600`; otherwise it stays in memory for this session only. Keys are
+scoped to the endpoint/model: selecting another model loads its stored key, or asks
+for one when none is stored. Once the model is known, a key found for it is checked
+against `/v1/models`; an explicit `401`/`403` rejection reopens the key prompt.
+
+Use `/settings` to inspect or change settings. The table marks values that rebuild
+the tool list or generated system prompt — these invalidate the LLM prompt cache.
+Cache-impacting edits from the plain `settings>` prompt are staged until you type
+`apply`, so a batch rebuilds the prompt once.
+
+In the fixed TUI the centered, unboxed ASCII mark and tagline (the same mark used by
+`--tui off`) sit above the session view and stay visible in the settings views. The
+settings table is a navigable overlay grouped into Model & connection, Generation,
+Planning, Compaction, Tools & permissions, Runtime limits, Display, Agent behaviour
+and Immutable/session sections (so e.g. `verbose` lives under Display). It starts at
+the first setting and scrolls with the selection. Up/down or numbers select;
+left/right toggle an on/off setting or rotate through a fixed-choice setting
+(such as `plan-strategy`) in place. Values equal to their built-in default are marked
+`(default)`. Enter opens a focused sub-window that shows only that setting's input
+box (or its option list), where `exit` or Esc returns to the settings table. The full
+table (including immutable rows) is always shown. `a` stages the same feature flags
+as the CLI `--all` preset (plan, shell, sub-agents, skills, auto-mode, sudo,
+background); `p` stages the CLI `--super` preset; `d` stages all defaults while
+keeping the model, URL and API key. The
+same presets are
+available as `/settings all`, `/settings super` and `/settings default`. Changes are staged in the
+table until you press `s` to save; `q` quits, and if there are unsaved changes it
+asks whether to save them or cancel the changes. The table header shows a green
+`saved` or yellow `unsaved` badge. Plan
+mode is its own on/off setting;
+the plan strategy keeps a concrete value even while plan mode is off, and changing
+the strategy does not turn plan mode on. Changing the TUI, paths, the custom system
+prompt or the initial prompt is not allowed mid-session.
 
 ## Development
 
@@ -315,7 +385,8 @@ on for later turns).
 
 | Strategy | What happens |
 | --- | --- |
-| `plan-verify` (default) | Author a plan, review it once the work settles, then keep the post-review step only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
+| `plan-verify2` (default) | Author a plan, then verify completion with one machine-readable verdict (`STATUS: DONE` / `STATUS: INCOMPLETE` / `STATUS: IN PROGRESS`). `DONE` ends the turn immediately, without the post-review step; an unfinished verdict re-queues the outstanding work and the agent continues, with another verify after it settles. |
+| `plan-verify` | Author a plan, review it once the work settles, then keep the post-review step only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
 | `plan-verify-step` | The original behaviour: same plan + review, then always run one extra step and keep whatever that step says. |
 | `open-plan` | The agent owns a plan document at `.mini/PLAN.md` inside `--allowed-dir`, reads and updates it with the normal file tools, and the loop neither authors nor reviews a plan. |
 
@@ -323,8 +394,15 @@ on for later turns).
 > Plan mode also changes **history compaction**: after the transcript is compacted to a summary,
 > `CURRENT_PLAN.md` and `CURRENT_GOAL.md` are re-injected, so the agent keeps working against the
 > same goal. With `open-plan`, the agent's `.mini/PLAN.md` is re-injected instead. When the work
-> looks done the plan is reviewed and any outstanding task is re-queued before the agent returns
-> to you (except with `open-plan`).
+> looks done the plan is reviewed (or, with `plan-verify2`, verified with a DONE/INCOMPLETE
+> verdict) and any outstanding task is re-queued before the agent returns to you (except with
+> `open-plan`, unless `--strict-verify` is on).
+
+`--strict-verify` makes the completion check evidence-based instead of trust-based. The verifier
+must restate the goal as concrete requirements, cite the tool call/output that proves each one, and
+mark missing or ambiguous evidence as unfinished. It applies to `plan-verify`, `plan-verify2` and
+`plan-verify-step`, and with `open-plan` it adds a verification pass after the work settles without
+taking ownership of the agent's plan document.
 
 `--allow-nudge` adds a completion checkpoint to any plan strategy. When the model replies without
 a tool call and the text does not explicitly say `DONE` / complete / finished, the loop appends a
@@ -332,6 +410,46 @@ short “continue with the next tool call, or reply DONE” message instead of i
 plan review. `--nudge-limit N` controls how many nudges are allowed per text-only stop (default 1).
 After the limit, the normal plan strategy takes over. This is useful for thinking models that tend
 to emit an intermediate “let me do X” message and stop.
+
+### Runtime recovery — `--runtime-strategy`
+
+The runtime strategy decides what happens when tool use keeps failing. It is independent of plan
+mode and applies to every turn:
+
+| Strategy | What happens |
+| --- | --- |
+| `normal` (default) | No automatic prompts; the model sees tool errors and decides. |
+| `prompt-change` | After three consecutive failures of the same call (same command/path/query) or of the same tool with different inputs, the loop injects: “You have tried TOOL N times and it failed. Rethink your approach and try something else.” It also shows the last failure. A success resets the streak; at most three prompts are issued per turn. |
+| `prompt-change-plan` | The same prompt, then a fresh planning request for the current goal. In `open-plan` the loop injects the recovery plan but does not overwrite the agent's `.mini/PLAN.md`. |
+
+Both recovery strategies are heuristics: they are meant to break repetitive command/tool loops
+without changing the model's overall instruction. When `web_search`/`read_website` are available,
+the prompt also tells the model to search the documentation or the web before retrying.
+`runtime-strategy` and `strict-verify` are also available in `/settings`.
+
+### Dynamic todo tracking — `--dynamic-todo-tracking`
+
+This is separate from the scratchpad. It registers three structured tools and tells the agent to
+keep a short checklist:
+
+- `todo_write` replaces the list with a JSON array of `{"content", "status"}` objects;
+- `todo_update` changes one item by id (`pending`, `in_progress`, `completed`);
+- `todo_list` shows the current list.
+
+The store is session-local (`<cache-dir>/<session-id>/todos.json`), not a project file, so it does
+not pollute the worktree or a benchmark's filesystem checks. `/todo` shows it and `/todo clear`
+empties it. A scratchpad remains useful for free-form notes; the todo list is for tracked,
+verifiable steps.
+
+### Images — `/image` and image-aware `read_file`
+
+`/image PATH` stages a PNG/JPEG/WEBP/GIF for the next user message. The file is copied into the
+session cache and the conversation stores a small reference, not base64; the bytes are resolved
+into a data URI only when the request is built. `/image clear` drops staged images.
+
+The agent's `read_file` is also image-aware: reading a supported image attaches it as an image
+content block after the tool result. `read_file` still handles text as before. Images count toward
+the context estimate and are flattened to `[image: name]` in plan/review/compaction prompts.
 
 ### Scratchpad — `--scratchpad`
 
@@ -422,12 +540,20 @@ later request fail.
 
 ### Exiting — the good-bye box
 
-Quitting (`/quit`, `exit`, or EOF on stdin) saves the session and then prints a short yellow
-box: the version, a sign-off, and what the session left behind — session id, model, folder,
-the history segments on disk, how many turns were recorded, run duration, token / call totals,
-background tasks cancelled on exit, and a `--load-last-session` resume hint.
+Quitting (`/quit`, `exit`, or EOF on stdin) saves the session, prints the centered
+yellow Mini Code mark and tagline above the box, and then prints a short content-width
+yellow box: the version, a sign-off, and what the session left behind — session id,
+model, folder, the history segments on disk, how many turns were recorded, run duration,
+token / call totals, background tasks cancelled on exit, and a `--load-last-session`
+resume hint.
 
 ```
+                  __  __ ___ _  _ ___    ___ ___  ___  ___
+                 |  \/  |_ _| \| |_ _|  / __/ _ \|   \| __|
+                 | |\/| || || .` || |  | (_| (_) | |) | _|
+                 |_|  |_|___|_|\_|___|  \___\___/|___/|___|
+                a minimal coding agent CLI
+
 ╔══════════ MiniCodeCLI v0.1.1.2 - goodbye ═════════════════════╗
 ║ Goodbye, and thanks for using MiniCodeCLI!                    ║
 ║                                                               ║
