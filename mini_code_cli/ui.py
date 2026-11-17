@@ -858,30 +858,38 @@ class Console:
         policy).
         """
         label_w = max((len(str(label)) for label, _ in rows), default=0)
-        lines = [sign_off or "Goodbye, and thanks for using MiniCodeCLI!", ""]
-        lines += [f"{str(label).ljust(label_w)} : {value}" for label, value in rows]
-        # The same yellow as the good-bye box, printed outside/above it in its
-        # own full box. The fixed TUI stops its alternate screen before this
-        # runs, so it lands on the normal terminal just like the box.
+        sign = sign_off or "Goodbye, and thanks for using MiniCodeCLI!"
+        row_lines = [f"{str(label).ljust(label_w)} : {value}"
+                     for label, value in rows]
+
+        # The ASCII mark is centered inside the good-bye box (not a separate
+        # box above it), in the same yellow as the box. On a narrow terminal
+        # use the compact label so the box stays readable.
         art_width = max(len(line) for line in LOGO)
-        if self.width >= art_width + 8:
-            content_width = art_width + 2
-            body = []
-            for line in LOGO:
-                pad = " " * max((content_width - len(line)) // 2, 0)
-                body.append(_pad_visual(
-                    pad + self.style(line, fg="yellow", bold=True),
-                    content_width))
-            logo_box = self.box(body, fg="yellow")
+        if self.width >= art_width + 10:
+            logo_width = art_width
+            logo = LOGO
+        else:
+            logo_width = len("MINI CODE")
+            logo = ("MINI CODE",)
+        content_width = max(
+            [_visual_len(sign)] + [_visual_len(line) for line in row_lines]
+            + [logo_width])
+        if logo is LOGO:
+            # Center the block as a unit: the 42- and 43-column rows differ by
+            # one space and must stay aligned.
+            pad = " " * max((content_width - art_width) // 2, 0)
+            logo_lines = [
+                _pad_visual(pad + self.style(line, fg="yellow", bold=True),
+                            content_width)
+                for line in LOGO]
         else:
             label = self.style("MINI CODE", fg="yellow", bold=True)
-            logo_box = self.box([label], fg="yellow")
-        box_lines = logo_box.splitlines()
-        box_width = max(_visual_len(line) for line in box_lines)
-        pad = " " * max((self.width - box_width) // 2, 0)
-        for line in box_lines:
-            self.emit(pad + line)
-        self.emit()
+            pad = " " * max(
+                (content_width - _visual_len(label)) // 2, 0)
+            logo_lines = [_pad_visual(pad + label, content_width)]
+
+        lines = logo_lines + [""] + [sign, ""] + row_lines
         # Yellow, not the welcome banner's cyan: this is the one box that
         # *closes* the session, so it reads as a distinct, valedictory note
         # rather than the startup banner reappearing. Colours only apply on a

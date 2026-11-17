@@ -468,12 +468,18 @@ later request fail.
 ### Exiting — the good-bye box
 
 Quitting (`/quit`, `exit`, or EOF on stdin) saves the session and then prints a short yellow
-box: the version, a sign-off, and what the session left behind — session id, model, folder,
-the history segments on disk, how many turns were recorded, run duration, token / call totals,
-background tasks cancelled on exit, and a `--load-last-session` resume hint.
+box with the centered Mini Code ASCII mark inside it: the version, a sign-off, and what the
+session left behind — session id, model, folder, the history segments on disk, how many turns
+were recorded, run duration, token / call totals, background tasks cancelled on exit, and a
+`--load-last-session` resume hint.
 
 ```
 ╔══════════ MiniCodeCLI v0.1.1.2 - goodbye ═════════════════════╗
+║         __  __ ___ _  _ ___    ___ ___  ___  ___              ║
+║        |  \/  |_ _| \| |_ _|  / __/ _ \|   \| __|             ║
+║        | |\/| || || .` || |  | (_| (_) | |) | _|              ║
+║        |_|  |_|___|_|\_|___|  \___\___/|___/|___|             ║
+║                                                               ║
 ║ Goodbye, and thanks for using MiniCodeCLI!                    ║
 ║                                                               ║
 ║ session id   : 1792666273983619-36ca3c2e                      ║
