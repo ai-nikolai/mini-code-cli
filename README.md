@@ -93,6 +93,7 @@ given a reference implementation.
 | `--strict-verify` | off | use the evidence-based verification prompt for every plan review/verify stage; also verifies after `open-plan` work settles. Unproven requirements count as unfinished |
 | `--runtime-strategy NAME` | `normal` | `normal`, `prompt-change` or `prompt-change-plan`: recover after 3 consecutive failures of the same call/tool |
 | `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
+| `--dynamic-todo-tracking` | off | give the agent a structured session-local todo list (`todo_write` / `todo_update` / `todo_list`), independent of plan mode and the scratchpad |
 | `--compaction-strategy NAME` | `summarise` | `summarise`, `predict-files` or `predict-messages` |
 | `--llm-timeout S` | `500` | HTTP timeout for LLM requests |
 | `--tool-timeout S` | `120` | timeout for a single tool call |
@@ -118,7 +119,7 @@ parameter a model does not need is defaulted, so omitting it keeps the previous 
 | `edit` | replace an **exact** string (`old_string` → `new_string`); refuses a missing or ambiguous match unless `replace_all` |
 | `grep` | regex search a file or directory; `recursive`, `include`, `ignore_case`, `line_numbers`, `max_results` (noise dirs skipped). Output is capped at 100k characters |
 | `glob` | list files matching a glob (one per line, `**` supported), optionally against a `root`; capped at 2000 matches / 100k characters |
-| `web_search` | best-effort lookup: related queries + a short Wikipedia extract. Never raises |
+| `web_search` | DuckDuckGo Lite HTML search (POST), with DuckDuckGo Instant Answers and Wikipedia as fallbacks. Returns titles, URLs and snippets; never raises |
 | `read_website` | fetch raw text/HTML of a **public http/https** URL (other schemes and private/link-local hosts are rejected; `MINI_CODE_ALLOW_PRIVATE_URLS=1` overrides); `max_chars` caps size |
 | `run_shell_command` | run a shell command (needs `--enable-shell`); `cwd`, `timeout`, and stdout/stderr/exit code are all reported. Output over 50k characters is capped in the reply and the full text is written to `.mini/tool-output/` so `read_file`/`grep` can page it |
 | `background` | start/list/output/wait/cancel background **shell** tasks (needs `--background --enable-shell`) or **sub-agent** tasks (needs `--background --enable-subagents`); output is captured in a per-task log |
@@ -204,6 +205,8 @@ steps; it shows the last/current blocking activity rather than live-during the c
 | `/reset [<n>]` | rewind to the end of turn `n` (`last` works too); drops everything after it |
 | `/clear` | clear the screen (keeps the conversation history) |
 | `/plan` | show the current goal + plan (plan mode only) |
+| `/todo` | show the dynamic todo list; `/todo clear` empties it |
+| `/image <path>` | stage a PNG/JPEG/WEBP/GIF for the next message; `/image clear` removes staged images |
 | `/context` | show how the context window is used: tokens and percentages by category (system prompt, user/assistant messages, tool calls/outputs, reasoning, overhead) |
 | `/background [id]` | show foreground activity + background tasks, or one task's output tail |
 | `/settings [name|number] [value]` | show or change session settings; bare `/settings` opens the settings prompt |
@@ -421,6 +424,30 @@ Both recovery strategies are heuristics: they are meant to break repetitive comm
 without changing the model's overall instruction. When `web_search`/`read_website` are available,
 the prompt also tells the model to search the documentation or the web before retrying.
 `runtime-strategy` and `strict-verify` are also available in `/settings`.
+
+### Dynamic todo tracking — `--dynamic-todo-tracking`
+
+This is separate from the scratchpad. It registers three structured tools and tells the agent to
+keep a short checklist:
+
+- `todo_write` replaces the list with a JSON array of `{"content", "status"}` objects;
+- `todo_update` changes one item by id (`pending`, `in_progress`, `completed`);
+- `todo_list` shows the current list.
+
+The store is session-local (`<cache-dir>/<session-id>/todos.json`), not a project file, so it does
+not pollute the worktree or a benchmark's filesystem checks. `/todo` shows it and `/todo clear`
+empties it. A scratchpad remains useful for free-form notes; the todo list is for tracked,
+verifiable steps.
+
+### Images — `/image` and image-aware `read_file`
+
+`/image PATH` stages a PNG/JPEG/WEBP/GIF for the next user message. The file is copied into the
+session cache and the conversation stores a small reference, not base64; the bytes are resolved
+into a data URI only when the request is built. `/image clear` drops staged images.
+
+The agent's `read_file` is also image-aware: reading a supported image attaches it as an image
+content block after the tool result. `read_file` still handles text as before. Images count toward
+the context estimate and are flattened to `[image: name]` in plan/review/compaction prompts.
 
 ### Scratchpad — `--scratchpad`
 

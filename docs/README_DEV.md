@@ -113,6 +113,10 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   the runtime recovery prompts (`prompt-change` / `prompt-change-plan`).
 - **`test_recovery.py`** — the pure runtime-recovery helpers: failure detection,
   approach keys, and the recovery prompt text.
+- **`test_todos.py`** — the structured todo store, validation, tool schemas and
+  session-local persistence.
+- **`test_media.py`** — image staging, file-backed content refs and request-time
+  data-URI materialisation.
 - **`test_background.py`** — background shell/sub-agent tasks: output and exit codes,
   process-group cancellation, the `/background` view, tool registration, and shutdown cleanup.
 - **`test_settings.py`** — per-session settings: load/save permissions, CLI/env/session

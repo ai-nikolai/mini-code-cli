@@ -24,6 +24,8 @@ percentage of the window as slack (see :mod:`mini_code_cli.config`).
 import json
 import math
 
+from . import media
+
 # Roughly how many characters of text one token covers. English prose and code
 # both sit near 4; JSON tool output is a little denser, so this is a slight
 # over-estimate for those, which is the safe direction.
@@ -58,7 +60,10 @@ def estimate_message_tokens(message):
         return 0
 
     total = MESSAGE_OVERHEAD_TOKENS
-    total += estimate_text_tokens(message.get("content"))
+    content = message.get("content")
+    total += estimate_text_tokens(media.content_text(content))
+    refs = media.image_refs(content)
+    total += len(refs) * media.IMAGE_TOKEN_ESTIMATE
     # A thinking-mode turn keeps its chain of thought on the assistant message
     # and re-sends it (see utils.call_openai_server), so it occupies prompt
     # space in every later request that carries tools.

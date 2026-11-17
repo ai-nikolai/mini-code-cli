@@ -80,6 +80,9 @@ except ModuleNotFoundError:  # pragma: no cover - bare images (Terminal-Bench)
     requests = _RequestsShim
 
 
+from . import media
+
+
 def oneline(text, limit=None):
     """Collapse ``text`` onto a single line, optionally truncated to ``limit``.
 
@@ -289,7 +292,7 @@ def call_openai_server(messages, max_tokens=2048, temperature=0.0, model="defaul
     # unexpected keys.
     payload = {
         "model": model,
-        "messages": messages,
+        "messages": media.materialize_messages(messages),
         "temperature": temperature,
     }
 

@@ -41,11 +41,13 @@ from . import subagents
 from . import skills
 from . import agent_files
 from . import compaction as compaction_mod
+from . import media
 from . import planning
 from . import recovery
 from . import plan as plan_utils
 from . import settings as settings_mod
 from . import tokens as tokens_mod
+from . import todos as todos_mod
 from .config import (
     DEFAULT_CACHE_LOCATION,
     DEFAULT_MODEL_URL,
@@ -181,6 +183,7 @@ def parse_args():
     parser.add_argument("--nudge-limit", type=int, default=1,
                         help="Maximum continuation nudges per text-only stop with --allow-nudge. default=1")
     parser.add_argument("--scratchpad", action="store_true", help="Give the agent a scratch-pad file in --allowed-dir/.mini (SCRATCHPAD.md) plus permission to create further scratch files there for thoughts, plans and learnings.")
+    parser.add_argument("--dynamic-todo-tracking", action="store_true", help="Give the agent a structured, session-local todo list (todo_write/todo_update/todo_list) and a /todo view. Works independently of plan mode and the scratchpad.")
     parser.add_argument("--background", action="store_true", help="Enable background tasks: the agent may start long-running shell commands or sub-agent tasks and inspect/cancel them with the `background` tool and /background. Requires --enable-shell or --enable-subagents. default= False")
     parser.add_argument("--tui", nargs="?", const="on", default="auto",
                         choices=("auto", "on", "off"),
@@ -238,6 +241,8 @@ def print_help(args, console=None):
         ("/history <n>", "show the full messages recorded for turn n"),
         ("/history last", "...for the most recent turn"),
         ("/plan", "show the current goal + plan (plan mode only)"),
+        ("/todo", "show the dynamic todo list (/todo clear empties it)"),
+        ("/image <path>", "stage an image for the next message (/image clear)"),
         ("/context", "show how the context window is used (tokens + percentages)"),
         ("/background [id]", "show foreground activity + background tasks (or one task's output)"),
         ("/settings", "show/change session settings (number or name)"),
@@ -347,6 +352,7 @@ _LOOP_INJECTED_USER_PREFIXES = (
     "Plan completion summary (from CURRENT_PLAN.md):",
     "Plan verification (from CURRENT_PLAN.md):",
     "Plan verification (open-plan):",
+    "Image read from the task:",
 )
 
 
@@ -354,7 +360,7 @@ def _is_loop_injected(message):
     """Whether ``message`` is a user turn this loop injected, not the user's own."""
     if not isinstance(message, dict) or message.get("role") != "user":
         return False
-    content = message.get("content") or ""
+    content = media.content_text(message.get("content") or "")
     return str(content).lstrip().startswith(_LOOP_INJECTED_USER_PREFIXES)
 
 
@@ -762,6 +768,9 @@ class AgentSession:
         self._activity_label = None
         self._activity_started = None
         self._last_activity = None
+        self.dynamic_todo_tracking = bool(
+            getattr(args, "dynamic_todo_tracking", False))
+        self.todo_store = None
 
         self._register_tools(args)
 
@@ -805,6 +814,7 @@ class AgentSession:
         self._runtime_pending_replan = False
         self._last_tool_result_text = ""
         self._turn_goal = ""
+        self._pending_images = []
 
         self.scratchpad = bool(getattr(self.args, "scratchpad", False))
         self.tui = (self.tui_mode != "off"
@@ -1071,6 +1081,9 @@ class AgentSession:
                 self.session_dir, enabled=self.plan_mode)
             self.background_tasks.set_log_dir(
                 os.path.join(self.session_dir, "background"))
+            if self.dynamic_todo_tracking:
+                # Rebind the todo tools to the restored session's store.
+                self._register_tools(self.args)
             self._prepare_agent_files()
             self.messages = restored
             self.summary = records
@@ -1210,6 +1223,23 @@ class AgentSession:
                 self.background_tasks, self._run_background_subagent))
             self.llm_tools.extend(background_mod.background_tools())
 
+        # Structured dynamic todo tracking is orthogonal to plan mode, shell
+        # and the scratchpad. Its store lives in the session cache, not the
+        # worktree.
+        self.dynamic_todo_tracking = bool(
+            getattr(args, "dynamic_todo_tracking", False))
+        if self.dynamic_todo_tracking:
+            expected = os.path.join(self.session_dir, todos_mod.TODO_FILENAME)
+            if self.todo_store is None or self.todo_store.path != expected:
+                self.todo_store = todos_mod.TodoStore(self.session_dir)
+            todo_functions = todos_mod.todo_functions(self.todo_store)
+            self.tools_dict.update(
+                tools.util_get_tools_dict(functions=todo_functions))
+            self.llm_tools.extend(
+                tools.util_get_tools(functions=todo_functions))
+        else:
+            self.todo_store = None
+
 
     def _prepare_agent_files(self):
         """Create the opt-in agent-owned files under ``--allowed-dir/.mini``.
@@ -1240,6 +1270,8 @@ class AgentSession:
         open_plan_path = None
         if self.plan_mode and self.plan_strategy == planning.OPEN_PLAN:
             open_plan_path = agent_files.open_plan_path(self.allowed_dir)
+        todo_path = (self.todo_store.path
+                     if self.dynamic_todo_tracking and self.todo_store else None)
         return prompts.system_prompt(
             tools_dict=self.tools_dict, allowed_dir=self.allowed_dir,
             plan_mode=self.plan_mode,
@@ -1249,6 +1281,7 @@ class AgentSession:
             scratchpad_dir=(agent_files.mini_dir(self.allowed_dir)
                             if self.scratchpad else None),
             open_plan_path=open_plan_path,
+            todo_path=todo_path,
         )
 
     def _build_initial_messages(self):
@@ -1746,7 +1779,7 @@ class AgentSession:
         turns = []
         for message in self.messages:
             role = message.get("role")
-            content = message.get("content")
+            content = media.content_text(message.get("content"))
             if role not in ("user", "assistant") or not content:
                 continue
             if id(message) in persistent:
@@ -2020,6 +2053,10 @@ class AgentSession:
         failures, and ``prompt-change-plan`` then starts a fresh plan.
         """
         self.messages.append({"role": "user", "content": user_input})
+        if self._pending_images:
+            content = media.user_content(user_input, self._pending_images)
+            self.messages[-1]["content"] = content
+            self._pending_images = []
         self._text_only_nudges = 0
         verify_pending_action = False
         self._runtime_prompts_this_turn = 0
@@ -2205,7 +2242,7 @@ class AgentSession:
         """Return the content of the most recent assistant (non tool-call) turn."""
         for m in reversed(self.messages):
             if m.get("role") == "assistant" and not m.get("tool_calls"):
-                return m.get("content") or ""
+                return media.content_text(m.get("content"))
         return ""
 
     # -- plan mode ---------------------------------------------------------
@@ -2456,7 +2493,7 @@ class AgentSession:
         for message in reversed(list(tail or ())):
             if (isinstance(message, dict) and message.get("role") == "user"
                     and not _is_loop_injected(message)):
-                return message.get("content") or ""
+                return media.content_text(message.get("content"))
         return ""
 
     # -- compaction strategies --------------------------------------------
@@ -2709,11 +2746,67 @@ class AgentSession:
         if cmd in ("skip-plan", "skip_plan", "skipplan"):
             self._run_skipped_plan(arg)
             return True
+        if cmd == "image":
+            self._handle_image_command(arg)
+            return True
+        if cmd == "todo":
+            self._show_todos(arg)
+            return True
         if cmd == "settings":
             self._handle_settings_command(arg)
             return True
         self.console.note(f"Unknown command {stripped!r}. Try /help.", "warn")
         return True
+
+    def _show_todos(self, arg):
+        """Show or clear the dynamic todo list."""
+        if self.todo_store is None:
+            self.console.note(
+                "Dynamic todo tracking is off (--dynamic-todo-tracking).",
+                "info")
+            return
+        if (arg or "").strip().lower() in ("clear", "reset"):
+            self.todo_store.replace([])
+            self.console.note("Todo list cleared.", "info")
+            return
+        self.console.rule("todo", fg="cyan")
+        for line in self.todo_store.render().splitlines():
+            self.console.emit(line)
+        self.console.rule(char="═", fg="cyan")
+
+    def _handle_image_command(self, arg):
+        """Stage an image for the next user message (``/image PATH``)."""
+        arg = (arg or "").strip().strip("'\"")
+        if not arg:
+            self.console.note(
+                "Usage: /image PATH (PNG/JPEG/WEBP/GIF), or /image clear.",
+                "warn")
+            return
+        if arg.lower() == "clear":
+            self._pending_images = []
+            self.console.note("Pending images cleared.", "info")
+            return
+        try:
+            ref = media.stage_image(arg, self.session_dir)
+        except (OSError, ValueError) as exc:
+            self.console.note(f"Could not attach image: {exc}", "error")
+            return
+        self._pending_images.append(ref)
+        self.console.note(
+            f"Image staged for the next message: {ref['name']} "
+            f"({ref['mime']}, {ref['bytes']} bytes).", "ok")
+
+    def _attach_image_from_read(self, path):
+        """Prepare an image read by the agent's ``read_file`` tool.
+
+        Returns ``(tool_text, ref)``; the caller appends the tool result first
+        and then the user content block, because OpenAI-style tool messages are
+        text-only.
+        """
+        ref = media.stage_image(path, self.session_dir)
+        text = (f"Image read from {path}; it is attached in the next message "
+                f"so you can inspect it.")
+        return text, ref
 
     # -- settings ---------------------------------------------------------
 
@@ -2981,6 +3074,8 @@ class AgentSession:
         if not compaction_mod.is_strategy(self.compaction_strategy):
             self.compaction_strategy = compaction_mod.DEFAULT_COMPACTION_STRATEGY
         self.scratchpad = bool(self.args.scratchpad)
+        self.dynamic_todo_tracking = bool(
+            getattr(self.args, "dynamic_todo_tracking", False))
 
         if ("model" in changed_names
                 and self.settings.values.get("max_tokens") is None):
@@ -3441,7 +3536,7 @@ class AgentSession:
         last_role = last_text = None
         for m in reversed(self.messages):
             role = m.get("role")
-            content = m.get("content")
+            content = media.content_text(m.get("content"))
             if role == "assistant" and not m.get("tool_calls") and content:
                 last_role, last_text = "Assistant", content
                 break
@@ -3631,6 +3726,25 @@ class AgentSession:
             self._append_tool_result(call_id,
                 f"Error: File operation not allowed outside allowed directory: {self.allowed_dir}")
             return
+
+        # 1b) read_file on a raster image: text tools cannot represent it, so
+        # attach the image as a user content block after the tool result.
+        if name == "read_file":
+            image_path = tool_params.get("file_path")
+            if media.is_image_path(image_path):
+                try:
+                    text, ref = self._attach_image_from_read(image_path)
+                except (OSError, ValueError) as exc:
+                    self._append_tool_result(
+                        call_id, f"Error: could not read image {image_path}: {exc}")
+                    return
+                self._append_tool_result(call_id, text)
+                self.messages.append({
+                    "role": "user",
+                    "content": media.user_content(
+                        f"Image read from the task: {image_path}", [ref]),
+                })
+                return
 
         # 2) Shell-safety classifier (DENY / ASK / ALLOW), always enforced.
         background_action = (str(tool_params.get("action", "")).lower()

@@ -32,6 +32,7 @@ import threading
 import unicodedata
 from collections import deque
 
+from . import media
 from .planning import DEFAULT_PLAN_STRATEGY
 from .utils import oneline, plural
 
@@ -793,12 +794,12 @@ class Console:
         self.emit(self.style("-" * self.width, fg="gray", dim=True))
         for msg in messages:
             role = msg.get("role", "?")
-            content = msg.get("content", "")
+            content = media.content_text(msg.get("content"))
             self.emit(self.style(f"{self.glyph('role')} {role}", fg="magenta", bold=True))
             if role == "tool":
                 self.emit(f"    tool result for id {msg.get('tool_call_id', '')}: {self._oneline(content, 200)}")
             elif content:
-                for line in str(content).splitlines():
+                for line in content.splitlines():
                     self.emit(f"    {line}")
             else:
                 self.emit("    (no content)")

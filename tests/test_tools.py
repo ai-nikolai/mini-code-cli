@@ -186,6 +186,62 @@ class ToolOutputBoundsTest(ToolTestCase):
                              tools.MAX_GLOB_RESULTS + 2)
 
 
+class WebSearchTest(unittest.TestCase):
+    HTML = """
+    <a rel="nofollow" class="result__a" href="https://example.test/one">
+      First <b>result</b> &amp; more</a>
+    <a class="result__snippet" href="#">First snippet.</a>
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Ftwo">
+      Second result</a>
+    <a class="result__snippet" href="#">Second snippet.</a>
+    """
+
+    def test_parses_ddg_html_results_and_unwraps_redirects(self):
+        with mock.patch.object(tools, "_post", return_value=self.HTML):
+            results = tools._ddg_html_results("query")
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0][0], "First result & more")
+        self.assertEqual(results[0][1], "https://example.test/one")
+        self.assertEqual(results[0][2], "First snippet.")
+        self.assertEqual(results[1][1], "https://example.test/two")
+
+    def test_parses_ddg_lite_results(self):
+        body = """
+        <a rel="nofollow" href="https://example.test/one"
+           class='result-link'>First result</a>
+        <td class='result-snippet'>First snippet.</td>
+        """
+        with mock.patch.object(tools, "_post", return_value=body):
+            results = tools._ddg_lite_results("query")
+        self.assertEqual(results, [("First result", "https://example.test/one",
+                                    "First snippet.")])
+
+    def test_challenge_page_raises_so_callers_can_fall_back(self):
+        with mock.patch.object(
+                tools, "_post",
+                return_value="<html>anomaly challenge</html>"):
+            with self.assertRaises(RuntimeError):
+                tools._ddg_html_results("query")
+
+    def test_web_search_falls_back_to_answers_when_html_is_blocked(self):
+        with mock.patch.object(tools, "_ddg_lite_results",
+                               side_effect=RuntimeError("blocked")), \
+                mock.patch.object(tools, "_ddg_html_results",
+                                  side_effect=RuntimeError("blocked")), \
+                mock.patch.object(tools, "_ddg_instant_results",
+                                  return_value=[("Example", "https://example.test",
+                                                 "An example abstract.")]), \
+                mock.patch.object(tools, "_wikipedia_results",
+                                  side_effect=AssertionError("not needed")):
+            text = tools.web_search("example")
+        self.assertIn("Example", text)
+        self.assertIn("https://example.test", text)
+        self.assertIn("An example abstract.", text)
+
+    def test_web_search_rejects_empty_queries(self):
+        self.assertIn("must not be empty", tools.web_search("  "))
+
+
 class FetchCapTest(unittest.TestCase):
 
     def test_read_website_caps_the_download_to_the_requested_size(self):

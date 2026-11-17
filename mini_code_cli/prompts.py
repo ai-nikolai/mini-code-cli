@@ -25,6 +25,7 @@ model:
 
 import os
 
+from . import media
 from .tokens import CHARS_PER_TOKEN
 
 # ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ from .tokens import CHARS_PER_TOKEN
 
 def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir=None,
                   session_dir=None, scratchpad_path=None, scratchpad_dir=None,
-                  open_plan_path=None):
+                  open_plan_path=None, todo_path=None):
     """
     Takes a list of tool names and returns a system prompt string.
 
@@ -45,6 +46,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
     ``scratchpad_path`` enables the scratchpad block. ``open_plan_path`` selects
     the open-plan strategy: the agent owns that document and maintains it with
     the normal file tools instead of the loop authoring CURRENT_PLAN.md.
+    ``todo_path`` enables the structured dynamic-todo block.
     """
 
     if tools_dict:
@@ -84,6 +86,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
     if scratchpad_path:
         scratchpad_prompt = "\n" + scratchpad_instructions(scratchpad_path,
                                                             scratchpad_dir)
+    todo_prompt = "\n" + todo_instructions(todo_path) if todo_path else ""
 
     # The closing "do not create extra .md files" rule has an explicit
     # exception for the agent-owned files this run advertises.
@@ -96,7 +99,7 @@ def system_prompt(tools_dict=None, allowed_dir=None, plan_mode=False, skills_dir
 
     prompt = f"""
 {base_prompt}
-{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{scratchpad_prompt}{skills_prompt}
+{tool_descriptions}{end_prompt}{allowed_dir_prompt}{plan_mode_prompt}{scratchpad_prompt}{todo_prompt}{skills_prompt}
 Important: Follow the user instruction. Do not create additional .md files (unless asked to do so).{extra_files_note} Do not create unit tests (unless asked to do so), etc.
 """
     return prompt.strip()
@@ -183,6 +186,27 @@ def scratchpad_instructions(scratchpad_path, scratchpad_dir=None):
     )
 
 
+def todo_instructions(todo_path):
+    """The extra system-prompt block for ``--dynamic-todo-tracking``.
+
+    The list is structured and session-local; the agent uses the todo_* tools
+    rather than editing the JSON file, so statuses and ids stay valid.
+    """
+    return (
+        "DYNAMIC TODO TRACKING: Maintain a short todo list for the current "
+        "task using the todo tools.\n"
+        "- todo_write replaces the whole list with a JSON array of "
+        "{\"content\", \"status\"} objects; todo_update changes one item by "
+        "id; todo_list shows the current list.\n"
+        "- Use statuses pending, in_progress and completed. Keep at most one "
+        "item in_progress and mark an item completed only when you have "
+        "verified it.\n"
+        "- Update the list as work progresses instead of relying on prose. It "
+        "is working state stored in the session cache, not a project file.\n"
+        f"(Store: {todo_path})"
+    )
+
+
 def skills_instructions(skills_dir):
     """The extra system-prompt block when the skills feature is enabled.
 
@@ -243,7 +267,7 @@ def _bounded_conversation(messages, max_tokens):
     used = 0
     for message in reversed(messages):
         role = message.get("role", "?")
-        content = str(message.get("content") or "")
+        content = media.content_text(message.get("content"))
         if len(content) > per_message_chars:
             content = (content[:per_message_chars]
                        + "\n[... truncated to fit the summary request ...]")
@@ -258,7 +282,7 @@ def _bounded_conversation(messages, max_tokens):
         (message for message in messages
          if message.get("role") == "user" and message.get("content")), None)
     if first_user is not None:
-        content = str(first_user.get("content") or "")
+        content = media.content_text(first_user.get("content"))
         if len(content) > 2_000:
             content = content[:2_000] + "\n[... truncated ...]"
         selected.insert(0, f"user (initial request): {content}")
@@ -284,7 +308,7 @@ def compaction_prompt(messages, max_tokens=None):
         conversation = _bounded_conversation(messages, max_tokens)
     else:
         conversation = "\n".join(
-            [f"{msg.get('role', '?')}: {msg.get('content') or ''}"
+            [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}"
              for msg in messages])
     prompt = f"""
 Please analyze the following conversation and output a concise summary covering:
@@ -319,7 +343,7 @@ def plan_prompt(messages, current_instruction):
     # tool-call-only assistant turn has no content key, and a KeyError here
     # would silently drop plan-mode authoring for the rest of the session.
     conversation = "\n".join(
-        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+        [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}" for msg in messages])
     prompt = f"""
 You are planning how to complete the current user instruction. Using the
 full conversation so far, author a concrete, step-by-step plan for accomplishing
@@ -390,7 +414,7 @@ def plan_review_prompt(messages, goal, strict=False):
     # .get(): a tool-call-only assistant turn has content None / no key (see
     # compaction_prompt); indexing it here would abort the review.
     conversation = "\n".join(
-        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+        [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}" for msg in messages])
     strict_rules = f"\n{_strict_verification_rules()}\n" if strict else ""
     prompt = f"""
 You are reviewing the current plan now that you have (apparently) finished
@@ -439,7 +463,7 @@ def plan_verify_prompt(messages, goal, strict=False, plan_document=""):
     must satisfy.
     """
     conversation = "\n".join(
-        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+        [f"{msg.get('role', '?')}: {media.content_text(msg.get('content'))}" for msg in messages])
     strict_rules = f"\n{_strict_verification_rules()}\n" if strict else ""
     plan_block = ""
     if str(plan_document or "").strip():
@@ -506,7 +530,8 @@ def compaction_keep_prompt(messages, summary):
     lines = []
     for index, message in enumerate(messages):
         role = message.get("role", "?") if isinstance(message, dict) else "?"
-        content = (message.get("content") if isinstance(message, dict) else "") or ""
+        content = (media.content_text(message.get("content"))
+                   if isinstance(message, dict) else "")
         content = " ".join(str(content).split())
         if len(content) > 400:
             content = content[:400] + "..."

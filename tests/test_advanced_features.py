@@ -14,7 +14,7 @@ import sys
 import unittest
 from unittest import mock
 
-from mini_code_cli import (agent_files, agent_loop, compaction, planning,
+from mini_code_cli import (agent_files, agent_loop, compaction, media, planning,
                            prompts, ui, utils)
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
 
@@ -620,6 +620,78 @@ class PlanStrategyTest(_AdvancedCase):
         self.assertEqual(len(tool_messages), 1)
 
 
+class DynamicTodoAndImageTest(_AdvancedCase):
+    def _png(self):
+        path = os.path.join(self.workdir, "board.png")
+        with open(path, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n" + b"fake image bytes")
+        return path
+
+    def test_dynamic_todo_flag_adds_tools_and_prompt(self):
+        session = self.new_session(dynamic_todo_tracking=True)
+        self.assertIn("todo_write", session.tools_dict)
+        self.assertIn("todo_update", session.tools_dict)
+        self.assertIn("todo_list", session.tools_dict)
+        self.assertIn("DYNAMIC TODO TRACKING",
+                      session.messages[0]["content"])
+        session.tools_dict["todo_write"]["function"](
+            '[{"content": "do the thing", "status": "in_progress"}]')
+        session._handle_command("/todo")
+        self.assertIn("[~] do the thing", self.output())
+
+    def test_disabling_dynamic_todos_removes_the_tools(self):
+        session = self.new_session(dynamic_todo_tracking=True)
+        session.console.read_line = mock.Mock(return_value="y")
+        session._handle_settings_command("dynamic-todo-tracking off")
+        self.assertNotIn("todo_write", session.tools_dict)
+        self.assertNotIn("DYNAMIC TODO TRACKING",
+                         session.messages[0]["content"])
+
+    def test_image_command_stages_an_image_for_the_next_turn(self):
+        path = self._png()
+        session = self.new_session(start=False)
+        session._handle_command(f"/image {path}")
+        self.assertEqual(len(session._pending_images), 1)
+        stub = StubLLM([("I see it.", [], USAGE)])
+        run_loop(session, "look at this", stub)
+
+        user = next(m for m in session.messages
+                    if m.get("role") == "user"
+                    and isinstance(m.get("content"), list))
+        self.assertEqual(user["content"][0]["type"], "text")
+        self.assertEqual(user["content"][1]["type"], "image_ref")
+        self.assertEqual(session._pending_images, [])
+        materialized = media.materialize_messages([user])
+        self.assertEqual(materialized[0]["content"][1]["type"], "image_url")
+        self.assertTrue(materialized[0]["content"][1]["image_url"]["url"]
+                        .startswith("data:image/png;base64,"))
+
+    def test_image_command_rejects_non_images(self):
+        path = os.path.join(self.workdir, "notes.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("hello")
+        session = self.new_session(start=True)
+        session._handle_command(f"/image {path}")
+        self.assertEqual(session._pending_images, [])
+        self.assertIn("unsupported image", self.output())
+
+    def test_read_file_on_an_image_attaches_it(self):
+        path = self._png()
+        session = self.new_session(start=True)
+        call = tool_call("img1", "read_file", {"file_path": path})
+        session._run_one_tool_call(call)
+
+        tool_message = next(m for m in reversed(session.messages)
+                            if m.get("role") == "tool")
+        self.assertIn("Image read from", tool_message["content"])
+        image_message = next(m for m in reversed(session.messages)
+                             if m.get("role") == "user"
+                             and isinstance(m.get("content"), list))
+        self.assertEqual(image_message["content"][1]["type"], "image_ref")
+        self.assertTrue(media.is_image_path(
+            image_message["content"][1]["path"]))
+
+
 class PromptStrategyTest(unittest.TestCase):
     def test_system_prompt_includes_open_plan_and_scratchpad_blocks(self):
         text = prompts.system_prompt(
@@ -736,6 +808,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(args.nudge_limit, 1)
         self.assertFalse(args.strict_verify)
         self.assertEqual(args.runtime_strategy, "normal")
+        self.assertFalse(args.dynamic_todo_tracking)
 
     def test_new_flags_are_accepted(self):
         with mock.patch.object(
@@ -744,7 +817,7 @@ class ParseArgsTest(unittest.TestCase):
                  "predict-files", "--plan-strategy", "plan-verify",
                  "--allow-nudge", "--nudge-limit", "2",
                  "--strict-verify", "--runtime-strategy",
-                 "prompt-change-plan"]):
+                 "prompt-change-plan", "--dynamic-todo-tracking"]):
             args = agent_loop.parse_args()
         self.assertTrue(args.scratchpad)
         self.assertEqual(args.compaction_strategy, "predict-files")
@@ -753,6 +826,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(args.nudge_limit, 2)
         self.assertTrue(args.strict_verify)
         self.assertEqual(args.runtime_strategy, "prompt-change-plan")
+        self.assertTrue(args.dynamic_todo_tracking)
         # A strategy implies plan mode so the banner and the session agree.
         self.assertTrue(args.plan)
 

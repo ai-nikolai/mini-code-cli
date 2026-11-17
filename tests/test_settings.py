@@ -811,6 +811,7 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertEqual(rows["plan"]["group"], "Planning")
         self.assertEqual(rows["strict-verify"]["group"], "Planning")
         self.assertEqual(rows["runtime-strategy"]["group"], "Agent behaviour")
+        self.assertEqual(rows["dynamic-todo-tracking"]["group"], "Agent behaviour")
         self.assertEqual(rows["verbose"]["group"], "Display")
         self.assertEqual(rows["auto-mode"]["group"], "Agent behaviour")
         self.assertEqual(rows["enable-shell"]["group"], "Tools & permissions")

@@ -31,6 +31,8 @@ suite.
 | `runner.py` | `call_function_with_timeout` -- runs a tool with a hard wall-clock limit via `SIGALRM`. |
 | `shell_safety_utils.py` | Heuristic classifier that sorts shell commands into DENY / ASK / ALLOW tiers. |
 | `plan.py` | Plan-mode bookkeeping: reads/writes `CURRENT_GOAL.md` and `CURRENT_PLAN.md`. Every method is a no-op when disabled. |
+| `media.py` | Image attachments: session-cache staging, `image_ref` content blocks, request-time base64 materialisation and text flattening. |
+| `todos.py` | The session-local structured todo store plus the `todo_write` / `todo_update` / `todo_list` tools. |
 | `recovery.py` | The runtime recovery strategies (`normal`, `prompt-change`, `prompt-change-plan`), failure detection and the recovery prompt. |
 | `planning.py` | The planning-strategy names (`plan-verify-step`, `plan-verify`, `plan-verify2`, `open-plan`) shared by the CLI and the loop, plus the `plan-verify2` verdict parser. |
 | `background.py` | Thread-safe background-task registry for shell commands and sub-agent tasks: process groups, log/output tails, wait/cancel, and the `background` tool schema. |

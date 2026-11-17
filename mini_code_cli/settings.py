@@ -86,7 +86,8 @@ SETTINGS_GROUPS = (
       "ask_permission", "background")),
     ("Runtime limits", ("tool_timeout", "llm_timeout")),
     ("Display", ("verbose",)),
-    ("Agent behaviour", ("runtime_strategy", "auto_mode", "scratchpad")),
+    ("Agent behaviour", ("runtime_strategy", "dynamic_todo_tracking",
+                         "auto_mode", "scratchpad")),
 )
 
 GROUP_BY_ATTR = {
@@ -132,6 +133,8 @@ def _specs():
         SettingSpec("runtime-strategy", "runtime_strategy", "choice",
                     recovery.DEFAULT_RUNTIME_STRATEGY,
                     choices=recovery.RUNTIME_STRATEGIES),
+        SettingSpec("dynamic-todo-tracking", "dynamic_todo_tracking", "bool",
+                    False, cache="tools"),
         SettingSpec("auto-mode", "auto_mode", "bool", False),
         SettingSpec("scratchpad", "scratchpad", "bool", False, cache="prompt"),
     )
