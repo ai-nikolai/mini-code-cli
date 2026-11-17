@@ -675,12 +675,7 @@ def print_no_session_farewell(console, model=None, started_at=None):
 
 
 def build_console(args):
-    """Return ``(console, tui_mode)`` for these args.
-
-    Startup needs the console *before* the session exists: first-run settings
-    questions must run inside the fixed TUI when the TUI is applicable, and the
-    same console must then be reused by the session.
-    """
+    """Return ``(console, tui_mode)`` for these args."""
     mode = tui_mod.tui_mode(getattr(args, "tui", "auto"))
     use_tui = (mode == "on"
                or (mode == "auto" and tui_mod.TuiConsole.supported()))
@@ -700,7 +695,7 @@ class AgentSession:
     CLEAR_COMMANDS = {"clear", "/clear"}
 
     def __init__(self, args, console=None, background_mode = False,
-                 settings=None):
+                 settings=None, defer_model=False):
         self.args = args
         self.settings = settings or settings_mod.Settings.from_args(args)
         if settings is None:
@@ -726,10 +721,15 @@ class AgentSession:
         # LLM / server configuration.
         self.server_url = f"{args.url}"
         self.api_key = args.api_key if args.api_key else os.environ.get("MINI_CODE_API_KEY", "")
-        self.model = self._resolve_model(args)
+        # Startup construction may defer model resolution until the session
+        # decision, so no settings/model probe output precedes the resume offer.
+        self.model = (args.model if defer_model
+                      else self._resolve_model(args))
         # A higher reply budget is the CLI default; an explicit --max-tokens
         # always wins, and a small-window model gets at most half its window.
-        if getattr(args, "max_tokens", None) is None:
+        # With deferred settings/model resolution this is filled in after the
+        # session decision, so a saved --max-tokens value is not shadowed.
+        if not defer_model and getattr(args, "max_tokens", None) is None:
             args.max_tokens = default_max_output_tokens(self.model)
         self.settings.capture_from_args(args)
         if self.settings.api_key or self.settings.api_key_env:
@@ -882,7 +882,11 @@ class AgentSession:
         """
         try:
             if self.restore_previous_session(restore_directory):
-                self._save_settings()
+                ask = (settings_mod.interactive_startup(self.args)
+                       and not self.background_mode)
+                self._adopt_settings(settings_mod.resolve_for_startup(
+                    self.args, self.console, source_dir=restore_directory,
+                    new_session=False, ask=ask))
                 return True
         except Exception as e:
             self.console.note(
@@ -938,11 +942,21 @@ class AgentSession:
         self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
         self.restored_session = False
-        # A fresh interactive session asks for its model/provider again, even
-        # when the previous session's settings were imported. Resuming keeps
-        # the restored settings (and only re-asks when the model was invalid,
-        # which happens before the resume offer).
-        self._ask_settings_from_scratch()
+        # Import the previous session's settings only now, after the user has
+        # decided to start a new session. A fresh interactive session then
+        # asks its provider/model questions from scratch.
+        source = None
+        if not self.background_mode:
+            try:
+                source = find_last_session_dir(self.allowed_dir)
+            except Exception as e:
+                self.console.note(
+                    f"Could not load previous settings: {e}", "warn")
+        ask = (settings_mod.interactive_startup(self.args)
+               and not self.background_mode)
+        self._adopt_settings(settings_mod.resolve_for_startup(
+            self.args, self.console, source_dir=source, new_session=True,
+            ask=ask))
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
@@ -1803,17 +1817,7 @@ class AgentSession:
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
-        # Startup output comes FIRST, before the session is resolved. The banner
-        # and the flag-dependent warnings (API key / shell / --sudo / an unknown
-        # model) describe how this process is configured -- how much the agent
-        # may do unattended -- so the user must see them *before* being asked
-        # whether to resume an older conversation (and before anything can
-        # consume stdin). None of them depends on which session is finally used:
-        # they read args, allowed_dir, cache_dir, server_url and the resolved
-        # model, plus the provisional id minted in __init__.
         if self.tui and isinstance(self.console, tui_mod.TuiConsole):
-            # ``main`` may already have started the TUI so the first-run
-            # settings wizard could run inside the fixed view.
             if not self.console.active and not self.console.start_tui():
                 # --tui on requested the fixed view, but this terminal cannot
                 # host it (piped output, an unsupported TERM, ...). Fall back
@@ -1823,20 +1827,16 @@ class AgentSession:
                 self.console.note(
                     "TUI is not available on this terminal; using the "
                     "scrolling console.", "warn")
-        if not self.tui_active:
-            self.print_welcome()
 
-        # Startup (including the resume offer, which may raise SystemExit) is
-        # inside the guarded region so the alternate screen is always restored.
+        # The resume offer comes first. Settings are loaded only after the
+        # user chooses to resume or start a session, so the banner and the
+        # announcements describe the session that was actually chosen.
         try:
+            self.start_session()
+            if not self.tui_active:
+                self.print_welcome()
             self.print_announcements()
             self._warn_compaction_budget()
-
-            # Only now resolve the session (resume offer / restore / fresh start),
-            # because all of that can consume input and can replace the id. The id
-            # line and the tip therefore come after it and show the id actually in
-            # use (the banner may have shown the provisional one).
-            self.start_session()
             if self.tui_active:
                 self.console.set_summary(self._tui_header_lines())
                 self.console.set_info_provider(self._tui_info_line)
@@ -2605,6 +2605,36 @@ class AgentSession:
         text = value.strip()
         return None if text.lower() == "exit" else text
 
+    def _ensure_key_for_current_model(self, stage=False):
+        """Load/ask for and validate the key after a model/url selection."""
+        provider = settings_mod.provider_name(self.settings)
+        key, env, _persisted = self.settings.key_for()
+        if (key or env
+                or (self.settings.api_key and self.settings.key_entered)):
+            before = (self.settings.api_key, self.settings.api_key_env)
+            settings_mod._validate_key(self.console, self.settings, provider)
+            after = (self.settings.api_key, self.settings.api_key_env)
+            if not stage and after != before:
+                # _validate_key prompted for a replacement (or cleared a
+                # rejected key); apply that result to the runtime.
+                self._apply_settings(
+                    {"api-key": after[0]}, confirm_cache=False,
+                    announce=False)
+            return
+        if provider == "localhost":
+            return
+        key_text = self._read_setting_value("api-key")
+        if not key_text:
+            return
+        self._apply_settings({"api-key": key_text}, confirm_cache=False,
+                             announce=False, stage=stage)
+        applied = self.settings.api_key
+        settings_mod._validate_key(self.console, self.settings, provider)
+        if not stage and self.settings.api_key != applied:
+            self._apply_settings(
+                {"api-key": self.settings.api_key}, confirm_cache=False,
+                announce=False)
+
     def _change_setting_inline(self, row, value, rows):
         """Stage a left/right settings change and refresh the visible table."""
         if not self._apply_settings({row["name"]: value},
@@ -2748,6 +2778,7 @@ class AgentSession:
                 self.settings.api_key_env = ""
                 self.settings.persist_api_key = False
         self.settings.apply_to_args(self.args)
+        self.console.verbose = bool(getattr(self.args, "verbose", False))
         self.server_url = str(self.args.url).rstrip("/")
         self.api_key = self.args.api_key or ""
         if self.args.model:
@@ -2767,6 +2798,8 @@ class AgentSession:
         self.allow_nudge = bool(self.args.allow_nudge)
         self.nudge_limit = max(0, int(self.args.nudge_limit))
         self.compaction_strategy = self.args.compaction_strategy
+        if not compaction_mod.is_strategy(self.compaction_strategy):
+            self.compaction_strategy = compaction_mod.DEFAULT_COMPACTION_STRATEGY
         self.scratchpad = bool(self.args.scratchpad)
 
         if ("model" in changed_names
@@ -2796,43 +2829,23 @@ class AgentSession:
             self.console.note("Settings updated.", "ok")
         return True
 
-    def _ask_settings_from_scratch(self):
-        """Ask the provider/model questions for a fresh interactive session.
+    def _adopt_settings(self, settings):
+        """Replace the session's settings and rebuild everything they affect.
 
-        The startup resolver may already have asked (no settings at all, or an
-        invalid saved model); ``startup_asked`` prevents asking twice. Restored
-        sessions never call this, and background/sub-agent sessions and
-        one-shot prompts never prompt.
+        Called only after the resume/new-session decision: startup runs with
+        CLI/environment/defaults so it cannot print or prompt with stale
+        previous-session settings.
         """
-        if not self.settings.enabled:
-            return False
-        if self.background_mode or self.args.prompt is not None:
-            return False
-        if getattr(self.settings, "model_explicit", False):
-            # An explicit --model is an instruction, not a default to ask about.
-            return False
-        if not settings_mod.interactive_startup(self.args):
-            return False
-        if getattr(self.settings, "startup_asked", False):
-            return False
-
-        self.settings.startup_asked = True
-        before = dict(self.settings.values)
-        before_key = self.settings.api_key
-        settings_mod.first_run(self.settings, self.console)
-
-        parsed = []
-        for spec in settings_mod.SPECS:
-            if spec.attr == "api_key":
-                if self.settings.api_key != before_key:
-                    parsed.append((spec, self.settings.api_key))
-            elif self.settings.values.get(spec.attr) != before.get(spec.attr):
-                parsed.append((spec, self.settings.values.get(spec.attr)))
-        if not parsed:
-            return True
-        self._apply_parsed_settings(
-            parsed, {spec.name for spec, _ in parsed}, announce=False)
-        return True
+        self.settings = settings
+        parsed = [(spec, settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        if parsed:
+            self._apply_parsed_settings(
+                parsed, {spec.name for spec, _ in parsed}, announce=False)
+        else:
+            settings.apply_to_args(self.args)
+            self._save_settings()
+        return settings
 
     def _handle_settings_command(self, arg):
         arg = (arg or "").strip()
@@ -2896,23 +2909,7 @@ class AgentSession:
                     continue
                 state["dirty"] = True
                 if row["name"] in ("model", "url"):
-                    provider = settings_mod.provider_name(self.settings)
-                    key, env, _persisted = self.settings.key_for()
-                    if (key or env
-                            or (self.settings.api_key
-                                and self.settings.key_entered)):
-                        # A stored key was loaded, or an explicit CLI/env key
-                        # is active; verify it still works for this model.
-                        settings_mod._validate_key(
-                            self.console, self.settings, provider)
-                    elif provider != "localhost":
-                        # A different model with no stored key: ask now.
-                        key_text = self._read_setting_value("api-key")
-                        if key_text and self._apply_settings(
-                                {"api-key": key_text}, confirm_cache=False,
-                                announce=False, stage=True):
-                            settings_mod._validate_key(
-                                self.console, self.settings, provider)
+                    self._ensure_key_for_current_model(stage=True)
             return
         if not arg:
             for line in self._settings_lines():
@@ -2991,6 +2988,8 @@ class AgentSession:
         if raw is None or raw == "":
             return
         self._apply_settings({spec.name: raw}, confirm_cache=True)
+        if spec.name in ("model", "url"):
+            self._ensure_key_for_current_model(stage=False)
 
     def _run_skipped_plan(self, prompt):
         """Handle ``/skip-plan PROMPT``: run the prompt without planning it."""
@@ -3789,32 +3788,10 @@ class _Abort(Exception):
 
 def main():
     args = parse_args()
-    # Build (and, when startup may ask questions, start) the console before
-    # resolving settings: the first-run wizard must use the same view -- the
-    # fixed TUI when applicable -- as the session that follows it.
-    console, _mode = build_console(args)
-    tui_started = False
-    if (isinstance(console, tui_mod.TuiConsole)
-            and settings_mod.interactive_startup(args)):
-        tui_started = console.start_tui()
-    try:
-        settings = settings_mod.resolve_for_startup(args, console=console)
-        session = AgentSession(args, console=console, settings=settings)
-        session.run(initial_prompt=args.prompt)
-    except KeyboardInterrupt:
-        # Ctrl-C while answering the first-run wizard: leave the fixed view
-        # and exit without a traceback or an alternate-screen left behind.
-        if tui_started and console.active:
-            console.stop_tui()
-        console.note("Startup cancelled.", "info")
-        print_no_session_farewell(console, getattr(args, "model", None))
-        return
-    except BaseException:
-        # A failure before run() would otherwise leave the terminal on the
-        # alternate screen. run() stops the TUI itself on its normal paths.
-        if tui_started and console.active:
-            console.stop_tui()
-        raise
+    # Startup deliberately does not load previous-session settings: the resume
+    # offer comes first, then the chosen session imports its own settings.
+    session = AgentSession(args, defer_model=True)
+    session.run(initial_prompt=args.prompt)
 
 
 if __name__ == "__main__":

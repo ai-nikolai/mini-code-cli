@@ -550,162 +550,135 @@ class StartupConsoleTest(unittest.TestCase):
             console, _mode = agent_loop.build_console(self.args)
         self.assertIs(console, ui.console)
 
-    def test_main_starts_tui_before_resolving_settings(self):
-        self.args.tui = "on"
-        self.args.prompt = None
-        self.args.no_settings = False
+    def test_main_defers_settings_and_model_until_run(self):
         events = []
-        console = tui.TuiConsole(stream=io.StringIO(), color=False,
-                                 unicode=False)
-        console.start_tui = mock.Mock(
-            side_effect=lambda: events.append("tui") or True)
-        sentinel = mock.Mock()
 
         class FakeSession:
-            def __init__(self, args, console=None, settings=None):
-                self.console = console
-                self.settings = settings
+            def __init__(self, args, defer_model=False):
+                events.append(("init", defer_model))
 
             def run(self, initial_prompt=None):
-                events.append("run")
+                events.append(("run", initial_prompt))
 
         with mock.patch.object(agent_loop, "parse_args",
                                return_value=self.args), \
-                mock.patch.object(agent_loop, "build_console",
-                                  return_value=(console, "on")), \
-                mock.patch.object(agent_loop.settings_mod,
-                                  "interactive_startup", return_value=True), \
+                mock.patch.object(agent_loop, "AgentSession", FakeSession), \
                 mock.patch.object(
                     agent_loop.settings_mod, "resolve_for_startup",
-                    side_effect=lambda args, console=None:
-                    events.append("settings") or sentinel), \
-                mock.patch.object(agent_loop, "AgentSession", FakeSession):
+                    side_effect=AssertionError(
+                        "settings loaded before the session decision")):
             agent_loop.main()
 
-        self.assertEqual(events, ["tui", "settings", "run"])
-
-    def test_interrupt_during_first_run_stops_the_tui(self):
-        self.args.tui = "on"
-        self.args.prompt = None
-        self.args.no_settings = False
-        console = tui.TuiConsole(stream=io.StringIO(), color=False,
-                                 unicode=False)
-        console._active = True
-        console.start_tui = mock.Mock(return_value=True)
-
-        with mock.patch.object(agent_loop, "parse_args",
-                               return_value=self.args), \
-                mock.patch.object(agent_loop, "build_console",
-                                  return_value=(console, "on")), \
-                mock.patch.object(agent_loop.settings_mod,
-                                  "interactive_startup", return_value=True), \
-                mock.patch.object(agent_loop.settings_mod,
-                                  "resolve_for_startup",
-                                  side_effect=KeyboardInterrupt):
-            agent_loop.main()
-
-        self.assertFalse(console.active)
-        output = console.stream.getvalue()
-        self.assertIn("Startup cancelled.", output)
-        self.assertIn("No session was started. Goodbye!", output)
-        self.assertIn("__  __", output)
-
-    def test_one_shot_prompt_never_starts_the_tui(self):
-        self.args.tui = "on"
-        self.args.prompt = "do it"
-        self.args.no_settings = False
-        console = tui.TuiConsole(stream=io.StringIO(), color=False,
-                                 unicode=False)
-        console.start_tui = mock.Mock(return_value=True)
-
-        class FakeSession:
-            def __init__(self, args, console=None, settings=None):
-                pass
-
-            def run(self, initial_prompt=None):
-                pass
-
-        with mock.patch.object(agent_loop, "parse_args",
-                               return_value=self.args), \
-                mock.patch.object(agent_loop, "build_console",
-                                  return_value=(console, "on")), \
-                mock.patch.object(agent_loop.settings_mod,
-                                  "resolve_for_startup",
-                                  return_value=mock.Mock()), \
-                mock.patch.object(agent_loop, "AgentSession", FakeSession):
-            agent_loop.main()
-
-        console.start_tui.assert_not_called()
+        self.assertEqual(events, [("init", True), ("run", None)])
 
 
 class NewSessionWizardTest(unittest.TestCase):
     def setUp(self):
         self.work = tempfile.mkdtemp()
         self.cache = tempfile.mkdtemp()
-        args = make_args(self.work, self.cache)
-        args.prompt = None
+        self.args = make_args(self.work, self.cache)
+        self.args.prompt = None
         self.console = silent_console()
-        self.session = AgentSession(args, console=self.console)
 
     def tearDown(self):
         shutil.rmtree(self.work, ignore_errors=True)
         shutil.rmtree(self.cache, ignore_errors=True)
 
-    def test_fresh_session_asks_from_scratch(self):
-        self.session.settings.model_explicit = False
+    def _saved_session(self, model="saved-model"):
+        session = os.path.join(self.cache, "previous")
+        os.makedirs(session)
+        saved = settings.Settings()
+        saved.values["model"] = model
+        saved.save(session)
+        return session
+
+    def test_new_session_resolution_asks_from_scratch(self):
+        self.args.model = None
+        source = self._saved_session()
         with mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch.object(settings, "first_run") as first_run:
-            self.session._ask_settings_from_scratch()
+            value = settings.resolve_for_startup(
+                self.args, console=self.console, source_dir=source,
+                new_session=True)
         first_run.assert_called_once()
-        self.assertTrue(self.session.settings.startup_asked)
+        self.assertTrue(value.startup_asked)
 
-    def test_already_asked_session_does_not_ask_again(self):
-        self.session.settings.model_explicit = False
-        self.session.settings.startup_asked = True
+    def test_new_session_resolution_skips_wizard_for_explicit_model(self):
+        self.args.model = "explicit-model"
         with mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch.object(settings, "first_run") as first_run:
-            self.session._ask_settings_from_scratch()
+            settings.resolve_for_startup(
+                self.args, console=self.console, source_dir=None,
+                new_session=True)
         first_run.assert_not_called()
 
-    def test_explicit_model_skips_the_fresh_session_wizard(self):
-        self.session.settings.model_explicit = True
-        with mock.patch("sys.stdin.isatty", return_value=True), \
-                mock.patch.object(settings, "first_run") as first_run:
-            self.session._ask_settings_from_scratch()
-        first_run.assert_not_called()
+    def test_new_session_imports_previous_settings_after_the_decision(self):
+        first_args = make_args(self.work, self.cache)
+        first_args.model = "previous-model"
+        first_args.temperature = 0.5
+        first_args.max_tokens = 1000
+        first_args.verbose = True
+        first = AgentSession(first_args, console=self.console)
+        first.start_new_session()
 
-    def test_background_session_never_asks(self):
-        self.session.settings.model_explicit = False
-        self.session.background_mode = True
-        with mock.patch("sys.stdin.isatty", return_value=True), \
-                mock.patch.object(settings, "first_run") as first_run:
-            self.session._ask_settings_from_scratch()
-        first_run.assert_not_called()
+        second_args = make_args(self.work, self.cache)
+        second_args.model = None
+        second_console = silent_console()
+        second = AgentSession(second_args, console=second_console,
+                              defer_model=True)
+        self.assertIsNone(second.model)
+        self.assertFalse(second_console.verbose)
 
-    def test_fresh_session_wizard_applies_the_new_model(self):
-        self.session.settings.model_explicit = False
-        self.console.choose = mock.Mock(side_effect=[2, 1])
-        self.console.read_secret = mock.Mock(return_value="sk-test")
-        self.console.read_line = mock.Mock(return_value="n")
-        with mock.patch("sys.stdin.isatty", return_value=True), \
-                mock.patch.object(utils, "list_served_models",
-                                  return_value=None), \
-                mock.patch.object(utils, "probe_api_key",
-                                  return_value=True):
-            self.session._ask_settings_from_scratch()
+        second.start_new_session()
+        self.assertEqual(second.model, "previous-model")
+        self.assertEqual(second.settings.values["temperature"], 0.5)
+        self.assertEqual(second.args.max_tokens, 1000)
+        self.assertTrue(second.settings.values["verbose"])
+        self.assertTrue(second_console.verbose)
 
-        self.assertEqual(self.session.settings.values["url"],
-                         settings.DEEPSEEK_URL)
-        self.assertEqual(self.session.settings.values["model"],
-                         "deepseek-chat")
-        self.assertEqual(self.session.args.model, "deepseek-chat")
-        self.assertEqual(self.session.model, "deepseek-chat")
+    def test_restore_adopts_the_restored_session_settings(self):
+        first_args = make_args(self.work, self.cache)
+        first_args.model = "restored-model"
+        first = AgentSession(first_args, console=self.console)
+        first.start_new_session()
 
-    def test_start_new_session_calls_the_wizard(self):
-        with mock.patch.object(self.session, "_ask_settings_from_scratch") \
-                as ask:
-            self.session.start_new_session()
-        ask.assert_called_once()
+        second_args = make_args(self.work, self.cache)
+        second_args.model = None
+        second = AgentSession(second_args, console=self.console,
+                              defer_model=True)
+        self.assertTrue(second._try_restore(first.session_dir))
+        self.assertEqual(second.model, "restored-model")
+
+    def test_background_session_never_loads_previous_settings(self):
+        session = AgentSession(self.args, console=self.console,
+                               background_mode=True)
+        with mock.patch.object(
+                agent_loop, "find_last_session_dir",
+                side_effect=AssertionError("background loaded previous settings")), \
+                mock.patch.object(settings, "resolve_for_startup",
+                                  return_value=mock.Mock()) as resolve, \
+                mock.patch.object(session, "_adopt_settings"):
+            session.start_new_session()
+
+        kwargs = resolve.call_args.kwargs
+        self.assertIsNone(kwargs["source_dir"])
+        self.assertFalse(kwargs["ask"])
+        self.assertTrue(kwargs["new_session"])
+
+    def test_start_new_session_adopts_resolved_settings(self):
+        session = AgentSession(self.args, console=self.console)
+        sentinel = mock.Mock()
+        with mock.patch.object(agent_loop, "find_last_session_dir",
+                               return_value=None), \
+                mock.patch.object(settings, "resolve_for_startup",
+                                  return_value=sentinel) as resolve, \
+                mock.patch.object(session, "_adopt_settings") as adopt:
+            session.start_new_session()
+
+        kwargs = resolve.call_args.kwargs
+        self.assertTrue(kwargs["new_session"])
+        self.assertIsNone(kwargs["source_dir"])
+        adopt.assert_called_once_with(sentinel)
 
 
 class SettingsCommandTest(unittest.TestCase):

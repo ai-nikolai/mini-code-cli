@@ -362,18 +362,11 @@ class Console:
         self._render_transient_block(text)
 
     # -- building blocks ----------------------------------------------------
-    def box(self, lines, title=None, fg="cyan", width=None):
-        """Render *lines* inside a bordered box and return it as a string.
-
-        ``width`` forces the total box width (the ASCII banner and the
-        good-bye box use this to span the terminal).
-        """
+    def box(self, lines, title=None, fg="cyan"):
+        """Render *lines* inside a bordered box and return it as a string."""
         lines = ["" if line is None else str(line) for line in lines]
         content_w = max((_visual_len(line) for line in lines), default=0)
-        if width is not None:
-            inner = max(min(int(width) - 2, max(self.width - 2, 12)), 12)
-        else:
-            inner = min(max(content_w + 2, 12), max(self.width - 2, 12))
+        inner = min(max(content_w + 2, 12), max(self.width - 2, 12))
         if title is not None:
             inner = max(inner, _visual_len(title) + 4)
 
@@ -439,8 +432,8 @@ class Console:
         return oneline(text, limit)
 
     # -- semantic renderers -------------------------------------------------
-    def banner(self, title, lines, fg="cyan", width=None):
-        self.emit(self.box(lines, title=title, fg=fg, width=width))
+    def banner(self, title, lines, fg="cyan"):
+        self.emit(self.box(lines, title=title, fg=fg))
 
     def turn(self, role, content, accent="cyan", badge=None):
         """Render a single conversation turn (user / assistant / system).
@@ -879,7 +872,9 @@ class Console:
         else:
             logo_width = len("MINI CODE")
             logo = ("MINI CODE",)
-        content_width = max(self.width - 4, logo_width)
+        content_width = max(
+            [_visual_len(sign)] + [_visual_len(line) for line in row_lines]
+            + [logo_width])
         if logo is LOGO:
             # Center the block as a unit: the 42- and 43-column rows differ by
             # one space and must stay aligned.
@@ -900,8 +895,7 @@ class Console:
         # rather than the startup banner reappearing. Colours only apply on a
         # colour-capable TTY (see :meth:`box`), so piped/ASCII output is
         # unchanged.
-        self.banner(f"MiniCodeCLI v{version} - goodbye", lines,
-                    fg="yellow", width=self.width)
+        self.banner(f"MiniCodeCLI v{version} - goodbye", lines, fg="yellow")
 
     def announce_api_key(self, present):
         if present:

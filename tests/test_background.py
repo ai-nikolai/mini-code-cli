@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest import mock
 
-from mini_code_cli import agent_loop, background, ui
+from mini_code_cli import agent_loop, background, persistence, ui
 from mini_code_cli.agent_loop import AgentSession
 from mini_code_cli.subagents import SubAgent, clear_registry, register
 
@@ -108,6 +108,11 @@ class BackgroundManagerTest(_Base):
 class BackgroundSessionTest(_Base):
     def session(self, enable_shell=False, enable_subagents=False,
                 background=True):
+        # These calls model independent sessions; newer sessions import the
+        # previous session's settings, which would leak flags between calls.
+        shutil.rmtree(os.path.join(self.workdir,
+                                   persistence.SESSION_DIRNAME),
+                      ignore_errors=True)
         args = make_args(self.workdir, self.cache_dir,
                          enable_subagents=enable_subagents)
         args.enable_shell = enable_shell

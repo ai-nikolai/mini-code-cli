@@ -263,12 +263,14 @@ Settings are stored per session in the cache, never in the project’s `.mini`:
 <cache-dir>/<session-id>/settings.json
 ```
 
-A bare `mini-code` imports the settings of the most recent session, then checks the
-saved model against the provider’s `/v1/models` response. If the model is still
-served it is kept; if the server no longer lists it, the provider/model questions
-reopen. Resuming a conversation keeps the restored settings. Starting a **new**
-session asks the provider/model questions again, pre-selecting the current provider
-so Enter keeps it; an explicit `--model` skips both the probe and the questions.
+Startup deliberately does **not** load previous-session settings: the resume offer
+uses the CLI/environment/default configuration, so no settings notes or questions
+appear before you choose. Settings are loaded only after that choice. Resuming
+adopts the restored session’s settings; starting a **new** session imports the
+previous session’s non-model settings and asks the provider/model questions again,
+pre-selecting the current provider so Enter keeps it. An explicit `--model` skips
+the questions. The saved model and API key are checked after the model is known
+(after the restore, or after the provider/model selection).
 
 The wizard asks for the model provider (`localhost`, `deepseek`, or a custom URL)
 and, when needed, the API key. For DeepSeek it then asks which model to use, offering
@@ -279,8 +281,8 @@ applies, the wizard runs inside it (arrow keys or numbers select, and a typed ke
 masked). If you type a key, mini-code asks clearly whether to write it to the session
 file with mode `0600`; otherwise it stays in memory for this session only. Keys are
 scoped to the endpoint/model: selecting another model loads its stored key, or asks
-for one when none is stored. A key found at startup is checked against `/v1/models`;
-an explicit `401`/`403` rejection reopens the key prompt.
+for one when none is stored. Once the model is known, a key found for it is checked
+against `/v1/models`; an explicit `401`/`403` rejection reopens the key prompt.
 
 Use `/settings` to inspect or change settings. The table marks values that rebuild
 the tool list or generated system prompt — these invalidate the LLM prompt cache.

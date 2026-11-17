@@ -41,6 +41,10 @@ SETTINGS_VERSION = 1
 #: unreachable server does not delay an interactive session for long.
 MODEL_CHECK_TIMEOUT = 5
 
+#: ``source_dir`` sentinel: resolve the source from --restore-session or the
+#: last-session pointer, preserving the older resolve_for_startup behavior.
+_AUTO_SOURCE = object()
+
 
 def key_id(url, model):
     """Stable id for a key scoped to one endpoint + model pair."""
@@ -759,8 +763,17 @@ def first_run(settings, console):
     return settings
 
 
-def resolve_for_startup(args, console=None):
-    """Load previous settings, fill missing values, and apply them to ``args``."""
+def resolve_for_startup(args, console=None, source_dir=_AUTO_SOURCE,
+                        new_session=False, ask=None):
+    """Load previous settings, fill missing values, and apply them to ``args``.
+
+    This runs only after the user has chosen to resume or start a session, so
+    nothing here can print or prompt before the resume offer. ``source_dir``
+    selects the settings to import; the sentinel keeps the old
+    "restore target or last session" behavior. ``new_session`` asks the
+    provider/model questions from scratch. ``ask=False`` loads/merges settings
+    without any interactive wizard (background sessions, --prompt, CI).
+    """
     console = console or ui.console
     if getattr(args, "no_settings", False):
         settings = Settings.from_args(args)
@@ -768,32 +781,43 @@ def resolve_for_startup(args, console=None):
         settings.apply_to_args(args)
         return settings
 
-    source = _source_session(args)
+    if source_dir is _AUTO_SOURCE:
+        source = _source_session(args)
+    else:
+        source = source_dir
     saved = Settings.load(source) if source else Settings()
     settings = Settings.resolve(args, saved)
 
-    interactive = interactive_startup(args)
-    missing_model = not (settings.values.get("model")
-                         or settings.values.get("url") != DEFAULT_MODEL_URL)
-    invalid_model = False
-    # An explicit --model is authoritative; do not second-guess it (and avoid
-    # an extra network probe on a normal CLI run).
-    if (interactive and not missing_model and not getattr(args, "model", None)):
-        invalid_model = not model_is_valid(settings)
-    if interactive and (missing_model or invalid_model):
-        if invalid_model:
-            console.note(
-                f"Model {settings.values.get('model')!r} is not served at "
-                f"{settings.values.get('url')}; choosing again.", "warn")
+    interactive = (interactive_startup(args) if ask is None else bool(ask))
+    if interactive and new_session and not settings.model_explicit:
+        # A new session always re-asks the provider/model, importing the other
+        # settings from the previous session.
         first_run(settings, console)
         settings.startup_asked = True
-    elif (interactive
-          and settings.values.get("url") != DEFAULT_MODEL_URL
-          and not settings.api_key):
-        _ask_key(console, settings, "custom")
+    else:
+        missing_model = not (settings.values.get("model")
+                             or settings.values.get("url")
+                             != DEFAULT_MODEL_URL)
+        invalid_model = False
+        # An explicit --model is authoritative; do not second-guess it (and
+        # avoid an extra network probe on a normal CLI run).
+        if (interactive and not new_session and not missing_model
+                and not getattr(args, "model", None)):
+            invalid_model = not model_is_valid(settings)
+        if interactive and not new_session and (missing_model or invalid_model):
+            if invalid_model:
+                console.note(
+                    f"Model {settings.values.get('model')!r} is not served at "
+                    f"{settings.values.get('url')}; choosing again.", "warn")
+            first_run(settings, console)
+            settings.startup_asked = True
+        elif (interactive
+              and settings.values.get("url") != DEFAULT_MODEL_URL
+              and not settings.api_key):
+            _ask_key(console, settings, "custom")
     if interactive and not settings.startup_asked:
-        # Resuming (or a valid model on an explicit URL): the model was not
-        # re-selected above, so check the stored/loaded key for it now.
+        # The model is now chosen (selected above, or loaded from the session
+        # being restored): only now check the key found for it.
         _validate_key(console, settings, provider_name(settings))
 
     settings.apply_to_args(args)

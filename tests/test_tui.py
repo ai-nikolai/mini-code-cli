@@ -998,7 +998,7 @@ args = argparse.Namespace(
     enable_subagents=False, skills=False, llm_timeout=30, tool_timeout=30,
     max_context_tokens=None, plan=False, verbose=False, scratchpad=False,
     background=False, compaction_strategy="summarise", plan_strategy=None,
-    tui="on")
+    no_settings=True, tui="on")
 
 def slow(messages, *a, **k):
     time.sleep(30)
@@ -1075,7 +1075,7 @@ args = argparse.Namespace(
     enable_subagents=False, skills=False, llm_timeout=30, tool_timeout=30,
     max_context_tokens=None, plan=False, verbose=False, scratchpad=False,
     background=False, compaction_strategy="summarise", plan_strategy=None,
-    tui="on")
+    no_settings=True, tui="on")
 
 def fake(messages, *a, **k):
     return ("Hello from stub.", [], {"prompt_tokens": 1,
