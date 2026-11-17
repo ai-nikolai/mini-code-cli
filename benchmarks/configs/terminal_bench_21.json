@@ -1,0 +1,120 @@
+{
+  "_comment": [
+    "Terminal-Bench 2.1 with the closest practical match to the official policy.",
+    "",
+    "Official alignment: task-defined container memory (no 16G override),",
+    "task-defined agent and verifier timeouts (no 6x/2x multipliers), and",
+    "n_concurrent=1. The dataset remains the staged SIF copy because this host",
+    "runs Apptainer, not Docker.",
+    "",
+    "Remaining Apptainer-only deviations: qemu-startup and qemu-alpine-ssh are",
+    "excluded (musl/fakeroot incompatibility), and environment build/agent setup",
+    "timeouts keep a 12x multiplier because SIF extraction/start is much slower",
+    "than a Docker image start. Every other option matches Terminal-Bench 2.1."
+  ],
+  "output_dir": "benchmarks/runs",
+  "concurrency": 1,
+  "runtime": "apptainer",
+  "timeouts": {
+    "instance_seconds": 7200,
+    "agent_seconds": 3600,
+    "test_seconds": 3600
+  },
+  "env": {
+    "OPENAI_API_KEY": "local-vllm",
+    "ANTHROPIC_API_KEY": "local-vllm",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:30000",
+    "ANTHROPIC_MODEL": "ornith-ai/Ornith-1.5-35B-A3B",
+    "OPENAI_BASE_URL": "http://127.0.0.1:30000/v1"
+  },
+  "models": [
+    {
+      "name": "ornith-35b-a3b",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "openai",
+      "api_key_env": "OPENAI_API_KEY"
+    },
+    {
+      "name": "ornith-35b-a3b-anthropic",
+      "model": "ornith-ai/Ornith-1.5-35B-A3B",
+      "base_url": "http://127.0.0.1:30000",
+      "api": "anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY"
+    }
+  ],
+  "agents": [
+    {
+      "name": "mini-code",
+      "settings": [
+        "swe",
+        "swe-compaction-predict-files",
+        "swe-compaction-predict-messages",
+        "swe-plan",
+        "swe-plan-verify",
+        "swe-plan-verify-nudge",
+        "swe-open-plan",
+        "swe-compaction-predict-files-plan-verify",
+        "swe-background"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
+    },
+    {
+      "name": "pi",
+      "settings": [
+        "all-tools"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
+    },
+    {
+      "name": "claude-code",
+      "settings": [
+        "bypass-permissions"
+      ],
+      "models": [
+        "ornith-35b-a3b-anthropic"
+      ]
+    },
+    {
+      "name": "opencode",
+      "settings": [
+        "default"
+      ],
+      "models": [
+        "ornith-35b-a3b"
+      ]
+    }
+  ],
+  "suites": [
+    {
+      "name": "terminal-bench",
+      "dataset": "terminal-bench",
+      "version": "2.1",
+      "limit": 3,
+      "options": {
+        "harness": "harbor",
+        "n_concurrent": 1,
+        "dataset_dir": "external_repos/terminal-bench-2-1",
+        "task_ids": [
+          "adaptive-rejection-sampler",
+          "bn-fit-modify",
+          "cancel-async-tasks"
+        ],
+        "sif_build_timeout_sec": 3600,
+        "exclude_tasks": [
+          "qemu-startup",
+          "qemu-alpine-ssh"
+        ],
+        "agent_timeout_sec": 3600,
+        "test_timeout_sec": 3600,
+        "harbor_bin": "~/miniconda3/envs/hb/bin/harbor",
+        "environment_build_timeout_multiplier": 12,
+        "agent_setup_timeout_multiplier": 12
+      }
+    }
+  ]
+}

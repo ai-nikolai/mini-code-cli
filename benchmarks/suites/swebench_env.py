@@ -1,0 +1,204 @@
+"""Small CLI helpers for the SWE-bench adapter (run as ``python -m ...``).
+
+Two jobs, both of which are pure file transformations and therefore testable
+without Docker, a dataset or a model:
+
+``instances``
+    Materialise the pinned instance list: read a local JSONL (``--from-file``,
+    the offline path) or load the HuggingFace dataset at an exact ``--revision``
+    and copy the fields the run needs. Keeping this as a separate step is what
+    lets ``plan`` print a run without downloading several gigabytes.
+
+``predictions``
+    Collect the per-instance ``model.patch`` files into the ``predictions.jsonl``
+    the SWE-bench harness mandates: one object per instance with
+    ``instance_id`` / ``model_name_or_path`` / ``model_patch``. An instance whose
+    patch is missing becomes an empty patch -- explicitly, so the report says
+    "unresolved" instead of the harness erroring out on a malformed file.
+"""
+import argparse
+import json
+import os
+import sys
+
+#: Fields kept from the dataset: enough to run the agent and to write a prediction,
+#: and small enough that the JSONL stays a few MB rather than a few GB.
+INSTANCE_FIELDS = ("instance_id", "repo", "base_commit", "problem_statement",
+                   "environment_setup_commit", "version", "hints_text", "created_at")
+
+#: Fields the *grader* needs, and nothing else: `make_test_spec` wants the image,
+#: the test lists, the parser/eval type and the precomputed eval script. They are
+#: written to a sidecar file so the agent-facing list stays small -- the eval
+#: script alone is ~50KB per instance.
+GRADING_FIELDS = ("instance_id", "repo", "version", "image", "log_parser",
+                  "eval_type", "eval_script", "FAIL_TO_PASS", "PASS_TO_PASS")
+
+DEFAULT_DATASET = "SWE-bench/SWE-bench_Verified"
+DEFAULT_SPLIT = "test"
+
+
+def load_instances(dataset=DEFAULT_DATASET, split=DEFAULT_SPLIT, revision=None,
+                   limit=None, from_file=None, keep_ids=None, skip_ids=None):
+    """Return a list of instance dicts, from a file or the pinned dataset."""
+    if from_file:
+        instances = read_instances_file(from_file, limit)
+        instances = _select(instances, keep_ids, skip_ids, limit)
+        return instances, [instance for instance in instances]
+    try:
+        from datasets import load_dataset  # heavy, optional: the swebench extra
+    except ImportError as e:  # pragma: no cover - depends on the environment
+        raise SystemExit(
+            "reading the SWE-bench dataset needs the 'datasets' package "
+            "(pip install 'swebench>=5'); alternatively pass --from-file with a "
+            "JSONL of instances") from e
+    loaded = load_dataset(dataset, split=split, revision=revision)
+    instances, grading = [], []
+    for row in loaded:
+        instances.append({key: row.get(key) for key in INSTANCE_FIELDS
+                          if row.get(key) is not None})
+        grading.append({key: row.get(key) for key in GRADING_FIELDS
+                        if row.get(key) is not None})
+    instances = _select(instances, keep_ids, skip_ids, limit)
+    wanted = {instance["instance_id"] for instance in instances}
+    grading = [row for row in grading if row.get("instance_id") in wanted]
+    return instances, grading
+
+
+def _split_ids(value):
+    """``"a,b , c"`` -> ``["a", "b", "c"]`` (None/empty -> [])."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _select(instances, keep_ids=None, skip_ids=None, limit=None):
+    """Apply the keep/skip id lists, then the limit."""
+    keep = _split_ids(keep_ids)
+    skip = set(_split_ids(skip_ids))
+    if keep:
+        by_id = {instance["instance_id"]: instance for instance in instances}
+        instances = [by_id[i] for i in keep if i in by_id]
+    if skip:
+        instances = [i for i in instances if i["instance_id"] not in skip]
+    return instances[: int(limit)] if limit else instances
+
+
+def read_instances_file(path, limit=None):
+    """Read instances from a ``.jsonl`` (one object per line) or ``.json`` list."""
+    with open(path, encoding="utf-8") as handle:
+        if path.endswith(".json"):
+            payload = json.load(handle)
+            instances = payload if isinstance(payload, list) else list(payload.values())
+        else:
+            instances = [json.loads(line) for line in handle if line.strip()]
+    if limit:
+        instances = instances[: int(limit)]
+    for instance in instances:
+        if "instance_id" not in instance:
+            raise SystemExit(f"{path}: an instance has no instance_id")
+    return instances
+
+
+def grading_path(instances_path, override=None):
+    """Where the grader's sidecar lives: explicit, else next to the list."""
+    if override:
+        return override
+    root, ext = os.path.splitext(instances_path)
+    return f"{root}.grading{ext or '.jsonl'}"
+
+
+def write_instances(instances, path):
+    """Write one JSON object per line, in the order given (stable for diffing)."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        for instance in instances:
+            handle.write(json.dumps(instance, sort_keys=True) + "\n")
+    return path
+
+
+def write_predictions(instances_path, patches_dir, model_name, out_path):
+    """Build ``predictions.jsonl`` from ``<patches_dir>/<instance_id>/model.patch``.
+
+    A missing or empty patch is written as an empty ``model_patch``: the harness
+    then counts the instance as unresolved, which is the honest outcome, instead
+    of failing the whole evaluation on a broken file.
+    """
+    instances = read_instances_file(instances_path)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    missing = []
+    with open(out_path, "w", encoding="utf-8") as handle:
+        for instance in instances:
+            instance_id = instance["instance_id"]
+            patch_path = os.path.join(patches_dir, instance_id, "model.patch")
+            patch = ""
+            if os.path.isfile(patch_path):
+                with open(patch_path, encoding="utf-8", errors="replace") as source:
+                    patch = source.read()
+            else:
+                missing.append(instance_id)
+            handle.write(json.dumps({
+                "instance_id": instance_id,
+                "model_name_or_path": model_name,
+                "model_patch": patch,
+            }) + "\n")
+    if missing:
+        print(f"predictions: {len(missing)} instance(s) produced no patch "
+              f"(written as empty): {', '.join(missing[:5])}"
+              f"{' ...' if len(missing) > 5 else ''}", file=sys.stderr)
+    return out_path
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="benchmarks.suites.swebench_env",
+                                     description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    instances = sub.add_parser("instances", help="materialise the instance list")
+    instances.add_argument("--dataset", default=DEFAULT_DATASET)
+    instances.add_argument("--split", default=DEFAULT_SPLIT)
+    instances.add_argument("--revision", default=None,
+                           help="dataset revision/commit to pin")
+    instances.add_argument("--limit", type=int, default=None)
+    instances.add_argument(
+        "--instance-ids", default=None,
+        help="comma-separated instance ids to keep (order preserved)")
+    instances.add_argument(
+        "--skip-ids", default=None,
+        help="comma-separated instance ids to drop before --limit applies; lets a "
+             "second campaign (e.g. SWE-bench Lite after Verified) sample different "
+             "instances instead of repeating the same first N")
+    instances.add_argument("--from-file", default=None,
+                           help="offline JSONL/JSON of instances instead of HF")
+    instances.add_argument("--out", required=True)
+    instances.add_argument(
+        "--grading-out", default=None,
+        help="sidecar JSONL with the fields the grader needs (image, eval_script, "
+             "FAIL_TO_PASS, PASS_TO_PASS); defaults to <out>.grading.jsonl")
+
+    predictions = sub.add_parser("predictions",
+                                 help="collect patches into predictions.jsonl")
+    predictions.add_argument("--instances", required=True)
+    predictions.add_argument("--patches-dir", required=True)
+    predictions.add_argument("--model-name", required=True)
+    predictions.add_argument("--out", required=True)
+
+    args = parser.parse_args(argv)
+    if args.command == "instances":
+        found, grading = load_instances(dataset=args.dataset, split=args.split,
+                                        revision=args.revision, limit=args.limit,
+                                        from_file=args.from_file,
+                                        keep_ids=args.instance_ids,
+                                        skip_ids=args.skip_ids)
+        write_instances(found, args.out)
+        write_instances(grading, grading_path(args.out, args.grading_out))
+        print(f"instances: wrote {len(found)} to {args.out}")
+        return 0
+    write_predictions(args.instances, args.patches_dir, args.model_name, args.out)
+    print(f"predictions: wrote {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
