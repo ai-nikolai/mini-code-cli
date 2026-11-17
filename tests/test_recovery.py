@@ -51,6 +51,14 @@ class ToolFailureTest(unittest.TestCase):
         self.assertIn("3 times", text)
         self.assertIn("Rethink your approach", text)
         self.assertIn("Last failure", text)
+        self.assertNotIn("documentation or the web", text)
+
+    def test_search_hint_is_only_added_when_search_is_available(self):
+        without = recovery.recovery_prompt("run_shell_command", 3)
+        with_search = recovery.recovery_prompt("run_shell_command", 3,
+                                               can_search=True)
+        self.assertNotIn("documentation or the web", without)
+        self.assertIn("documentation or the web", with_search)
 
     def test_unknown_strategy_falls_back_to_normal(self):
         self.assertEqual(recovery.normalise("nope"), recovery.NORMAL)

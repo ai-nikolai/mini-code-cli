@@ -100,12 +100,15 @@ def _digest(value):
     return "sha1:" + hashlib.sha1(value.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def recovery_prompt(tool, attempts, same_call=False, result=""):
+def recovery_prompt(tool, attempts, same_call=False, result="",
+                    can_search=False):
     """The message injected after repeated failures.
 
     ``same_call`` distinguishes "you repeated one command" from "the tool keeps
     failing with different inputs"; the advice is the same but the diagnosis
-    is more useful when the call was literally repeated.
+    is more useful when the call was literally repeated. ``can_search`` adds
+    the docs/web hint only when the session actually exposes a search tool --
+    asking for a tool the agent does not have would just add noise.
     """
     tool = tool or "the same tool"
     attempts = max(int(attempts or FAILURE_THRESHOLD), FAILURE_THRESHOLD)
@@ -122,6 +125,10 @@ def recovery_prompt(tool, attempts, same_call=False, result=""):
         "Choose a different command, tool, or method; if the current approach "
         "cannot work, establish what is actually available first.",
     ]
+    if can_search:
+        lines.append(
+            "Search the documentation or the web (if your tools allow it) for "
+            "the correct approach before trying again.")
     if excerpt:
         lines += ["", f"Last failure:\n{excerpt}"]
     return "\n".join(lines)

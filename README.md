@@ -418,8 +418,9 @@ mode and applies to every turn:
 | `prompt-change-plan` | The same prompt, then a fresh planning request for the current goal. In `open-plan` the loop injects the recovery plan but does not overwrite the agent's `.mini/PLAN.md`. |
 
 Both recovery strategies are heuristics: they are meant to break repetitive command/tool loops
-without changing the model's overall instruction. `runtime-strategy` and `strict-verify` are also
-available in `/settings`.
+without changing the model's overall instruction. When `web_search`/`read_website` are available,
+the prompt also tells the model to search the documentation or the web before retrying.
+`runtime-strategy` and `strict-verify` are also available in `/settings`.
 
 ### Scratchpad — `--scratchpad`
 

@@ -3500,8 +3500,12 @@ class AgentSession:
 
         attempts = max(self._runtime_fail_key_count,
                        self._runtime_fail_tool_count)
+        can_search = any(
+            tool_name in getattr(self, "tools_dict", {})
+            for tool_name in ("web_search", "read_website"))
         self._runtime_pending_prompt = recovery.recovery_prompt(
-            name, attempts, same_call=same_call, result=result)
+            name, attempts, same_call=same_call, result=result,
+            can_search=can_search)
         self._runtime_pending_replan = (
             self.runtime_strategy == recovery.PROMPT_CHANGE_PLAN)
         self._runtime_prompts_this_turn += 1

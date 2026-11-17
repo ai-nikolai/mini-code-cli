@@ -569,6 +569,9 @@ class PlanStrategyTest(_AdvancedCase):
         self.assertEqual(len(prompts), 1)
         self.assertIn("read_file", prompts[0])
         self.assertIn("3 times", prompts[0])
+        # The base tool set includes web_search/read_website, so the recovery
+        # prompt asks the model to consult docs/the web before retrying.
+        self.assertIn("documentation or the web", prompts[0])
 
     def test_runtime_prompt_change_plan_starts_a_fresh_plan(self):
         session = self.new_session(start=False, plan=True,
