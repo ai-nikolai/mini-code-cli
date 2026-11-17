@@ -1523,26 +1523,39 @@ class TuiConsole(Console):
         start = max(0, min(int(selected), total - 1))
 
         def draw(selected):
+            cols, _rows = self._size()
+            available = max(cols - 4, 20)
             body = []
             for index, row in enumerate(combined()):
                 marker = ">" if index == selected else " "
                 if row.get("immutable"):
-                    body.append(self.style(
+                    body.append(self.style(self._fit(
                         f"{marker} {row['number']:2}. {row['display']}",
-                        dim=True))
+                        available), dim=True))
                     continue
                 cache = (f"  cache:{row['cache']}"
                          if row.get("cache", "none") != "none" else "")
-                body.append(f"{marker} {row['number']:2}. "
-                            f"{row['name']:22} {row.get('display', row['value']):28}"
-                            f"{cache}")
+                # Shrink the columns on narrow terminals instead of letting
+                # the table run past the visible body. Drop the cache suffix
+                # first when it would squeeze the value column.
+                prefix = 6          # marker + space + "NN. "
+                if cache and available - prefix - len(cache) < 40:
+                    cache = ""
+                remaining = max(available - prefix - len(cache), 19)
+                name_w = min(22, max(8, remaining // 3))
+                value_w = max(8, remaining - name_w - 1)
+                name = self._fit(row["name"], name_w)
+                value = self._fit(row.get("display", row["value"]), value_w)
+                body.append(self._fit(
+                    f"{marker} {row['number']:2}. {name:<{name_w}} "
+                    f"{value:<{value_w}}{cache}", available))
             is_dirty = dirty() if callable(dirty) else bool(dirty)
             status = (("unsaved", "yellow") if is_dirty
                       else ("saved", "green"))
             all_label = "a editable" if show_all else "a all"
             self._picker_window(
-                f"[settings] ↑↓←→ Enter · s save · {all_label} · "
-                "d default · q quit", body, selected, status=status)
+                f"↑↓←→ Enter · s save · {all_label} · d def · q",
+                body, selected, status=status)
 
         def change(selected, step):
             row = combined()[selected]

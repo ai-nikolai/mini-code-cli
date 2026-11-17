@@ -2877,7 +2877,9 @@ class AgentSession:
             snapshot = self._snapshot_settings()
             state = {"dirty": False}
             selected = 0
-            show_all = preset in ("all", "a")
+            # Show the complete table by default; `a` toggles the editable-only
+            # view. /settings all is therefore the same explicit preset.
+            show_all = True
             if preset in ("default", "def"):
                 # Stage defaults so the user can review/save or cancel them.
                 self.settings.reset_to_defaults()

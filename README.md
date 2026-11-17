@@ -297,9 +297,9 @@ that starts at the first setting and scrolls with the selection. Up/down or numb
 select; left/right toggle an on/off setting or rotate through a fixed-choice setting
 (such as `plan-strategy`) in place. Values equal to their built-in default are marked
 `(default)`. Enter opens a focused sub-window that shows only that setting's input
-box (or its option list), where `exit` or Esc returns to the settings table. `a`
-toggles the full table (including immutable rows); `d` stages all defaults while
-keeping the API key. The same presets are available as `/settings all` and
+box (or its option list), where `exit` or Esc returns to the settings table. The full
+table (including immutable rows) is shown by default; `a` toggles the editable-only
+view. `d` stages all defaults while keeping the API key. The same presets are available as `/settings all` and
 `/settings default`. Changes are staged in the table until you press `s` to save;
 `q` quits, and if there are unsaved changes it asks whether to save them or cancel
 the changes. The table header shows a green `saved` or yellow `unsaved` badge. Plan
