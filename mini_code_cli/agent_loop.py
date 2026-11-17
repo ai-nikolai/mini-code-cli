@@ -2528,24 +2528,53 @@ class AgentSession:
         return lines
 
     def _read_setting_value(self, name):
+        """Read one setting's new value; ``None`` means "go back"."""
+        spec = settings_mod.BY_NAME.get(name) or settings_mod.BY_NAME.get(
+            settings_mod.ALIASES.get(name, ""))
+        row = next((item for item in self.settings.rows()
+                    if item["name"] == name), None)
+        current = row["value"] if row else ""
         if name == "api-key":
-            # ``read_secret`` masks the value in the fixed TUI and uses
-            # getpass on the ordinary console.
-            key = self.console.read_secret("API key: ")
+            # A focused, masked sub-window in the TUI; getpass on the plain
+            # console. Both accept ``exit`` to go back.
+            key = self.console.settings_secret(
+                "api-key", current=current)
             key = "" if key is None else key.strip()
+            if key.lower() == "exit":
+                return None
             if not key:
                 return ""
-            answer = self.console.read_line(
-                "Store this key in this session's settings.json (0600)? [y/N] ")
-            if answer is not None and answer.strip().lower() in ("y", "yes"):
-                self.settings.persist_api_key = True
-            else:
-                self.settings.persist_api_key = False
+            keep = "No — keep it in memory for this session only"
+            write = "Yes — write it to settings.json (mode 0600)"
+            answer = self.console.settings_choose(
+                "Store this API key?", [keep, write], current=keep)
+            if answer is None:
+                return None
+            self.settings.persist_api_key = answer == write
             return key
-        value = self.console.read_line("value: ")
-        return "" if value is None else value.strip()
+        if spec is not None and spec.kind in ("bool", "choice"):
+            options = (["on", "off"] if spec.kind == "bool"
+                       else list(spec.choices))
+            value = self.console.settings_choose(
+                name, options, current=current)
+            return None if value is None else str(value)
+        value = self.console.settings_edit(
+            name, current=current,
+            choices=spec.choices if spec is not None else ())
+        if value is None:
+            return None
+        text = value.strip()
+        return None if text.lower() == "exit" else text
 
-    def _apply_settings(self, changes, confirm_cache=True):
+    def _change_setting_inline(self, row, value, rows):
+        """Apply a left/right settings change and refresh the visible table."""
+        if not self._apply_settings({row["name"]: value},
+                                    confirm_cache=False, announce=False):
+            return False
+        rows[:] = self.settings.rows()
+        return True
+
+    def _apply_settings(self, changes, confirm_cache=True, announce=True):
         """Validate and apply one or more settings.
 
         Cache-impacting changes are applied as one transaction, so a batch of
@@ -2584,7 +2613,7 @@ class AgentSession:
                 return False
 
         return self._apply_parsed_settings(
-            parsed, {spec.name for spec, _ in parsed})
+            parsed, {spec.name for spec, _ in parsed}, announce=announce)
 
     def _apply_parsed_settings(self, parsed, changed_names=None, announce=True):
         """Apply already-validated values and rebuild what they affect."""
@@ -2694,19 +2723,24 @@ class AgentSession:
         if not arg and self.tui_active and hasattr(self.console, "settings_pick"):
             immutable = [f"{name}: cannot change ({desc})"
                          for name, desc in settings_mod.IMMUTABLE]
+            selected = 0
             while True:
                 row = self.console.settings_pick(
-                    self.settings.rows(), immutable)
+                    self.settings.rows(), immutable, selected=selected,
+                    on_change=self._change_setting_inline)
                 if row is None:
                     return
+                selected = max(0, row["number"] - 1)
                 if not row["mutable"]:
                     self.console.note(f"{row['name']} cannot be changed.",
                                       "warn")
                     continue
                 raw = self._read_setting_value(row["name"])
-                if raw == "":
+                if raw is None or raw == "":
                     continue
-                self._apply_settings({row["name"]: raw}, confirm_cache=True)
+                # The menu already shows the cache marker and the value was
+                # chosen explicitly, so apply without another prompt.
+                self._apply_settings({row["name"]: raw}, confirm_cache=False)
             return
         if not arg:
             for line in self._settings_lines():
@@ -2752,7 +2786,7 @@ class AgentSession:
                     continue
                 if raw is None:
                     raw = self._read_setting_value(spec.name)
-                if raw == "":
+                if raw is None or raw == "":
                     continue
                 if spec.cache != "none":
                     pending[spec.name] = raw
@@ -2782,7 +2816,7 @@ class AgentSession:
             return
         if raw is None:
             raw = self._read_setting_value(spec.name)
-        if raw == "":
+        if raw is None or raw == "":
             return
         self._apply_settings({spec.name: raw}, confirm_cache=True)
 

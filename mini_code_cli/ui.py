@@ -113,6 +113,8 @@ def _read_escape_sequence(fd, read_one, pending, select_module):
             if not ready:
                 break
         byte = read_one()
+        if not byte:
+            break
         sequence += byte
         if len(sequence) == 1:
             if byte not in (b"[", b"O"):
@@ -883,7 +885,8 @@ class Console:
                   "warn")
 
     # -- interactive input --------------------------------------------------
-    def choose(self, title, options, default=1, prompt="> "):
+    def choose(self, title, options, default=1, prompt="> ",
+               allow_exit=False):
         """Render a numbered choice and return the 1-based selection.
 
         A blank answer, an unknown answer or EOF falls back to ``default``.
@@ -899,6 +902,8 @@ class Console:
         answer = self.read_line(prompt)
         if answer is not None:
             text = answer.strip()
+            if allow_exit and text.lower() in ("exit", "back"):
+                return None
             if not text:
                 return default
             if text.isdigit() and 1 <= int(text) <= len(options):
@@ -907,6 +912,31 @@ class Console:
                 if text.lower() == str(option).lower():
                     return index
         return default
+
+    def settings_edit(self, name, current="", choices=(), secret=False):
+        """Prompt for one setting's value (plain console fallback)."""
+        if secret:
+            return self.read_secret(
+                f"{name} (hidden; type 'exit' to go back): ")
+        suffix = f" [{current}]" if current not in ("", None) else ""
+        if choices:
+            suffix += " (choices: " + ", ".join(str(c) for c in choices) + ")"
+        prompt = f"{name}{suffix} (or 'exit'): "
+        return self.read_line(prompt)
+
+    def settings_secret(self, name, current=""):
+        return self.settings_edit(name, current=current, secret=True)
+
+    def settings_choose(self, name, options, current=""):
+        """Prompt for a fixed-value setting; ``None`` means "go back"."""
+        options = list(options)
+        if not options:
+            return None
+        default = (options.index(current) + 1
+                   if current in options else 1)
+        choice = self.choose(f"{name} (current: {current})", options,
+                             default=default, allow_exit=True)
+        return None if choice is None else options[choice - 1]
 
     def read_secret(self, prompt_text="API key: "):
         """Read a secret without echoing it.

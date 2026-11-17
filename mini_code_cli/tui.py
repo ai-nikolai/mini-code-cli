@@ -98,6 +98,17 @@ class TuiConsole(Console):
         # log). Interactive pickers set this so their table starts at the top
         # and scrolls down with the selection.
         self._overlay_top = False
+        # A focused sub-window for editing one setting. It replaces the whole
+        # frame so no dashboard/notice boxes compete with the input.
+        self._edit_active = False
+        self._edit_title = ""
+        self._edit_current = ""
+        self._edit_choices = ()
+        self._edit_choice_mode = False
+        self._edit_options = ()
+        self._edit_selected = 0
+        self._edit_typed = ""
+        self._edit_mask = False
         self._question_active = False
         self._question_title = "Question to User"
         self._question_lines = []
@@ -647,6 +658,9 @@ class TuiConsole(Console):
 
     def _render_locked(self):
         cols, rows = self._size()
+        if self._edit_active:
+            self._render_edit_locked(cols, rows)
+            return
         summary = [str(line) for line in (self._summary_lines
                                           or ["Mini-Code"])]
         # The fixed view replaces the scrolling welcome banner, so show the
@@ -736,6 +750,171 @@ class TuiConsole(Console):
         else:
             self._write("\x1b[?25l")
 
+    def _render_edit_locked(self, cols, rows):
+        """Draw only the focused setting edit window (no dashboard/notices)."""
+        if self._edit_choice_mode:
+            head = [self.style(f"[{self._edit_title or 'Edit setting'}]",
+                               fg="cyan", bold=True)]
+            if self._edit_current not in ("", None):
+                head.append(self.style(f"current: {self._edit_current}",
+                                       dim=True))
+            hint = "↑/↓ or number, Enter save · type 'exit' or Esc back"
+            if self._edit_typed:
+                hint = f"typed: {self._edit_typed} · {hint}"
+            head.append(self.style(hint, dim=True))
+            body = []
+            for index, option in enumerate(self._edit_options):
+                marker = ">" if index == self._edit_selected else " "
+                body.append(f"{marker} {index + 1}. {option}")
+            box = self._box("Value", body, cols, fg="green")
+            lines = (head + box + [""] * rows)[:rows]
+            padded = [_pad_visual(self._fit(line, cols), cols)
+                      for line in lines]
+            self._write("\x1b[2J\x1b[H" + "\n".join(padded))
+            self._last_frame_lines = padded
+            self._last_frame_size = (cols, rows)
+            self._write("\x1b[?25l")
+            return
+
+        head = [self.style(f"[{self._edit_title or 'Edit setting'}]",
+                           fg="cyan", bold=True)]
+        if self._edit_current not in ("", None):
+            head.append(self.style(f"current: {self._edit_current}",
+                                   dim=True))
+        if self._edit_choices:
+            head.append(self.style(
+                "choices: " + ", ".join(str(c) for c in self._edit_choices),
+                dim=True))
+        head.append(self.style(
+            "Enter save · type 'exit' or Esc to go back", dim=True))
+
+        max_input = max(1, min(rows // 2, rows - len(head) - 4))
+        if self._edit_mask:
+            real = "".join(self._input_buffer)
+            input_lines = ["*" * len(real)]
+            visible_cursor_line = 0
+            column = len(real) if self._input_active else 0
+        else:
+            input_lines = self._input_lines()
+            if self._input_active:
+                prefix = "".join(self._input_buffer[:self._input_cursor])
+                cursor_line = prefix.count("\n")
+                start = max(0, cursor_line - max_input + 1)
+                start = min(start, max(0, len(input_lines) - max_input))
+                input_lines = input_lines[start:start + max_input]
+                visible_cursor_line = cursor_line - start
+                column = _visual_len(prefix.rsplit("\n", 1)[-1])
+            else:
+                visible_cursor_line = 0
+                input_lines = input_lines[-max_input:]
+                column = 0
+
+        box = self._box("Value", input_lines, cols, fg="green")
+        lines = (head + box + [""] * rows)[:rows]
+        padded = [_pad_visual(self._fit(line, cols), cols) for line in lines]
+        # The focused window owns the whole screen; a full repaint avoids
+        # leaving slices of the settings table or dashboard behind it.
+        self._write("\x1b[2J\x1b[H" + "\n".join(padded))
+        self._last_frame_lines = padded
+        self._last_frame_size = (cols, rows)
+        if self._input_active:
+            row = max(1, min(len(head) + 2 + visible_cursor_line, rows))
+            col = max(3, min(3 + column, cols - 2))
+            self._write(f"\x1b[{row};{col}H\x1b[?25h")
+        else:
+            self._write("\x1b[?25l")
+
+    def settings_edit(self, name, current="", choices=(), secret=False):
+        """Edit one setting in a focused sub-window; return text or ``None``."""
+        if not self._active:
+            return super().settings_edit(name, current=current,
+                                         choices=choices, secret=secret)
+        self.stop_scroll_listener()
+        self._edit_active = True
+        self._edit_mask = bool(secret)
+        self._edit_title = f"Setting: {name}"
+        self._edit_current = "" if current is None else str(current)
+        self._edit_choices = tuple(choices or ())
+        self._input_buffer = []
+        self._input_cursor = 0
+        self._input_active = True
+        self._notice_line = ""
+        self._overlay_lines = []
+        self._overlay_top = False
+        try:
+            return self._read_tui_input("", mask=secret, remember=False)
+        except (EOFError, KeyboardInterrupt):
+            return None
+        finally:
+            self._edit_active = False
+            self._edit_mask = False
+            self._edit_title = ""
+            self._edit_current = ""
+            self._edit_choices = ()
+            self._input_active = False
+            self._input_buffer = []
+            self._input_cursor = 0
+            self._notice_line = ""
+            # The edit window cleared the screen, so force a full repaint of
+            # the main (or settings) view when we return.
+            self._last_frame_size = None
+            self.render()
+            if self._active:
+                self.start_scroll_listener()
+
+    def settings_choose(self, name, options, current=""):
+        """Pick a fixed setting value in the focused sub-window.
+
+        ``None`` means "go back" (Esc, q, or typing ``exit``).
+        """
+        options = list(options or ())
+        if not self._active or not options:
+            return super().settings_choose(name, options, current=current)
+        start = options.index(current) if current in options else 0
+        self.stop_scroll_listener()
+        self._edit_active = True
+        self._edit_choice_mode = True
+        self._edit_title = f"Setting: {name}"
+        self._edit_current = "" if current is None else str(current)
+        self._edit_options = tuple(options)
+        self._edit_selected = start
+        self._edit_typed = ""
+        self._edit_choices = ()
+        self._input_active = False
+        self._input_buffer = []
+        self._input_cursor = 0
+        self._notice_line = ""
+        self._overlay_lines = []
+        self._overlay_top = False
+
+        def draw(selected):
+            self._edit_selected = selected
+            self.render()
+
+        try:
+            index = self._pick_index(draw, len(options), start,
+                                     allow_exit_word=True)
+            return None if index is None else options[index]
+        except (EOFError, KeyboardInterrupt):
+            return None
+        finally:
+            self._edit_active = False
+            self._edit_choice_mode = False
+            self._edit_title = ""
+            self._edit_current = ""
+            self._edit_choices = ()
+            self._edit_options = ()
+            self._edit_selected = 0
+            self._edit_typed = ""
+            self._input_active = False
+            self._input_buffer = []
+            self._input_cursor = 0
+            self._notice_line = ""
+            self._last_frame_size = None
+            self.render()
+            if self._active:
+                self.start_scroll_listener()
+
     # -- full-screen input -------------------------------------------------
 
     def _read_tui_input(self, prompt_text="", mask=False, remember=True):
@@ -763,7 +942,8 @@ class TuiConsole(Console):
 
         buffer = []
         cursor = 0
-        history = list(self._input_history)
+        # A focused setting editor must not recall previous chat commands.
+        history = [] if self._edit_active else list(self._input_history)
         history_pos = len(history)
         draft = ""
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
@@ -891,6 +1071,8 @@ class TuiConsole(Console):
                             code = None
                         mod = parts[1].split(b":")[0] if len(parts) > 1 else b""
                         if code == 27:
+                            if self._edit_active:
+                                return None
                             self.dismiss_overlay()
                         elif code == 127:
                             if cursor > 0:
@@ -936,7 +1118,8 @@ class TuiConsole(Console):
                                 self._notice_line = ""
                                 sync()
                             elif code == 116:            # Ctrl-T
-                                self.expand_tool(1)
+                                if not self._edit_active:
+                                    self.expand_tool(1)
                                 sync()
                         continue
                     if seq in (b"[1;2A", b"[a"):
@@ -952,6 +1135,8 @@ class TuiConsole(Console):
                         self.scroll_page(-1)
                         continue
                     if not seq:
+                        if self._edit_active:
+                            return None
                         self.dismiss_overlay()
                         continue
                     if seq in (b"[A", b"OA"):
@@ -1023,7 +1208,8 @@ class TuiConsole(Console):
                     sync()
                     continue
                 if raw == b"\x14":  # Ctrl-T: expand the most recent tool
-                    self.expand_tool(1)
+                    if not self._edit_active:
+                        self.expand_tool(1)
                     sync()
                     continue
                 for char in decoder.decode(raw):
@@ -1066,11 +1252,14 @@ class TuiConsole(Console):
                                + body[top:end])
         self.render()
 
-    def _pick_index(self, draw, count, default=0):
+    def _pick_index(self, draw, count, default=0, allow_exit_word=False,
+                    on_left=None, on_right=None):
         """Run a blocking raw-key picker and return a 0-based index.
 
         ``draw(selected)`` renders the overlay. Up/down move, a digit jumps to
-        that row, Enter confirms, and q/Esc cancels (returning ``None``).
+        that row, left/right call the optional change callbacks, Enter confirms,
+        and q/Esc cancels (returning ``None``). With ``allow_exit_word``, typing
+        ``exit`` also cancels -- used by the focused settings sub-window.
         """
         if not self._active or count <= 0:
             return None
@@ -1095,6 +1284,7 @@ class TuiConsole(Console):
             attrs[6][termios.VMIN] = 1
             attrs[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            typed = []
             draw(selected)
             while True:
                 ready, _, _ = select.select([fd], [], [], 1.0)
@@ -1105,6 +1295,19 @@ class TuiConsole(Console):
                     return None
                 if raw in (b"q", b"Q"):
                     return None
+                if allow_exit_word and raw.isalpha():
+                    typed.append(raw.decode("utf-8", "ignore").lower())
+                    if "".join(typed).endswith("exit"):
+                        return None
+                    self._edit_typed = "".join(typed[-12:])
+                    draw(selected)
+                    continue
+                if allow_exit_word and raw in (b"\x7f", b"\b"):
+                    if typed:
+                        typed.pop()
+                        self._edit_typed = "".join(typed[-12:])
+                        draw(selected)
+                    continue
                 if raw == b"\x1b":
                     seq = _read_escape_sequence(fd, lambda: os.read(fd, 1),
                                                 [], select)
@@ -1114,6 +1317,16 @@ class TuiConsole(Console):
                         continue
                     if seq.endswith(b"B"):
                         selected = (selected + 1) % count
+                        draw(selected)
+                        continue
+                    if seq.endswith(b"D"):
+                        if on_left is not None:
+                            selected = on_left(selected)
+                        draw(selected)
+                        continue
+                    if seq.endswith(b"C"):
+                        if on_right is not None:
+                            selected = on_right(selected)
                         draw(selected)
                         continue
                     return None
@@ -1138,11 +1351,12 @@ class TuiConsole(Console):
             if self._active:
                 self.start_scroll_listener()
 
-    def choose(self, title, options, default=1, prompt="> "):
+    def choose(self, title, options, default=1, prompt="> ",
+               allow_exit=False):
         """Arrow-key picker for the fixed view; returns 1-based index or None."""
         if not self._active or not options:
             return super().choose(title, options, default=default,
-                                  prompt=prompt)
+                                  prompt=prompt, allow_exit=allow_exit)
         options = list(options)
         start = max(0, min(int(default) - 1, len(options) - 1))
         self._picker_top = 0
@@ -1156,18 +1370,24 @@ class TuiConsole(Console):
                       if title else "[select] ↑/↓ or number, Enter, q")
             self._picker_window(header, body, selected)
 
-        index = self._pick_index(draw, len(options), start)
+        index = self._pick_index(draw, len(options), start,
+                                 allow_exit_word=allow_exit)
         return None if index is None else index + 1
 
-    def settings_pick(self, rows, immutable_lines=()):
+    def settings_pick(self, rows, immutable_lines=(), selected=0,
+                      on_change=None):
         """Show the settings table and return the selected row, or None.
 
-        Arrow keys move, a digit selects that row, Enter opens it, and q/Esc
-        cancels. Immutable rows are shown but cannot be selected.
+        Up/down or a number select, Enter opens the focused editor, left/right
+        rotate a toggle or fixed-choice value in place, and q/Esc cancels.
+        ``on_change(row, value, rows)`` applies an inline change; it may replace
+        the ``rows`` list so dependent rows (e.g. plan and plan-strategy) stay
+        in sync.
         """
         if not self._active or not rows:
             return None
         self._picker_top = 0
+        start = max(0, min(int(selected), len(rows) - 1))
 
         def draw(selected):
             body = []
@@ -1180,10 +1400,39 @@ class TuiConsole(Console):
             for line in immutable_lines:
                 body.append(self.style("  " + str(line), dim=True))
             self._picker_window(
-                "[settings] ↑/↓ or number, Enter edit, q cancel",
+                "[settings] ↑/↓ select · ←/→ change · Enter edit · q cancel",
                 body, selected)
 
-        index = self._pick_index(draw, len(rows), 0)
+        def change(selected, step):
+            row = rows[selected]
+            spec = row.get("spec")
+            if spec is None or not row.get("mutable") or not spec.mutable:
+                return selected
+            if spec.kind == "bool":
+                value = not bool(row.get("raw"))
+            elif spec.kind == "choice" and spec.choices:
+                choices = list(spec.choices)
+                current = row.get("raw")
+                index = choices.index(current) if current in choices else 0
+                value = choices[(index + step) % len(choices)]
+            else:
+                return selected
+            if on_change is not None:
+                on_change(row, value, rows)
+            else:
+                row["raw"] = value
+                row["value"] = (("on" if value else "off")
+                                if spec.kind == "bool" else str(value))
+            return selected
+
+        def left(selected):
+            return change(selected, -1)
+
+        def right(selected):
+            return change(selected, 1)
+
+        index = self._pick_index(
+            draw, len(rows), start, on_left=left, on_right=right)
         return None if index is None else rows[index]
 
     def read_secret(self, prompt_text="API key: "):

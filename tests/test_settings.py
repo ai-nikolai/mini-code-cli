@@ -70,6 +70,18 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertEqual(value.values["model"], "saved-model")
         self.assertEqual(value.values["temperature"], 0.2)
 
+    def test_saved_strategy_does_not_reenable_plan_mode(self):
+        saved = settings.Settings()
+        saved.values["plan_strategy"] = "open-plan"
+        saved.values["plan"] = False
+        args = make_args(self.cache, self.cache)
+        args.model = None
+        args.plan = False
+        args.plan_strategy = None
+        value = settings.Settings.resolve(args, saved)
+        self.assertFalse(value.values["plan"])
+        self.assertEqual(value.values["plan_strategy"], "open-plan")
+
     def test_default_plan_does_not_imply_plan_mode(self):
         args = make_args(self.cache, self.cache)
         args.plan = False
@@ -570,14 +582,55 @@ class SettingsCommandTest(unittest.TestCase):
         self.session._handle_settings_command("")
         self.assertEqual(self.session.args.temperature, 0.4)
 
+    def test_plan_strategy_is_not_shown_as_derived(self):
+        rows = {row["name"]: row for row in self.session.settings.rows()}
+        self.assertNotEqual(rows["plan-strategy"]["value"], "(derived)")
+        self.assertIn(rows["plan-strategy"]["raw"],
+                      rows["plan-strategy"]["spec"].choices)
+
+    def test_fixed_value_setting_uses_a_choice_not_free_text(self):
+        plan_row = next(row for row in self.session.settings.rows()
+                        if row["name"] == "plan")
+        self.console.settings_choose = mock.Mock(return_value="on")
+        self.assertEqual(self.session._read_setting_value("plan"), "on")
+        args, _kwargs = self.console.settings_choose.call_args
+        self.assertEqual(args[0], "plan")
+        self.assertEqual(args[1], ["on", "off"])
+
+    def test_choice_setting_uses_the_spec_choices(self):
+        strategy = next(row for row in self.session.settings.rows()
+                        if row["name"] == "plan-strategy")
+        self.console.settings_choose = mock.Mock(return_value="open-plan")
+        self.assertEqual(self.session._read_setting_value("plan-strategy"),
+                         "open-plan")
+        args, _kwargs = self.console.settings_choose.call_args
+        self.assertEqual(args[1], list(strategy["spec"].choices))
+
+    def test_setting_exit_returns_to_the_menu(self):
+        self.console.settings_edit = mock.Mock(return_value="exit")
+        self.assertIsNone(self.session._read_setting_value("temperature"))
+
+    def test_inline_change_applies_and_refreshes_rows(self):
+        rows = self.session.settings.rows()
+        plan_row = next(row for row in rows if row["name"] == "plan")
+        self.assertTrue(
+            self.session._change_setting_inline(plan_row, True, rows))
+        self.assertTrue(self.session.settings.values["plan"])
+        self.assertTrue(next(row for row in rows
+                             if row["name"] == "plan")["raw"])
+
     def test_api_key_edit_is_masked_and_not_stored_by_default(self):
         self.console.read_secret = mock.Mock(return_value="sk-new")
-        self.console.read_line = mock.Mock(side_effect=["n", "y"])
+        self.console.settings_choose = mock.Mock(
+            return_value="No — keep it in memory for this session only")
+        self.console.read_line = mock.Mock(return_value="y")
         self.session._handle_settings_command("api-key")
 
         self.assertEqual(self.session.settings.api_key, "sk-new")
         self.assertFalse(self.session.settings.persist_api_key)
-        self.console.read_secret.assert_called_once_with("API key: ")
+        self.console.read_secret.assert_called_once_with(
+            "api-key (hidden; type 'exit' to go back): ")
+        self.console.settings_choose.assert_called_once()
         path = os.path.join(self.session.session_dir, "settings.json")
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)

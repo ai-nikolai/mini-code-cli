@@ -220,7 +220,12 @@ class Settings:
         for spec in SPECS:
             if spec.attr == "api_key":
                 continue
-            values[spec.attr] = getattr(args, spec.attr, spec.default)
+            value = getattr(args, spec.attr, spec.default)
+            # ``None`` is the runtime "plan mode off" marker; the setting
+            # itself keeps the concrete strategy that plan mode would use.
+            if spec.attr == "plan_strategy" and value is None:
+                value = spec.default
+            values[spec.attr] = value
         if getattr(args, "plan_strategy", None):
             values["plan"] = True
         key = getattr(args, "api_key", None) or ""
@@ -313,13 +318,17 @@ class Settings:
             elif explicit.get(spec.attr):
                 result.values[spec.attr] = getattr(args, spec.attr)
             elif spec.attr in saved.values:
-                result.values[spec.attr] = saved.values[spec.attr]
+                value = saved.values[spec.attr]
+                if spec.attr == "plan_strategy" and value is None:
+                    value = spec.default
+                result.values[spec.attr] = value
             else:
                 result.values[spec.attr] = spec.default
 
-        # A plan strategy without plan mode is meaningless (the CLI parser
-        # already implies --plan when the strategy is explicit).
-        if result.values.get("plan_strategy") != planning.DEFAULT_PLAN_STRATEGY:
+        # An explicit --plan-strategy implies plan mode, matching the CLI
+        # parser. A *saved* strategy does not: plan mode is its own on/off
+        # setting, and the strategy stays stored while plan mode is off.
+        if explicit.get("plan_strategy"):
             result.values["plan"] = True
 
         # API key: CLI > environment > previous session > empty.
@@ -364,9 +373,16 @@ class Settings:
         return args
 
     def capture_from_args(self, args):
-        """Refresh values after the session resolved derived values."""
+        """Refresh values after the session resolved derived values.
+
+        ``plan_strategy`` is deliberately not recaptured: the runtime uses
+        ``None`` there to mean "plan mode is off", while the setting itself
+        keeps the strategy that will be used when plan mode is enabled. Without
+        this the UI showed the strategy as ``(derived)`` even though it has a
+        concrete value.
+        """
         for spec in SPECS:
-            if spec.attr in ("api_key", "max_tokens"):
+            if spec.attr in ("api_key", "max_tokens", "plan_strategy"):
                 continue
             setattr_value = getattr(args, spec.attr, spec.default)
             self.values[spec.attr] = setattr_value

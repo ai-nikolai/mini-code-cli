@@ -281,11 +281,17 @@ file with mode `0600`; otherwise it stays in memory for this session only.
 
 Use `/settings` to inspect or change settings. The table marks values that rebuild
 the tool list or generated system prompt — these invalidate the LLM prompt cache.
-Cache-impacting edits from the settings prompt are staged until you type `apply`, so
-a batch rebuilds the prompt once. In the fixed TUI the same table is a navigable
-overlay that starts at the first setting and scrolls with the selection: arrow keys
-or numbers select, Enter edits, `q` cancels. Changing the TUI, paths, the custom
-system prompt or the initial prompt is not allowed mid-session.
+Cache-impacting edits from the plain `settings>` prompt are staged until you type
+`apply`, so a batch rebuilds the prompt once.
+
+In the fixed TUI the same table is a navigable overlay that starts at the first
+setting and scrolls with the selection. Up/down or numbers select; left/right toggle
+an on/off setting or rotate through a fixed-choice setting (such as `plan-strategy`)
+in place. Enter opens a focused sub-window that shows only that setting's input box
+(or its option list), where `exit` or Esc returns to the settings table; `q` closes
+the table. Plan mode is its own on/off setting; the plan strategy keeps a concrete
+value even while plan mode is off. Changing the TUI, paths, the custom system prompt
+or the initial prompt is not allowed mid-session.
 
 ## Development
 

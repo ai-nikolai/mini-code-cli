@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 
-from mini_code_cli import agent_loop, tui, ui
+from mini_code_cli import agent_loop, settings, tui, ui
 from mini_code_cli.agent_loop import AgentSession
 
 from test_e2e_agent_loop import make_args
@@ -208,6 +208,36 @@ class TuiConsoleTest(unittest.TestCase):
                 mock.patch("termios.tcsetattr"):
             return call()
 
+    def _feed_edit(self, console, data, name="temperature", current="1.0",
+                   secret=False):
+        """Drive the focused setting editor with ``data`` bytes, then EOF."""
+        calls = [bytes([byte]) for byte in data] + [b""]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"), \
+                mock.patch("termios.tcflush"), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"), \
+                mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
+            return console.settings_edit(name, current=current, secret=secret)
+
+    def _feed_choose(self, console, data, name, options, current=""):
+        """Drive the focused fixed-value picker with ``data`` bytes."""
+        calls = [bytes([byte]) for byte in data] + [b""]
+        with mock.patch.object(tui.sys, "stdin", _FakeStdin()), \
+                mock.patch.object(tui.os, "read", side_effect=calls), \
+                mock.patch("select.select",
+                           side_effect=lambda r, w, x, t: (list(r), [], [])), \
+                mock.patch("termios.tcgetattr",
+                           side_effect=lambda fd: [0, 0, 0, 0, 0, 0, [0] * 32]), \
+                mock.patch("termios.tcsetattr"), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"), \
+                mock.patch.object(tui.TuiConsole, "stop_scroll_listener"):
+            return console.settings_choose(name, options, current=current)
+
     @staticmethod
     def _caret(output):
         matches = re.findall(r"\x1b\[(\d+);(\d+)H\x1b\[\?25h", output)
@@ -358,6 +388,134 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertEqual(selected["name"], "temperature")
         # The between-prompt listener must not compete for the arrow keys.
         self.assertEqual(picker_events, ["stop", "start"])
+
+    def test_settings_picker_left_right_changes_bool_in_place(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        index = next(i for i, row in enumerate(rows)
+                     if row["name"] == "plan")
+        changes = []
+
+        def on_change(row, value, rows):
+            changes.append((row["name"], value))
+            row["value"] = "on" if value else "off"
+            return True
+
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"\x1b[Cq",
+                lambda: console.settings_pick(
+                    rows, selected=index, on_change=on_change))
+            console.stop_tui()
+
+        self.assertIsNone(result)
+        self.assertEqual(changes, [("plan", True)])
+        self.assertEqual(rows[index]["value"], "on")
+
+    def test_settings_picker_left_right_rotates_choices(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        index = next(i for i, row in enumerate(rows)
+                     if row["name"] == "plan-strategy")
+        spec = rows[index]["spec"]
+        current = rows[index]["raw"]
+        expected = spec.choices[
+            (list(spec.choices).index(current) + 1) % len(spec.choices)]
+        changes = []
+
+        def on_change(row, value, rows):
+            changes.append((row["name"], value))
+            return True
+
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"\x1b[Cq",
+                lambda: console.settings_pick(
+                    rows, selected=index, on_change=on_change))
+            console.stop_tui()
+
+        self.assertEqual(changes, [("plan-strategy", expected)])
+
+    def test_settings_edit_shows_only_the_focused_box(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console.stream.seek(0)
+            console.stream.truncate(0)
+            text = self._feed_edit(console, b"0.5\r")
+            output = console.stream.getvalue()
+            console.stop_tui()
+
+        self.assertEqual(text, "0.5")
+        # The edit frame is a full repaint that contains no dashboard/chat
+        # boxes; the normal frame rendered afterwards is separate.
+        edit_frames = [chunk for chunk in output.split("\x1b[2J\x1b[H")
+                       if "Setting: temperature" in chunk]
+        self.assertTrue(edit_frames)
+        edit_output = "\n".join(edit_frames)
+        self.assertIn("Value", edit_output)
+        self.assertNotIn("Mini-Code", edit_output)
+        self.assertNotIn("You", edit_output)
+
+    def test_settings_edit_escape_returns_to_the_menu(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            text = self._feed_edit(console, b"\x1b")
+            console.stop_tui()
+        self.assertIsNone(text)
+
+    def test_settings_secret_uses_a_focused_masked_box(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console.stream.seek(0)
+            console.stream.truncate(0)
+            text = self._feed_edit(
+                console, b"sk-123\r", name="api-key", secret=True)
+            output = console.stream.getvalue()
+            console.stop_tui()
+
+        self.assertEqual(text, "sk-123")
+        edit_frames = [chunk for chunk in output.split("\x1b[2J\x1b[H")
+                       if "Setting: api-key" in chunk]
+        self.assertTrue(edit_frames)
+        edit_output = "\n".join(edit_frames)
+        self.assertIn("******", edit_output)
+        self.assertNotIn("sk-123", edit_output)
+
+    def test_settings_choose_returns_the_picked_value_or_exit(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            picked = self._feed_choose(
+                console, b"\x1b[B\r", "plan", ["off", "on"],
+                current="off")
+            back = self._feed_choose(
+                console, b"exit", "plan", ["off", "on"], current="off")
+            console.stop_tui()
+        self.assertEqual(picked, "on")
+        self.assertIsNone(back)
 
     def test_caret_column_uses_display_width_for_cjk(self):
         console = self.console()
