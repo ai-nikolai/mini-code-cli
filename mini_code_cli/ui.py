@@ -860,18 +860,27 @@ class Console:
         label_w = max((len(str(label)) for label, _ in rows), default=0)
         lines = [sign_off or "Goodbye, and thanks for using MiniCodeCLI!", ""]
         lines += [f"{str(label).ljust(label_w)} : {value}" for label, value in rows]
-        # The same yellow as the good-bye box, printed outside/above it. The
-        # fixed TUI stops its alternate screen before this runs, so it lands on
-        # the normal terminal just like the box.
+        # The same yellow as the good-bye box, printed outside/above it in its
+        # own full box. The fixed TUI stops its alternate screen before this
+        # runs, so it lands on the normal terminal just like the box.
         art_width = max(len(line) for line in LOGO)
-        if self.width >= art_width + 4:
-            pad = " " * max((self.width - art_width) // 2, 0)
+        if self.width >= art_width + 8:
+            content_width = art_width + 2
+            body = []
             for line in LOGO:
-                self.emit(pad + self.style(line, fg="yellow", bold=True))
+                pad = " " * max((content_width - len(line)) // 2, 0)
+                body.append(_pad_visual(
+                    pad + self.style(line, fg="yellow", bold=True),
+                    content_width))
+            logo_box = self.box(body, fg="yellow")
         else:
-            label = "MINI CODE"
-            pad = " " * max((self.width - len(label)) // 2, 0)
-            self.emit(pad + self.style(label, fg="yellow", bold=True))
+            label = self.style("MINI CODE", fg="yellow", bold=True)
+            logo_box = self.box([label], fg="yellow")
+        box_lines = logo_box.splitlines()
+        box_width = max(_visual_len(line) for line in box_lines)
+        pad = " " * max((self.width - box_width) // 2, 0)
+        for line in box_lines:
+            self.emit(pad + line)
         self.emit()
         # Yellow, not the welcome banner's cyan: this is the one box that
         # *closes* the session, so it reads as a distinct, valedictory note
@@ -926,28 +935,32 @@ class Console:
                     return index
         return default
 
-    def settings_edit(self, name, current="", choices=(), secret=False):
+    def settings_edit(self, name, current="", choices=(), secret=False,
+                      current_label=None):
         """Prompt for one setting's value (plain console fallback)."""
         if secret:
             return self.read_secret(
                 f"{name} (hidden; type 'exit' to go back): ")
-        suffix = f" [{current}]" if current not in ("", None) else ""
+        label = current if current_label is None else current_label
+        suffix = f" [{label}]" if label not in ("", None) else ""
         if choices:
             suffix += " (choices: " + ", ".join(str(c) for c in choices) + ")"
         prompt = f"{name}{suffix} (or 'exit'): "
         return self.read_line(prompt)
 
-    def settings_secret(self, name, current=""):
-        return self.settings_edit(name, current=current, secret=True)
+    def settings_secret(self, name, current="", current_label=None):
+        return self.settings_edit(name, current=current,
+                                  current_label=current_label, secret=True)
 
-    def settings_choose(self, name, options, current=""):
+    def settings_choose(self, name, options, current="", current_label=None):
         """Prompt for a fixed-value setting; ``None`` means "go back"."""
         options = list(options)
         if not options:
             return None
         default = (options.index(current) + 1
                    if current in options else 1)
-        choice = self.choose(f"{name} (current: {current})", options,
+        label = current if current_label is None else current_label
+        choice = self.choose(f"{name} (current: {label})", options,
                              default=default, allow_exit=True)
         return None if choice is None else options[choice - 1]
 

@@ -393,11 +393,20 @@ class Settings:
         for index, spec in enumerate(SPECS, 1):
             value = self.api_key if spec.name == "api-key" else self.values.get(
                 spec.attr, spec.default)
+            formatted = format_value(spec, value)
+            is_default = value == spec.default
+            display = formatted
+            # "(not set)" and "(derived)" already say what the value is; a
+            # trailing "(default)" there would just be noise.
+            if is_default and formatted not in ("(not set)", "(derived)"):
+                display += " (default)"
             rows.append({
                 "number": index,
                 "name": spec.name,
                 "label": spec.display(),
-                "value": format_value(spec, value),
+                "value": formatted,
+                "display": display,
+                "is_default": is_default,
                 "raw": value,
                 "kind": spec.kind,
                 "choices": spec.choices,

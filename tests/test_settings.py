@@ -582,6 +582,24 @@ class SettingsCommandTest(unittest.TestCase):
         self.session._handle_settings_command("")
         self.assertEqual(self.session.args.temperature, 0.4)
 
+    def test_default_values_are_marked_in_the_table(self):
+        rows = {row["name"]: row for row in self.session.settings.rows()}
+        for name in ("temperature", "plan", "plan-strategy"):
+            self.assertTrue(rows[name]["is_default"], name)
+            self.assertIn("(default)", rows[name]["display"], name)
+        # "(not set)" is already explicit enough for an absent API key.
+        self.assertNotIn("(default)", rows["api-key"]["display"])
+
+    def test_changing_a_value_removes_the_default_marker(self):
+        rows = self.session.settings.rows()
+        temperature = next(row for row in rows
+                           if row["name"] == "temperature")
+        self.session._change_setting_inline(temperature, 0.5, rows)
+        fresh = next(row for row in rows
+                     if row["name"] == "temperature")
+        self.assertFalse(fresh["is_default"])
+        self.assertNotIn("(default)", fresh["display"])
+
     def test_plan_strategy_is_not_shown_as_derived(self):
         rows = {row["name"]: row for row in self.session.settings.rows()}
         self.assertNotEqual(rows["plan-strategy"]["value"], "(derived)")

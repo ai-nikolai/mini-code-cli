@@ -2522,7 +2522,8 @@ class AgentSession:
             mutable = "" if row["mutable"] else "  [immutable]"
             cache = f"  cache:{row['cache']}" if row["cache"] != "none" else ""
             lines.append(f"  {row['number']:2}. {row['name']:22} "
-                         f"{row['value']:28}{cache}{mutable}")
+                         f"{row.get('display', row['value']):28}"
+                         f"{cache}{mutable}")
         for name, description in settings_mod.IMMUTABLE:
             lines.append(f"     {name:22} (cannot change: {description})")
         return lines
@@ -2534,11 +2535,12 @@ class AgentSession:
         row = next((item for item in self.settings.rows()
                     if item["name"] == name), None)
         current = row["value"] if row else ""
+        current_label = row.get("display", current) if row else ""
         if name == "api-key":
             # A focused, masked sub-window in the TUI; getpass on the plain
             # console. Both accept ``exit`` to go back.
             key = self.console.settings_secret(
-                "api-key", current=current)
+                "api-key", current=current, current_label=current_label)
             key = "" if key is None else key.strip()
             if key.lower() == "exit":
                 return None
@@ -2556,11 +2558,13 @@ class AgentSession:
             options = (["on", "off"] if spec.kind == "bool"
                        else list(spec.choices))
             value = self.console.settings_choose(
-                name, options, current=current)
+                name, options, current=current,
+                current_label=current_label)
             return None if value is None else str(value)
         value = self.console.settings_edit(
             name, current=current,
-            choices=spec.choices if spec is not None else ())
+            choices=spec.choices if spec is not None else (),
+            current_label=current_label)
         if value is None:
             return None
         text = value.strip()
@@ -2790,7 +2794,8 @@ class AgentSession:
             while True:
                 row = self.console.settings_pick(
                     self.settings.rows(), immutable, selected=selected,
-                    on_change=stage_change, on_save=save)
+                    on_change=stage_change, on_save=save,
+                    dirty=lambda: state["dirty"])
                 if row is None:
                     if not state["dirty"]:
                         return

@@ -465,6 +465,33 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(len(saved), 1)
 
+    def test_settings_status_badge_reflects_dirty_state(self):
+        console = self.console(color=True)
+        rows = settings.Settings().rows()
+        statuses = []
+        original = console._picker_window
+
+        def spy(header, body, selected, status=None):
+            statuses.append(status)
+            return original(header, body, selected, status=status)
+
+        console._picker_window = spy
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"q",
+                lambda: console.settings_pick(rows, dirty=True))
+            self._feed_pick(
+                console, b"q",
+                lambda: console.settings_pick(rows, dirty=False))
+            console.stop_tui()
+
+        self.assertIn(("unsaved", "yellow"), statuses)
+        self.assertIn(("saved", "green"), statuses)
+
     def test_settings_edit_shows_only_the_focused_box(self):
         console = self.console()
         with mock.patch.object(
@@ -486,8 +513,10 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertTrue(edit_frames)
         edit_output = "\n".join(edit_frames)
         self.assertIn("Value", edit_output)
-        # The persistent ASCII banner stays visible while editing a setting.
-        self.assertIn("__  __", edit_output)
+        # The persistent ASCII banner stays visible while editing a setting
+        # (the compact boxed label is used on a 20-row terminal).
+        self.assertTrue("MINI CODE" in edit_output
+                        or "__  __" in edit_output)
         self.assertNotIn("Mini-Code", edit_output)
         self.assertNotIn("You", edit_output)
 
@@ -676,17 +705,20 @@ class TuiConsoleTest(unittest.TestCase):
             console.stop_tui()
         self.assertIn("__  __", content)
         self.assertIn("version 1.0", content)
-        # The mark is a separate, centered banner above the dashboard box,
-        # with a separator between them.
+        # The mark is a separate, centered boxed banner above the dashboard
+        # box; its borders fully enclose the ASCII art.
         art = next(line for line in lines if "__  __" in line)
-        self.assertTrue(art.startswith(" " * 18))
+        self.assertTrue(art.startswith(" "))
         art_index = lines.index(art)
         header_index = next(index for index, line in enumerate(lines)
                             if "Mini-Code" in line)
         self.assertLess(art_index, header_index)
-        separator = lines[art_index + len(tui.LOGO)]
-        self.assertGreater(len(separator.strip()), 10)
-        self.assertEqual(len(set(separator.strip())), 1)
+        self.assertTrue(art.strip().startswith("|"))
+        self.assertTrue(art.rstrip().endswith("|"))
+        top = lines[art_index - 1].strip()
+        bottom = lines[art_index + len(tui.LOGO)].strip()
+        self.assertTrue(top.startswith("+") and top.endswith("+"))
+        self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
 
     def test_the_middle_pane_scrolls(self):
         console = self.console()

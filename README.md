@@ -284,16 +284,19 @@ the tool list or generated system prompt — these invalidate the LLM prompt cac
 Cache-impacting edits from the plain `settings>` prompt are staged until you type
 `apply`, so a batch rebuilds the prompt once.
 
-In the fixed TUI the same table is a navigable overlay that starts at the first
-setting and scrolls with the selection. Up/down or numbers select; left/right toggle
-an on/off setting or rotate through a fixed-choice setting (such as `plan-strategy`)
-in place. Enter opens a focused sub-window that shows only that setting's input box
-(or its option list), where `exit` or Esc returns to the settings table. Changes are
-staged in the table until you press `s` to save; `q` quits, and if there are unsaved
-changes it asks whether to save them or cancel the changes. Plan mode is its own
-on/off setting; the plan strategy keeps a concrete value even while plan mode is off.
-Changing the TUI, paths, the custom system prompt or the initial prompt is not
-allowed mid-session.
+In the fixed TUI the ASCII mark sits in its own centered box above the session view
+and stays visible in the settings views. The settings table is a navigable overlay
+that starts at the first setting and scrolls with the selection. Up/down or numbers
+select; left/right toggle an on/off setting or rotate through a fixed-choice setting
+(such as `plan-strategy`) in place. Values equal to their built-in default are marked
+`(default)`. Enter opens a focused sub-window that shows only that setting's input
+box (or its option list), where `exit` or Esc returns to the settings table. Changes
+are staged in the table until you press `s` to save; `q` quits, and if there are
+unsaved changes it asks whether to save them or cancel the changes. The table header
+shows a green `saved` or yellow `unsaved` badge. Plan mode is its own on/off setting;
+the plan strategy keeps a concrete value even while plan mode is off. Changing the
+TUI, paths, the custom system prompt or the initial prompt is not allowed
+mid-session.
 
 ## Development
 

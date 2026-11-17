@@ -664,21 +664,28 @@ class TuiConsole(Console):
         # The ASCII mark is a persistent banner above every view, not part of
         # the dashboard box: it stays visible while settings are open too.
         banner = self._banner_lines(cols, rows)
-        summary = [str(line) for line in (self._summary_lines
-                                          or ["Mini-Code"])]
-        if self._info_provider is not None:
-            try:
-                info = self._info_provider()
-            except Exception:
-                info = ""
-            if info:
-                summary.append(self.style(info, dim=True))
-        max_summary = max(rows // 4, 3)
-        header = self._box("Mini-Code", summary[:max_summary], cols,
-                           fg="cyan")
+        # On a very short terminal the conversation and input matter more than
+        # the dashboard; the banner + input still leave a usable body.
+        compact_layout = rows < 14
+        if compact_layout:
+            header = []
+        else:
+            summary = [str(line) for line in (self._summary_lines
+                                              or ["Mini-Code"])]
+            if self._info_provider is not None:
+                try:
+                    info = self._info_provider()
+                except Exception:
+                    info = ""
+                if info:
+                    summary.append(self.style(info, dim=True))
+            max_summary = max(rows // 4, 3)
+            header = self._box("Mini-Code", summary[:max_summary], cols,
+                               fg="cyan")
 
         input_lines = self._input_lines()
-        max_input = max(1, min(rows // 2, rows - 6))
+        max_input = max(1, min(rows // 2,
+                               rows - len(banner) - len(header) - 4))
         cursor_line = 0
         column = 0
         if self._input_active:
@@ -697,17 +704,18 @@ class TuiConsole(Console):
         else:
             visible_cursor_line = 0
             input_lines = input_lines[-max_input:]
-        if self._scroll_offset:
-            hint_text = (f"scrolled {self._scroll_offset}/"
-                         f"{self._total_body_lines} lines · "
-                         f"Shift+↓ / Esc to bottom")
-        else:
-            hint_text = ("Enter send · Shift+Enter newline · ↑/↓ history · "
-                         "Shift+↑/↓ scroll · Esc close command · /help")
-        hint = self.style(hint_text, dim=True)
         input_title = "Answer" if self._question_active else "You"
         input_fg = "yellow" if self._question_active else "green"
-        body_box = input_lines + [hint]
+        body_box = list(input_lines)
+        if not compact_layout:
+            if self._scroll_offset:
+                hint_text = (f"scrolled {self._scroll_offset}/"
+                             f"{self._total_body_lines} lines · "
+                             f"Shift+↓ / Esc to bottom")
+            else:
+                hint_text = ("Enter send · Shift+Enter newline · ↑/↓ history · "
+                             "Shift+↑/↓ scroll · Esc close command · /help")
+            body_box.append(self.style(hint_text, dim=True))
         input_box = self._box(input_title, body_box, cols, fg=input_fg)
         question_box = []
         if self._question_active and self._question_lines:
@@ -747,27 +755,34 @@ class TuiConsole(Console):
         return " " * pad + text
 
     def _banner_lines(self, cols, rows):
-        """Return the persistent, centered ASCII mark plus a separator.
+        """Return a centered box containing the persistent ASCII mark.
 
-        The mark is shown above every view (including the focused settings
-        editor); on a short or narrow terminal a compact one-line label is
-        used so it always fits.
+        The boxed mark is shown above every view (including the focused
+        settings editor); on a short or narrow terminal a compact one-line
+        label is boxed instead so it always fits.
         """
         art_width = max(_visual_len(line) for line in LOGO)
-        if rows >= 18 and cols >= art_width + 4:
-            # Center the block once: centering each line separately would
+        if rows >= 18 and cols >= art_width + 8:
+            box_width = art_width + 6
+            inner = box_width - 4
+            # Center the block once: centering each logo line separately would
             # misalign the 42- and 43-column rows relative to each other.
-            pad = max((cols - art_width) // 2, 0)
-            lines = [" " * pad + self.style(line, fg="cyan", bold=True)
-                     for line in LOGO]
+            pad = max((inner - art_width) // 2, 0)
+            body = [" " * pad + self.style(line, fg="cyan", bold=True)
+                    for line in LOGO]
+        elif rows >= 10:
+            label = self.style("MINI CODE", fg="cyan", bold=True)
+            box_width = min(max(_visual_len(label) + 6, 12),
+                            max(cols, 8))
+            inner = max(box_width - 4, 1)
+            body = [self._center(label, inner)]
         else:
-            lines = [self._center(
-                self.style("MINI CODE", fg="cyan", bold=True), cols)]
-        rule_width = max(min(cols - 2, 64), 1)
-        lines.append(self._center(
-            self.style(self.glyph("h") * rule_width, fg="cyan", dim=True),
-            cols))
-        return lines
+            # A 3-line box would crowd out the conversation and input on a
+            # very short terminal; keep the mark as one centered line.
+            label = self.style("[ MINI CODE ]", fg="cyan", bold=True)
+            return [self._center(label, cols)]
+        box = self._box(None, body, box_width, fg="cyan")
+        return [self._center(line, cols) for line in box]
 
     def _render_edit_locked(self, cols, rows):
         """Draw the focused setting window plus the persistent banner."""
@@ -846,16 +861,19 @@ class TuiConsole(Console):
         else:
             self._write("\x1b[?25l")
 
-    def settings_edit(self, name, current="", choices=(), secret=False):
+    def settings_edit(self, name, current="", choices=(), secret=False,
+                      current_label=None):
         """Edit one setting in a focused sub-window; return text or ``None``."""
         if not self._active:
-            return super().settings_edit(name, current=current,
-                                         choices=choices, secret=secret)
+            return super().settings_edit(
+                name, current=current, choices=choices, secret=secret,
+                current_label=current_label)
         self.stop_scroll_listener()
         self._edit_active = True
         self._edit_mask = bool(secret)
         self._edit_title = f"Setting: {name}"
-        self._edit_current = "" if current is None else str(current)
+        label = current if current_label is None else current_label
+        self._edit_current = "" if label is None else str(label)
         self._edit_choices = tuple(choices or ())
         self._input_buffer = []
         self._input_cursor = 0
@@ -884,20 +902,24 @@ class TuiConsole(Console):
             if self._active:
                 self.start_scroll_listener()
 
-    def settings_choose(self, name, options, current=""):
+    def settings_choose(self, name, options, current="", current_label=None):
         """Pick a fixed setting value in the focused sub-window.
 
-        ``None`` means "go back" (Esc, q, or typing ``exit``).
+        ``None`` means "go back" (Esc, q, or typing ``exit``). ``current`` is
+        the raw value used to preselect an option; ``current_label`` is what
+        the header shows (for example ``1.0 (default)``).
         """
         options = list(options or ())
         if not self._active or not options:
-            return super().settings_choose(name, options, current=current)
+            return super().settings_choose(
+                name, options, current=current, current_label=current_label)
         start = options.index(current) if current in options else 0
         self.stop_scroll_listener()
         self._edit_active = True
         self._edit_choice_mode = True
         self._edit_title = f"Setting: {name}"
-        self._edit_current = "" if current is None else str(current)
+        label = current if current_label is None else current_label
+        self._edit_current = "" if label is None else str(label)
         self._edit_options = tuple(options)
         self._edit_selected = start
         self._edit_typed = ""
@@ -1249,11 +1271,13 @@ class TuiConsole(Console):
             except (OSError, ValueError, termios.error):
                 pass
 
-    def _picker_window(self, header, body, selected):
+    def _picker_window(self, header, body, selected, status=None):
         """Render a top-anchored picker window that follows ``selected``.
 
         The body is scrolled so the selected row stays visible; unlike command
         output, the window starts at the top instead of showing only its tail.
+        ``status`` is an optional ``(text, colour)`` badge shown first so it
+        survives truncation on narrow terminals.
         """
         visible = max(int(getattr(self, "_last_body_height", 1) or 1), 3)
         window = max(visible - 1, 1)
@@ -1269,9 +1293,12 @@ class TuiConsole(Console):
         label = header
         if total:
             label += f"  {top + 1}-{end}/{total}"
+        line = self.style(label, fg="cyan", bold=True)
+        if status is not None:
+            text, fg = status
+            line = (self.style(str(text), fg=fg, bold=True) + "  " + line)
         self._overlay_top = True
-        self._overlay_lines = ([self.style(label, fg="cyan", bold=True)]
-                               + body[top:end])
+        self._overlay_lines = [line] + body[top:end]
         self.render()
 
     def _pick_index(self, draw, count, default=0, allow_exit_word=False,
@@ -1402,7 +1429,7 @@ class TuiConsole(Console):
         return None if index is None else index + 1
 
     def settings_pick(self, rows, immutable_lines=(), selected=0,
-                      on_change=None, on_save=None):
+                      on_change=None, on_save=None, dirty=False):
         """Show the settings table and return the selected row, or None.
 
         Up/down or a number select, Enter opens the focused editor, left/right
@@ -1410,7 +1437,8 @@ class TuiConsole(Console):
         settings, and q/Esc cancels. ``on_change(row, value, rows)`` stages an
         inline change; it may replace the ``rows`` list so dependent rows (e.g.
         plan and plan-strategy) stay in sync. ``on_save(rows)`` persists the
-        staged batch and refreshes the table.
+        staged batch and refreshes the table. ``dirty`` may be a bool or a
+        callable; the header shows a green ``saved`` or orange ``unsaved`` badge.
         """
         if not self._active or not rows:
             return None
@@ -1424,12 +1452,16 @@ class TuiConsole(Console):
                 cache = (f"  cache:{row['cache']}"
                          if row.get("cache", "none") != "none" else "")
                 body.append(f"{marker} {row['number']:2}. "
-                            f"{row['name']:22} {row['value']:28}{cache}")
+                            f"{row['name']:22} {row.get('display', row['value']):28}"
+                            f"{cache}")
             for line in immutable_lines:
                 body.append(self.style("  " + str(line), dim=True))
+            is_dirty = dirty() if callable(dirty) else bool(dirty)
+            status = (("unsaved", "yellow") if is_dirty
+                      else ("saved", "green"))
             self._picker_window(
                 "[settings] ↑/↓ select · ←/→ change · Enter edit · "
-                "s save · q quit", body, selected)
+                "s save · q quit", body, selected, status=status)
 
         def change(selected, step):
             row = rows[selected]

@@ -1175,8 +1175,17 @@ class FarewellBoxTest(_SessionCase):
         self.assertIn("__  __", text)
         self.assertLess(text.index("__  __"),
                         text.index("MiniCodeCLI v"))
-        art = next(line for line in text.splitlines() if "__  __" in line)
+        lines = text.splitlines()
+        art_index = next(index for index, line in enumerate(lines)
+                         if "__  __" in line)
+        art = lines[art_index]
         self.assertGreater(len(art) - len(art.lstrip(" ")), 0)
+        self.assertTrue(art.strip().startswith("|"))
+        self.assertTrue(art.rstrip().endswith("|"))
+        top = lines[art_index - 1].strip()
+        bottom = lines[art_index + len(ui.LOGO)].strip()
+        self.assertTrue(top.startswith("+") and top.endswith("+"))
+        self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
 
     def test_it_is_not_the_startup_banner(self):
         # The welcome box lists how the session *will* run; the farewell box
