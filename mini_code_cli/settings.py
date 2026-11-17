@@ -436,7 +436,12 @@ class Settings:
         # Keys are remembered when supplied/loaded; save only persists the
         # entries the user opted to write. Re-associating the active key here
         # would copy an explicit CLI key onto whatever model is current.
-        payload = {"version": SETTINGS_VERSION, "values": dict(self.values)}
+        # ``api_key`` is not an ordinary value: it lives only in the per-model
+        # maps, so never write whatever the active in-memory value happens to
+        # be into ``values``.
+        payload = {"version": SETTINGS_VERSION,
+                   "values": {attr: value for attr, value in self.values.items()
+                              if attr != "api_key"}}
         literal = {kid: key for kid, key in self.api_keys.items()
                    if kid in self.persisted_key_ids and key}
         envs = {kid: env for kid, env in self.api_key_envs.items() if env}

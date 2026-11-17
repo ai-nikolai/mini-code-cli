@@ -90,6 +90,7 @@ class SettingsStoreTest(unittest.TestCase):
         kid = settings.key_id("https://api.example.test", "model-a")
         self.assertEqual(payload["api_keys"], {kid: "sk-secret"})
         self.assertNotIn("api_key_envs", payload)
+        self.assertNotIn("api_key", payload["values"])
 
     def test_keys_are_stored_per_endpoint_and_model(self):
         value = settings.Settings()
