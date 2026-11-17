@@ -24,6 +24,15 @@ from .base import AgentAdapter
 TOOLS = "/root/.agent-tools"
 WRAPPER = f"{TOOLS}/opencode-run"
 
+#: Pin the npm release. Installing bare ``opencode-ai`` follows the ``latest``
+#: dist-tag, and npm publishes the meta package before its platform binaries:
+#: on 2026-11-17 ``opencode-ai@1.19.6`` appeared at 07:22:20Z while
+#: ``opencode-linux-x64@1.19.6`` only landed at 07:25:21Z. Every trial started
+#: in that window got a 404 from the postinstall, and the failed 404 response
+#: stayed in the shared npm cache, so the 13 trials after 07:25:13Z never
+#: reached the agent. Keep this version at one that is known good.
+OPENCODE_NPM_VERSION = "1.19.5"
+
 
 class OpenCodeAgent(AgentAdapter):
     name = "opencode"
@@ -57,7 +66,8 @@ class OpenCodeAgent(AgentAdapter):
             # model are only needed for the wrapper's config, so skip it then.
             return (container_setup.node_commands(prefix=TOOLS)
                     + container_setup.npm_global_commands(
-                        "opencode-ai", "opencode", prefix=TOOLS))
+                        "opencode-ai", "opencode",
+                        version=OPENCODE_NPM_VERSION, prefix=TOOLS))
         # A distinct provider ID is deliberate: OpenCode's built-in ``openai``
         # provider resolves to @ai-sdk/openai and posts to /v1/responses. The
         # compatible package speaks /v1/chat/completions, which is what vLLM
@@ -94,7 +104,8 @@ exec {TOOLS}/bin/opencode \\
 """
         return (container_setup.node_commands(prefix=TOOLS)
                 + container_setup.npm_global_commands(
-                    "opencode-ai", "opencode", prefix=TOOLS)
+                    "opencode-ai", "opencode",
+                    version=OPENCODE_NPM_VERSION, prefix=TOOLS)
                 + [f"cat > {WRAPPER} <<'SH_OPENCODE'\n{body}SH_OPENCODE\n"
                    f"chmod +x {WRAPPER}"])
 
