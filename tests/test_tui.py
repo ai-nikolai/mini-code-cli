@@ -974,6 +974,21 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertIn("1. inspect", last_screen)
         self.assertIn("working on it", last_screen)
 
+    def test_empty_hint_can_be_hidden_before_a_session_starts(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console.set_empty_hint(False)
+            hidden = "\n".join(console._content_lines(50))
+            console.set_empty_hint(True)
+            shown = "\n".join(console._content_lines(50))
+            console.stop_tui()
+        self.assertNotIn("No conversation yet", hidden)
+        self.assertIn("No conversation yet", shown)
+
     def test_load_history_populates_the_core_view(self):
         console = self.console()
         with mock.patch.object(

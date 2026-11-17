@@ -1821,6 +1821,10 @@ class AgentSession:
 
     def run(self, initial_prompt=None):
         """Drive the agent loop until the user quits."""
+        if isinstance(self.console, tui_mod.TuiConsole):
+            # Before a session exists we are still answering resume/settings
+            # questions; "No conversation yet" would be misleading.
+            self.console.set_empty_hint(False)
         if self.tui and isinstance(self.console, tui_mod.TuiConsole):
             if not self.console.active and not self.console.start_tui():
                 # --tui on requested the fixed view, but this terminal cannot
@@ -1843,6 +1847,8 @@ class AgentSession:
         # announcements describe the session that was actually chosen.
         try:
             self.start_session()
+            if isinstance(self.console, tui_mod.TuiConsole):
+                self.console.set_empty_hint(True)
             if not self.tui_active:
                 self.print_welcome()
             self.print_announcements()

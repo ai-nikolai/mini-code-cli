@@ -96,6 +96,7 @@ class TuiConsole(Console):
         # Notes/warnings emitted before the first turn belong in the core
         # view, above the conversation (or its "no conversation yet" hint).
         self._startup_notices = []
+        self._show_empty_hint = True
         self._overlay_lines = []
         # Command output overlays are anchored to the bottom (like a rolling
         # log). Interactive pickers set this so their table starts at the top
@@ -183,6 +184,12 @@ class TuiConsole(Console):
     def set_summary(self, lines):
         self._summary_lines = [str(line) for line in (lines or [])]
         self.render()
+
+    def set_empty_hint(self, visible):
+        """Show/hide the \"No conversation yet\" hint before a session starts."""
+        self._show_empty_hint = bool(visible)
+        if self._active:
+            self.render()
 
     def load_history(self, turns):
         """Populate the core view with user/assistant turns from a restored session."""
@@ -526,7 +533,7 @@ class TuiConsole(Console):
             lines.append(self.style(self.glyph("h") * max(width, 1), dim=True))
         if lines and self._turns:
             lines.pop()             # no separator after the newest turn
-        if not self._turns:
+        if not self._turns and self._show_empty_hint:
             lines.append(self.style(
                 "No conversation yet. Type a message; /help lists commands.",
                 dim=True))
