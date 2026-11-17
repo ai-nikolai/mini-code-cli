@@ -287,6 +287,8 @@ class OtherAdapterTests(unittest.TestCase):
         # no egress from a compute node: those failures look like auth errors
         self.assertEqual(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
         self.assertEqual(env["DISABLE_TELEMETRY"], "1")
+        # Keep input + output inside the 262144-token server window.
+        self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "16384")
 
     def test_claude_code_leaves_the_public_api_alone(self):
         adapter = get_adapter(AgentSpec(name="claude-code"))
@@ -295,6 +297,7 @@ class OtherAdapterTests(unittest.TestCase):
         env = adapter.env(model)
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
         self.assertNotIn("DISABLE_TELEMETRY", env)
+        self.assertNotIn("CLAUDE_CODE_MAX_OUTPUT_TOKENS", env)
 
     def test_endpoint_probe_turns_http_codes_into_instructions(self):
         import threading

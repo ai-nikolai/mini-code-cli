@@ -110,6 +110,12 @@ class ClaudeCodeAgent(AgentAdapter):
             env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
             env["DISABLE_TELEMETRY"] = "1"
             env["DISABLE_ERROR_REPORTING"] = "1"
+            # The local endpoint's context window is 262144 tokens, but Claude
+            # Code assumes 200k while requesting a 32k reply. On long sessions
+            # that combination produced HTTP 400 "maximum context length is
+            # 262144 ... requested 32000 output". Cap the reply so input +
+            # output stays inside the server window.
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "16384"
         return env
 
     def preflight(self, model, require_binary=True):
