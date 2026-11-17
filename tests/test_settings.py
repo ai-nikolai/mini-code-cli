@@ -605,6 +605,10 @@ class StartupConsoleTest(unittest.TestCase):
             agent_loop.main()
 
         self.assertFalse(console.active)
+        output = console.stream.getvalue()
+        self.assertIn("Startup cancelled.", output)
+        self.assertIn("No session was started. Goodbye!", output)
+        self.assertIn("__  __", output)
 
     def test_one_shot_prompt_never_starts_the_tui(self):
         self.args.tui = "on"

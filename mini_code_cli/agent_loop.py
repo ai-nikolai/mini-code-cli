@@ -655,6 +655,25 @@ def _looks_complete(text):
 
 
 
+def print_no_session_farewell(console, model=None, started_at=None):
+    """Print the good-bye mark/box when an interactive startup is cancelled."""
+    from . import __version__ as version
+
+    elapsed = max(time.monotonic() - (started_at or time.monotonic()), 0.0)
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    duration = (f"{hours}h {minutes:02d}m" if hours
+                else f"{minutes}m {seconds:02d}s")
+    rows = [
+        ("model", model or "(auto)"),
+        ("session", "not started"),
+        ("duration", duration),
+        ("resume", "mini-code"),
+    ]
+    console.farewell(
+        version, rows, sign_off="No session was started. Goodbye!")
+
+
 def build_console(args):
     """Return ``(console, tui_mode)`` for these args.
 
@@ -780,6 +799,9 @@ class AgentSession:
         # funnel through there (quit, exit, EOF, a /quit command) and a repeated
         # box would read like a second session had ended.
         self._farewell_shown = False
+        # False until start_new_session/restore_previous_session has produced
+        # a real session. shutdown() must not try to persist an unstarted one.
+        self._session_started = False
 
         # Token accounting. ``token_stats`` covers the *current history
         # segment* and is reset when compaction rolls over to a new one;
@@ -885,7 +907,13 @@ class AgentSession:
 
         answer = self.show_resume_choice()
         if answer == "exit":
+            # This exit happens before a session exists, so it cannot use
+            # shutdown() (which persists an empty session). Print the same
+            # good-bye mark/box directly instead.
+            if self.tui_active:
+                self.console.stop_tui()
             self.console.note("User chose to exit! Exiting.", "warn")
+            self._farewell_no_session()
             raise SystemExit("")
         if answer != "resume":
             self.console.note("Will start with new session!", "warn")
@@ -937,6 +965,7 @@ class AgentSession:
         # Record this session in --allowed-dir/.mini so a later
         # --load-last-session (or the interactive resume offer) can find it.
         self._save_last_session_pointer()
+        self._session_started = True
 
 
     def restore_previous_session(self, restore_directory):
@@ -1028,6 +1057,7 @@ class AgentSession:
             self.last_prompt_message_count = 0
             self._restore_usage_if_available(restore_directory)
             self.restored_session = True
+            self._session_started = True
 
             # Continuing a session in place makes it the latest one again: keep
             # the pointer aimed at it so a later --load-last-session finds the
@@ -1048,6 +1078,7 @@ class AgentSession:
         """
         self.unique_id = None
         self.session_dir = None
+        self._session_started = False
         self.plan_manager = None
         self.messages = []
         self.summary = []
@@ -3443,6 +3474,13 @@ class AgentSession:
         self.background_tasks.shutdown()
         self._exit_background = max(
             getattr(self, "_exit_background", 0), background_cancelled)
+        if not getattr(self, "_session_started", False):
+            # The user exited before a session was created (e.g. during the
+            # resume/settings questions). There is nothing to persist, but the
+            # good-bye box must still be shown.
+            if farewell:
+                self._farewell_no_session()
+            return
         self._persist()
         segments = history_segment_indices(self.session_dir)
         # List what is really on disk. The old message claimed
@@ -3465,6 +3503,13 @@ class AgentSession:
             self.console.usage_summary(self.total_usage)
         if farewell:
             self._farewell(segments)
+
+    def _farewell_no_session(self):
+        """Print a good-bye box when the user exits before a session starts."""
+        if self._farewell_shown:
+            return
+        self._farewell_shown = True
+        print_no_session_farewell(self.console, self.model, self.started_at)
 
     def _farewell(self, segments=None):
         """Print the good-bye box: version, sign-off and what the session left.
@@ -3762,6 +3807,7 @@ def main():
         if tui_started and console.active:
             console.stop_tui()
         console.note("Startup cancelled.", "info")
+        print_no_session_farewell(console, getattr(args, "model", None))
         return
     except BaseException:
         # A failure before run() would otherwise leave the terminal on the

@@ -1192,6 +1192,32 @@ class FarewellBoxTest(_SessionCase):
         bottom = [line for line in lines if line.startswith("+")][-1]
         self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
 
+    def test_shutdown_before_a_session_prints_the_no_session_farewell(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+
+        session.shutdown()
+
+        text = self.output()
+        self.assertIn("No session was started. Goodbye!", text)
+        self.assertIn("__  __", text)
+        self.assertIn("not started", text)
+        self.assertNotIn("Saved session to", text)
+
+    def test_exiting_at_the_resume_prompt_prints_the_goodbye_box(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+        with mock.patch.object(AgentSession, "show_resume_choice",
+                               return_value="exit"):
+            with self.assertRaises(SystemExit):
+                session._resume_previous(self.cache_dir)
+
+        text = self.output()
+        self.assertIn("User chose to exit! Exiting.", text)
+        self.assertIn("No session was started. Goodbye!", text)
+        self.assertIn("__  __", text)
+        self.assertIn("MiniCodeCLI", text)
+
     def test_it_is_not_the_startup_banner(self):
         # The welcome box lists how the session *will* run; the farewell box
         # must not repeat any of that once it is over.
