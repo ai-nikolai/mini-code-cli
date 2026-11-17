@@ -326,14 +326,13 @@ class Settings:
         return utils.probe_api_key(url, self.api_key, timeout=timeout)
 
     def reset_to_defaults(self):
-        """Reset every ordinary setting value to its built-in default.
+        """Reset ordinary settings to their built-in defaults.
 
-        The API key is deliberately the one thing kept: the active key and the
-        per-model key archive survive a reset. Selecting a model can then load
-        its saved key again.
+        The connection/credentials are deliberately kept: the model, URL and
+        API key survive a reset (and the per-model key archive remains intact).
         """
         for spec in SPECS:
-            if spec.attr == "api_key":
+            if spec.attr in ("api_key", "model", "url"):
                 continue
             self.values[spec.attr] = spec.default
         # The kept key is an explicit part of the reset, so a subsequent

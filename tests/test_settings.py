@@ -734,8 +734,10 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertTrue(self.session.args.background)
         self.assertTrue(self.session.args.auto_mode)
 
-    def test_settings_default_preset_keeps_the_api_key(self):
+    def test_settings_default_preset_keeps_model_url_and_api_key(self):
         self.session.settings.use_key("keep-key", persist=False)
+        model = self.session.settings.values["model"]
+        url = self.session.settings.values["url"]
         self.session._handle_settings_command("temperature 0.3")
         with mock.patch.object(utils, "determine_vllm_model",
                                return_value=None):
@@ -743,6 +745,8 @@ class SettingsCommandTest(unittest.TestCase):
 
         self.assertEqual(self.session.args.temperature,
                          settings.DEFAULT_TEMPERATURE)
+        self.assertEqual(self.session.settings.values["model"], model)
+        self.assertEqual(self.session.settings.values["url"], url)
         self.assertEqual(self.session.settings.api_key, "keep-key")
 
     def test_plan_strategy_change_does_not_enable_plan_mode(self):

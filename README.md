@@ -300,7 +300,8 @@ select; left/right toggle an on/off setting or rotate through a fixed-choice set
 box (or its option list), where `exit` or Esc returns to the settings table. The full
 table (including immutable rows) is always shown. `a` stages the same feature flags
 as the CLI `--all` preset (plan, shell, sub-agents, skills, auto-mode, sudo,
-background); `d` stages all defaults while keeping the API key. The same presets are
+background); `d` stages all defaults while keeping the model, URL and API key. The
+same presets are
 available as `/settings all` and `/settings default`. Changes are staged in the
 table until you press `s` to save; `q` quits, and if there are unsaved changes it
 asks whether to save them or cancel the changes. The table header shows a green
