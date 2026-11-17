@@ -28,8 +28,7 @@ class SettingsStoreTest(unittest.TestCase):
         args.temperature = 0.4
         value = settings.Settings.from_args(args)
         value.values["enable_shell"] = True
-        value.api_key = "sk-secret"
-        value.persist_api_key = True
+        value.use_key("sk-secret", persist=True)
         path = value.save(self.session)
 
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
@@ -48,8 +47,53 @@ class SettingsStoreTest(unittest.TestCase):
         with open(os.path.join(self.session, "settings.json"),
                   encoding="utf-8") as handle:
             payload = json.load(handle)
+        kid = settings.key_id(value.values["url"], value.values["model"])
         self.assertNotIn("api_key", payload)
-        self.assertEqual(payload["api_key_env"], "MINI_CODE_API_KEY")
+        self.assertEqual(payload["api_key_envs"][kid],
+                         "MINI_CODE_API_KEY")
+
+    def test_keys_are_stored_per_endpoint_and_model(self):
+        value = settings.Settings()
+        value.values["url"] = "https://api.example.test"
+        value.values["model"] = "model-a"
+        value.use_key("key-a", persist=True)
+        value.values["model"] = "model-b"
+        value.use_key("key-b", persist=True)
+        value.save(self.session)
+
+        with open(os.path.join(self.session, "settings.json"),
+                  encoding="utf-8") as handle:
+            payload = json.load(handle)
+        kid_a = settings.key_id("https://api.example.test", "model-a")
+        kid_b = settings.key_id("https://api.example.test", "model-b")
+        self.assertEqual(payload["api_keys"][kid_a], "key-a")
+        self.assertEqual(payload["api_keys"][kid_b], "key-b")
+
+        loaded = settings.Settings.load(self.session)
+        loaded.values["model"] = "model-a"
+        self.assertTrue(loaded.load_key_for())
+        self.assertEqual(loaded.api_key, "key-a")
+        loaded.values["model"] = "model-b"
+        self.assertTrue(loaded.load_key_for())
+        self.assertEqual(loaded.api_key, "key-b")
+
+    def test_saved_key_is_selected_by_model(self):
+        saved = settings.Settings()
+        saved.values["url"] = "https://api.example.test"
+        saved.values["model"] = "model-a"
+        saved.use_key("key-a", persist=True)
+        saved.values["model"] = "model-b"
+        saved.use_key("key-b", persist=True)
+
+        args = make_args(self.cache, self.cache)
+        args.url = "https://api.example.test"
+        args.model = "model-b"
+        value = settings.Settings.resolve(args, saved)
+        self.assertEqual(value.api_key, "key-b")
+
+        args.model = "model-c"
+        value = settings.Settings.resolve(args, saved)
+        self.assertEqual(value.api_key, "")
 
     def test_cli_key_wins_and_is_not_persisted_by_default(self):
         args = make_args(self.cache, self.cache)
@@ -129,6 +173,18 @@ class SettingsStoreTest(unittest.TestCase):
                 side_effect=utils.requests.exceptions.RequestException("down")):
             self.assertIsNone(utils.list_served_models("http://server"))
 
+    def test_probe_api_key_recognizes_success_and_rejection(self):
+        ok = mock.Mock(status_code=200)
+        with mock.patch.object(utils.requests, "get", return_value=ok):
+            self.assertTrue(utils.probe_api_key("http://server", "sk"))
+        denied = mock.Mock(status_code=401)
+        with mock.patch.object(utils.requests, "get", return_value=denied):
+            self.assertFalse(utils.probe_api_key("http://server", "sk"))
+        with mock.patch.object(
+                utils.requests, "get",
+                side_effect=utils.requests.exceptions.RequestException("down")):
+            self.assertIsNone(utils.probe_api_key("http://server", "sk"))
+
     def test_model_is_valid_against_the_served_list(self):
         value = settings.Settings()
         value.values["model"] = "saved-model"
@@ -202,6 +258,8 @@ class SettingsStoreTest(unittest.TestCase):
                 mock.patch.object(console, "read_line", return_value="n"), \
                 mock.patch.object(utils, "list_served_models",
                                   return_value=None), \
+                mock.patch.object(utils, "probe_api_key",
+                                  return_value=True), \
                 mock.patch.object(settings, "find_last_session_dir",
                                   return_value=None):
             value = settings.resolve_for_startup(args, console=console)
@@ -261,6 +319,14 @@ class _WizardConsole:
 
 
 class FirstRunWizardTest(unittest.TestCase):
+    def setUp(self):
+        # The wizard validates entered keys against /v1/models; tests do not
+        # talk to a real server.
+        patcher = mock.patch.object(utils, "probe_api_key",
+                                    return_value=True)
+        self.probe_api_key = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_wizard_uses_the_console_choose_and_secret_hooks(self):
         console = _WizardConsole(choice_answers=[2, 1], key=" sk-test ",
                                  store="n")
@@ -273,6 +339,9 @@ class FirstRunWizardTest(unittest.TestCase):
         self.assertEqual(value.values["model"], "deepseek-chat")
         self.assertEqual(value.api_key, "sk-test")
         self.assertFalse(value.persist_api_key)
+        self.assertEqual(
+            value.key_for(settings.DEEPSEEK_URL, "deepseek-chat")[0],
+            "sk-test")
         self.assertEqual(console.choices[0][1],
                          ["localhost", "deepseek", "custom URL"])
         self.assertEqual(console.choices[1][0], "DeepSeek model to use")
@@ -293,6 +362,7 @@ class FirstRunWizardTest(unittest.TestCase):
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         self.assertNotIn("api_key", payload)
+        self.assertNotIn("api_keys", payload)
 
     def test_deepseek_model_choices_prefer_the_served_list(self):
         value = settings.Settings()
@@ -325,6 +395,57 @@ class FirstRunWizardTest(unittest.TestCase):
         self.assertEqual(value.values["url"], "http://custom:8000")
         self.assertEqual(value.values["model"], "my-model")
 
+    def test_selecting_a_model_loads_its_stored_key(self):
+        value = settings.Settings()
+        value.values["url"] = settings.DEEPSEEK_URL
+        value.values["model"] = "deepseek-chat"
+        value.use_key("key-chat", persist=True)
+        value.values["model"] = "deepseek-reasoner"
+        value.use_key("key-reasoner", persist=True)
+        value.values["model"] = "deepseek-chat"
+        value.api_key = ""
+        value.key_entered = False
+        console = _WizardConsole(key="should-not-be-used")
+
+        settings._finish_key_for_model(value, console, "deepseek")
+
+        self.assertEqual(value.api_key, "key-chat")
+        self.assertEqual(console.secrets, [])
+
+    def test_a_different_model_without_a_stored_key_asks_again(self):
+        value = settings.Settings()
+        value.values["url"] = settings.DEEPSEEK_URL
+        value.values["model"] = "deepseek-chat"
+        value.use_key("key-chat", persist=True)
+        value.values["model"] = "deepseek-v4"
+        value.api_key = "key-chat"
+        value.key_entered = False
+        console = _WizardConsole(key="key-v4", store="n")
+
+        settings._finish_key_for_model(value, console, "deepseek")
+
+        self.assertEqual(value.api_key, "key-v4")
+        self.assertEqual(
+            value.key_for(settings.DEEPSEEK_URL, "deepseek-v4")[0],
+            "key-v4")
+        self.assertEqual(len(console.secrets), 1)
+
+    def test_rejected_key_is_asked_again(self):
+        value = settings.Settings()
+        value.values["url"] = settings.DEEPSEEK_URL
+        value.values["model"] = "deepseek-chat"
+        value.use_key("bad-key", persist=True)
+        console = _WizardConsole(key="good-key", store="n")
+        with mock.patch.object(utils, "probe_api_key",
+                               side_effect=[False, True]):
+            settings._validate_key(console, value, "deepseek")
+
+        self.assertEqual(value.api_key, "good-key")
+        self.assertEqual(len(console.secrets), 1)
+        self.assertEqual(
+            value.key_for(settings.DEEPSEEK_URL, "deepseek-chat")[0],
+            "good-key")
+
     def test_explicit_opt_in_stores_the_key(self):
         console = _WizardConsole(choice_answers=[2, 1], key="sk-secret",
                                  store="y")
@@ -337,7 +458,8 @@ class FirstRunWizardTest(unittest.TestCase):
             with open(path, encoding="utf-8") as handle:
                 payload = json.load(handle)
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-        self.assertEqual(payload["api_key"], "sk-secret")
+        kid = settings.key_id(value.values["url"], value.values["model"])
+        self.assertEqual(payload["api_keys"][kid], "sk-secret")
 
 
 class ConsoleChooseTest(unittest.TestCase):
@@ -517,7 +639,9 @@ class NewSessionWizardTest(unittest.TestCase):
         self.console.read_line = mock.Mock(return_value="n")
         with mock.patch("sys.stdin.isatty", return_value=True), \
                 mock.patch.object(utils, "list_served_models",
-                                  return_value=None):
+                                  return_value=None), \
+                mock.patch.object(utils, "probe_api_key",
+                                  return_value=True):
             self.session._ask_settings_from_scratch()
 
         self.assertEqual(self.session.settings.values["url"],

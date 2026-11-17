@@ -38,6 +38,15 @@ from .persistence import find_last_session_dir, resolve_session_dir
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_VERSION = 1
 
+#: Model/key validation is a best-effort startup probe; keep it short so an
+#: unreachable server does not delay an interactive session for long.
+MODEL_CHECK_TIMEOUT = 5
+
+
+def key_id(url, model):
+    """Stable id for a key scoped to one endpoint + model pair."""
+    return f"{str(url or '').rstrip('/')}|{model or ''}"
+
 
 @dataclass(frozen=True)
 class SettingSpec:
@@ -202,6 +211,20 @@ class Settings:
     api_key: str = ""
     api_key_env: str = ""
     persist_api_key: bool = False
+    #: Stored keys, keyed by ``url|model``. Values may be in memory only when
+    #: the user declined to persist them; ``persisted_key_ids`` decides what
+    #: ``save`` writes. Environment references are not secrets and are always
+    #: persisted as a reference.
+    api_keys: dict[str, str] = field(default_factory=dict)
+    api_key_envs: dict[str, str] = field(default_factory=dict)
+    persisted_key_ids: set[str] = field(default_factory=set)
+    #: True when the active key was supplied explicitly (CLI/typed) in this
+    #: process, so selecting a model must keep it rather than replace it with
+    #: an older stored key for that model.
+    key_entered: bool = False
+    #: True when the wizard already displayed the key prompt in this run (so a
+    #: skip is not immediately followed by the same question again).
+    key_asked: bool = False
     enabled: bool = True
     #: Set when the startup wizard already asked this process, so the
     #: new-session path does not ask the same questions a second time.
@@ -212,6 +235,78 @@ class Settings:
     def __post_init__(self):
         for spec in SPECS:
             self.values.setdefault(spec.attr, spec.default)
+
+    # -- API keys by endpoint/model ---------------------------------------
+    def current_key_id(self):
+        return key_id(self.values.get("url"), self.values.get("model"))
+
+    def key_for(self, url=None, model=None):
+        """Return ``(key, env_name, persisted)`` for one endpoint/model."""
+        url = self.values.get("url") if url is None else url
+        model = self.values.get("model") if model is None else model
+        kid = key_id(url, model)
+        env = self.api_key_envs.get(kid, "")
+        if env:
+            return os.environ.get(env, ""), env, False
+        key = self.api_keys.get(kid, "")
+        return key, "", kid in self.persisted_key_ids
+
+    def remember_key(self, url=None, model=None):
+        """Associate the currently active key with one endpoint/model."""
+        url = self.values.get("url") if url is None else url
+        model = self.values.get("model") if model is None else model
+        kid = key_id(url, model)
+        if self.api_key_env:
+            self.api_key_envs[kid] = self.api_key_env
+            self.api_keys.pop(kid, None)
+            self.persisted_key_ids.discard(kid)
+        elif self.api_key:
+            self.api_keys[kid] = self.api_key
+            self.api_key_envs.pop(kid, None)
+            if self.persist_api_key:
+                self.persisted_key_ids.add(kid)
+            else:
+                self.persisted_key_ids.discard(kid)
+
+    def use_key(self, key, env_name="", persist=False):
+        """Make ``key`` active and remember it for the current model."""
+        self.api_key = str(key or "")
+        self.api_key_env = str(env_name or "")
+        self.persist_api_key = bool(persist and self.api_key
+                                    and not self.api_key_env)
+        self.key_entered = bool(self.api_key)
+        self.remember_key()
+
+    def load_key_for(self, url=None, model=None):
+        """Load a stored key for one endpoint/model; False if none exists."""
+        key, env, persisted = self.key_for(url, model)
+        if not key and not env:
+            self.api_key = ""
+            self.api_key_env = ""
+            self.persist_api_key = False
+            self.key_entered = False
+            return False
+        self.api_key = key
+        self.api_key_env = env
+        self.persist_api_key = persisted
+        self.key_entered = False
+        return True
+
+    def forget_key(self, url=None, model=None):
+        """Drop the stored key for one endpoint/model."""
+        kid = key_id(
+            self.values.get("url") if url is None else url,
+            self.values.get("model") if model is None else model)
+        self.api_keys.pop(kid, None)
+        self.api_key_envs.pop(kid, None)
+        self.persisted_key_ids.discard(kid)
+
+    def key_is_valid(self, timeout=MODEL_CHECK_TIMEOUT):
+        """Probe the active key: True/False, or None when unknown."""
+        if not self.api_key:
+            return None
+        url = self.values.get("url") or DEFAULT_MODEL_URL
+        return utils.probe_api_key(url, self.api_key, timeout=timeout)
 
     # -- construction -----------------------------------------------------
     @classmethod
@@ -234,7 +329,9 @@ class Settings:
             key = os.environ.get("MINI_CODE_API_KEY", "")
             if key:
                 env_name = "MINI_CODE_API_KEY"
-        result = cls(values=values, api_key=key, api_key_env=env_name)
+        result = cls(values=values)
+        if key:
+            result.use_key(key, env_name=env_name)
         result.model_explicit = bool(getattr(args, "model", None))
         return result
 
@@ -257,23 +354,55 @@ class Settings:
                     result.values[spec.attr] = parse_value(spec, values[spec.attr])
                 except (TypeError, ValueError):
                     pass
-        if payload.get("api_key"):
-            result.api_key = str(payload["api_key"])
-            result.persist_api_key = True
-        if payload.get("api_key_env"):
-            result.api_key_env = str(payload["api_key_env"])
-            result.api_key = os.environ.get(result.api_key_env, result.api_key)
+
+        api_keys = payload.get("api_keys")
+        if isinstance(api_keys, dict):
+            result.api_keys = {
+                str(kid): str(key) for kid, key in api_keys.items()
+                if key and not str(kid).startswith("_")}
+            result.persisted_key_ids = set(result.api_keys)
+        api_key_envs = payload.get("api_key_envs")
+        if isinstance(api_key_envs, dict):
+            result.api_key_envs = {
+                str(kid): str(env) for kid, env in api_key_envs.items()
+                if env and not str(kid).startswith("_")}
+        for kid in list(result.api_key_envs):
+            if kid in result.api_keys:
+                # A concrete key is stronger than an environment reference.
+                result.api_key_envs.pop(kid)
+
+        # Older files stored one active key/environment reference at the top
+        # level. Migrate it to the endpoint/model map unless the map already
+        # has an entry for the saved model.
+        key, env, _persisted = result.key_for()
+        if not key and not env:
+            if payload.get("api_key"):
+                result.use_key(str(payload["api_key"]), persist=True)
+            elif payload.get("api_key_env"):
+                result.use_key(
+                    os.environ.get(str(payload["api_key_env"]), ""),
+                    env_name=str(payload["api_key_env"]))
+        result.load_key_for()
+        result.key_entered = False
         return result
 
     def save(self, session_dir):
         """Persist this session's settings with mode 0600."""
         if not self.enabled:
             return None
+        if self.key_entered and (self.api_key or self.api_key_env):
+            # Only persist a key that was explicitly supplied for the current
+            # endpoint/model. A key merely loaded from elsewhere must not be
+            # copied onto a newly selected model.
+            self.remember_key()
         payload = {"version": SETTINGS_VERSION, "values": dict(self.values)}
-        if self.api_key and self.persist_api_key:
-            payload["api_key"] = self.api_key
-        elif self.api_key_env:
-            payload["api_key_env"] = self.api_key_env
+        literal = {kid: key for kid, key in self.api_keys.items()
+                   if kid in self.persisted_key_ids and key}
+        envs = {kid: env for kid, env in self.api_key_envs.items() if env}
+        if literal:
+            payload["api_keys"] = literal
+        if envs:
+            payload["api_key_envs"] = envs
         path = os.path.join(session_dir, SETTINGS_FILENAME)
         _atomic_write(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         return path
@@ -284,6 +413,9 @@ class Settings:
         """Merge CLI, environment and the previous session's settings."""
         saved = saved or cls()
         result = cls()
+        result.api_keys = dict(saved.api_keys)
+        result.api_key_envs = dict(saved.api_key_envs)
+        result.persisted_key_ids = set(saved.persisted_key_ids)
         result.model_explicit = bool(getattr(args, "model", None))
         explicit = {
             "model": result.model_explicit,
@@ -331,24 +463,28 @@ class Settings:
         if explicit.get("plan_strategy"):
             result.values["plan"] = True
 
-        # API key: CLI > environment > previous session > empty.
+        # API key: CLI > environment > stored key for this url/model > legacy
+        # previous-session value > empty.
+        url = result.values.get("url")
+        model = result.values.get("model")
         if getattr(args, "api_key", None):
-            result.api_key = str(args.api_key)
-            result.persist_api_key = False
+            result.use_key(str(args.api_key))
         else:
             env_name = "MINI_CODE_API_KEY"
             env_key = os.environ.get(env_name, "")
             if env_key:
-                result.api_key = env_key
-                result.api_key_env = env_name
-            elif saved.api_key:
-                result.api_key = saved.api_key
-                result.persist_api_key = saved.persist_api_key
-            elif saved.api_key_env:
-                result.api_key_env = saved.api_key_env
-                result.api_key = os.environ.get(saved.api_key_env, "")
-            elif saved.persist_api_key:
-                result.persist_api_key = True
+                result.use_key(env_key, env_name=env_name)
+            else:
+                saved_key, saved_env, saved_persist = saved.key_for(url, model)
+                if saved_key or saved_env:
+                    result.use_key(saved_key, saved_env, saved_persist)
+                    result.key_entered = False
+                elif (not saved.api_keys and not saved.api_key_envs
+                      and (saved.api_key or saved.api_key_env)):
+                    # Legacy Settings objects that predate the per-model map.
+                    result.use_key(saved.api_key, saved.api_key_env,
+                                   saved.persist_api_key)
+                    result.key_entered = False
         return result
 
     def apply_to_args(self, args):
@@ -469,11 +605,6 @@ DEEPSEEK_URL = "https://api.deepseek.com"
 #: (for example before an API key is entered).
 DEEPSEEK_MODELS = ("deepseek-chat", "deepseek-reasoner")
 
-#: Model validation is a best-effort startup probe; keep it short so an
-#: unreachable server does not delay an interactive session for long.
-MODEL_CHECK_TIMEOUT = 5
-
-
 def _provider_index(settings):
     """Map the configured URL to the wizard's 1-based provider choice."""
     url = str(settings.values.get("url") or DEFAULT_MODEL_URL).rstrip("/")
@@ -504,12 +635,15 @@ def model_is_valid(settings, timeout=MODEL_CHECK_TIMEOUT):
 
 
 def _ask_key(console, settings, provider):
-    """Prompt for a key and ask whether to persist it (default: no)."""
+    """Prompt for a key and ask whether to persist it (default: no).
+
+    Returns True when a key is available afterwards.
+    """
     if provider == "localhost" and not settings.api_key:
         # Local vLLM normally ignores the key; an env/CLI key is optional.
-        return
+        return False
     if settings.api_key:
-        return
+        return True
     if provider == "deepseek":
         console.note(
             "DeepSeek API key: create one at "
@@ -523,18 +657,19 @@ def _ask_key(console, settings, provider):
         prompt = "API key (hidden; Enter to skip): "
     # ``read_secret`` masks the typed value in the fixed TUI and uses getpass
     # on the ordinary console.
+    settings.key_asked = True
     key = console.read_secret(prompt)
     if key is None:
-        return
+        return False
     key = key.strip()
     if not key:
-        return
-    settings.api_key = key
+        return False
     answer = _ask(
         console,
         "Store this key? Type 'y' to write it to settings.json (mode 0600), "
         "or Enter to keep it in memory for this session only: ").lower()
-    settings.persist_api_key = answer in ("y", "yes")
+    settings.use_key(key, persist=answer in ("y", "yes"))
+    return True
 
 
 def _deepseek_model_choices(settings):
@@ -559,6 +694,59 @@ def _ask_deepseek_model(settings, console):
         settings.values["model"] = current or models[0]
     else:
         settings.values["model"] = models[choice - 1]
+
+
+def provider_name(settings):
+    return {1: "localhost", 2: "deepseek", 3: "custom"}[
+        _provider_index(settings)]
+
+
+def _finish_key_for_model(settings, console, provider, ask_if_missing=True):
+    """Load/remember the key for the selected model and check it.
+
+    A key entered in this wizard (or supplied by the CLI/environment) belongs
+    to the selected model. Otherwise a key stored for that exact endpoint/model
+    is loaded. When no key exists yet, ``ask_if_missing`` controls whether the
+    user is prompted here (DeepSeek already asked before the model list).
+    """
+    if settings.key_entered:
+        # A key supplied in this run belongs to the model just selected.
+        settings.remember_key()
+    elif settings.load_key_for():
+        # A stored key exists for this exact endpoint/model.
+        pass
+    else:
+        # Do not silently reuse another model's key.
+        settings.api_key = ""
+        settings.api_key_env = ""
+        settings.persist_api_key = False
+    if ask_if_missing and not (settings.api_key or settings.api_key_env):
+        _ask_key(console, settings, provider)
+    _validate_key(console, settings, provider)
+
+
+def _validate_key(console, settings, provider):
+    """Reject-and-retry an API key that the server explicitly refuses."""
+    if not settings.api_key:
+        return
+    for attempt in range(3):
+        valid = settings.key_is_valid()
+        if valid is not False:
+            return
+        if attempt == 2:
+            console.note(
+                "The API key is still rejected; continuing with it.", "warn")
+            return
+        console.note(
+            "That API key was rejected by the server. Enter it again, or "
+            "press Enter to skip.", "warn")
+        settings.forget_key()
+        settings.api_key = ""
+        settings.api_key_env = ""
+        settings.persist_api_key = False
+        if not _ask_key(console, settings, provider):
+            return
+        settings.remember_key()
 
 
 def first_run(settings, console):
@@ -588,20 +776,25 @@ def first_run(settings, console):
         else:
             console.note("No local model detected; set model later with /settings.",
                          "warn")
-        _ask_key(console, settings, "localhost")
+        _finish_key_for_model(settings, console, "localhost")
     elif choice == 2:
         settings.values["url"] = DEEPSEEK_URL
         # Ask for the key first so the live model list can be queried with it;
         # if the key is skipped the stable aliases are offered instead.
         _ask_key(console, settings, "deepseek")
         _ask_deepseek_model(settings, console)
+        # The key prompt already happened above; now load/remember the key
+        # for the selected model and verify it.
+        _finish_key_for_model(
+            settings, console, "deepseek",
+            ask_if_missing=not settings.key_asked)
     else:
         settings.values["url"] = (
             _ask(console, f"URL [{current_url}]: ") or current_url)
         label = current_model or "server default"
         settings.values["model"] = (
             _ask(console, f"Model [{label}]: ") or current_model)
-        _ask_key(console, settings, "custom")
+        _finish_key_for_model(settings, console, "custom")
     return settings
 
 
@@ -641,6 +834,10 @@ def resolve_for_startup(args, console=None):
           and settings.values.get("url") != DEFAULT_MODEL_URL
           and not settings.api_key):
         _ask_key(console, settings, "custom")
+    if interactive and not settings.startup_asked:
+        # Resuming (or a valid model on an explicit URL): the model was not
+        # re-selected above, so check the stored/loaded key for it now.
+        _validate_key(console, settings, provider_name(settings))
 
     settings.apply_to_args(args)
     return settings

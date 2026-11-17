@@ -168,6 +168,32 @@ def list_served_models(server_url, api_key=None, timeout=120):
         return None
 
 
+def probe_api_key(server_url, api_key, timeout=5):
+    """Check whether an API key is accepted by ``{server_url}/v1/models``.
+
+    Returns ``True`` when the server accepts the key (2xx), ``False`` when it
+    explicitly rejects it (401/403), and ``None`` when the result is unknown
+    (network failure, endpoint missing, server error). Never raises.
+    """
+    if not api_key:
+        return None
+    url = f"{str(server_url).rstrip('/')}/v1/models"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+    except requests.exceptions.RequestException:
+        return None
+    status = getattr(response, "status_code", None)
+    if status in (401, 403):
+        return False
+    if isinstance(status, int) and 200 <= status < 300:
+        return True
+    return None
+
+
 def determine_vllm_model(server_url, api_key=None, timeout=120):
     """In case of a vLLm local server, read the first served model id from
     ``{server_url}/v1/models`` so the caller does not have to name the model.

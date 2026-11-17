@@ -713,6 +713,10 @@ class AgentSession:
         if getattr(args, "max_tokens", None) is None:
             args.max_tokens = default_max_output_tokens(self.model)
         self.settings.capture_from_args(args)
+        if self.settings.api_key or self.settings.api_key_env:
+            # The model may have been detected from the server, so associate
+            # the active key with the model actually in use.
+            self.settings.remember_key()
 
         # Background task registry. It is independent of the foreground loop;
         # tools and /background read snapshots from it.
@@ -2582,18 +2586,30 @@ class AgentSession:
     def _snapshot_settings(self):
         """Capture the values needed to cancel a staged settings edit."""
         return (dict(self.settings.values), self.settings.api_key,
-                self.settings.api_key_env, self.settings.persist_api_key)
+                self.settings.api_key_env, self.settings.persist_api_key,
+                dict(self.settings.api_keys),
+                dict(self.settings.api_key_envs),
+                set(self.settings.persisted_key_ids),
+                self.settings.key_entered, self.settings.key_asked)
 
     def _restore_settings(self, snapshot):
-        values, api_key, api_key_env, persist_api_key = snapshot
+        (values, api_key, api_key_env, persist_api_key, api_keys,
+         api_key_envs, persisted_key_ids, key_entered, key_asked) = snapshot
         self.settings.values = dict(values)
         self.settings.api_key = api_key
         self.settings.api_key_env = api_key_env
         self.settings.persist_api_key = persist_api_key
+        self.settings.api_keys = dict(api_keys)
+        self.settings.api_key_envs = dict(api_key_envs)
+        self.settings.persisted_key_ids = set(persisted_key_ids)
+        self.settings.key_entered = key_entered
+        self.settings.key_asked = key_asked
 
     def _commit_staged_settings(self, snapshot):
         """Apply all staged changes to the runtime and persist them."""
-        values, api_key, api_key_env, persist_api_key = snapshot
+        (values, api_key, api_key_env, persist_api_key, _api_keys,
+         _api_key_envs, _persisted_key_ids, _key_entered,
+         _key_asked) = snapshot
         parsed = []
         for spec in settings_mod.SPECS:
             if spec.attr == "api_key":
@@ -2644,10 +2660,22 @@ class AgentSession:
             for spec, value in parsed:
                 if spec.attr == "api_key":
                     self.settings.api_key = value
+                    self.settings.key_entered = True
+                    self.settings.remember_key()
                 else:
                     self.settings.values[spec.attr] = value
                     if spec.attr == "plan_strategy":
                         self.settings.values["plan"] = True
+            names = {spec.attr for spec, _ in parsed}
+            if "api-key" not in names and names & {"model", "url"}:
+                # A different model can have its own stored key. If it has
+                # none, do not silently keep another model's key; the menu
+                # will ask for one (unless an explicit CLI/env key is active).
+                if (not self.settings.load_key_for()
+                        and not self.settings.key_entered):
+                    self.settings.api_key = ""
+                    self.settings.api_key_env = ""
+                    self.settings.persist_api_key = False
             return True
 
         cache_effects = {spec.cache for spec, _ in parsed
@@ -2674,14 +2702,25 @@ class AgentSession:
         for spec, value in parsed:
             if spec.attr == "api_key":
                 self.settings.api_key = value
+                self.settings.key_entered = True
                 # persist_api_key is set by _read_setting_value; an inline
                 # /settings api-key value is not persisted unless confirmed.
+                self.settings.remember_key()
             else:
                 self.settings.values[spec.attr] = value
                 if spec.attr == "plan_strategy":
                     # /settings plan-strategy ... implies plan mode, matching
                     # the CLI flag.
                     self.settings.values["plan"] = True
+        if "api-key" not in changed_names and changed_names & {"model", "url"}:
+            # Load the stored key for the newly selected endpoint/model. If
+            # there is none, drop a key that belonged to the previous model;
+            # an explicit CLI/env key stays active.
+            if (not self.settings.load_key_for()
+                    and not self.settings.key_entered):
+                self.settings.api_key = ""
+                self.settings.api_key_env = ""
+                self.settings.persist_api_key = False
         self.settings.apply_to_args(self.args)
         self.server_url = str(self.args.url).rstrip("/")
         self.api_key = self.args.api_key or ""
@@ -2825,6 +2864,24 @@ class AgentSession:
                                             announce=False, stage=True):
                     continue
                 state["dirty"] = True
+                if row["name"] in ("model", "url"):
+                    provider = settings_mod.provider_name(self.settings)
+                    key, env, _persisted = self.settings.key_for()
+                    if (key or env
+                            or (self.settings.api_key
+                                and self.settings.key_entered)):
+                        # A stored key was loaded, or an explicit CLI/env key
+                        # is active; verify it still works for this model.
+                        settings_mod._validate_key(
+                            self.console, self.settings, provider)
+                    elif provider != "localhost":
+                        # A different model with no stored key: ask now.
+                        key_text = self._read_setting_value("api-key")
+                        if key_text and self._apply_settings(
+                                {"api-key": key_text}, confirm_cache=False,
+                                announce=False, stage=True):
+                            settings_mod._validate_key(
+                                self.console, self.settings, provider)
             return
         if not arg:
             for line in self._settings_lines():

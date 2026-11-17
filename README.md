@@ -277,7 +277,10 @@ stable `deepseek-chat` / `deepseek-reasoner` aliases). The DeepSeek key prompt s
 where to create a key and that `MINI_CODE_API_KEY` is used first. When the fixed TUI
 applies, the wizard runs inside it (arrow keys or numbers select, and a typed key is
 masked). If you type a key, mini-code asks clearly whether to write it to the session
-file with mode `0600`; otherwise it stays in memory for this session only.
+file with mode `0600`; otherwise it stays in memory for this session only. Keys are
+scoped to the endpoint/model: selecting another model loads its stored key, or asks
+for one when none is stored. A key found at startup is checked against `/v1/models`;
+an explicit `401`/`403` rejection reopens the key prompt.
 
 Use `/settings` to inspect or change settings. The table marks values that rebuild
 the tool list or generated system prompt — these invalidate the LLM prompt cache.
