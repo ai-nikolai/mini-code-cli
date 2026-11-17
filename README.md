@@ -297,9 +297,9 @@ box (or its option list), where `exit` or Esc returns to the settings table. Cha
 are staged in the table until you press `s` to save; `q` quits, and if there are
 unsaved changes it asks whether to save them or cancel the changes. The table header
 shows a green `saved` or yellow `unsaved` badge. Plan mode is its own on/off setting;
-the plan strategy keeps a concrete value even while plan mode is off. Changing the
-TUI, paths, the custom system prompt or the initial prompt is not allowed
-mid-session.
+the plan strategy keeps a concrete value even while plan mode is off, and changing
+the strategy does not turn plan mode on. Changing the TUI, paths, the custom system
+prompt or the initial prompt is not allowed mid-session.
 
 ## Development
 

@@ -2664,8 +2664,6 @@ class AgentSession:
                     self.settings.remember_key()
                 else:
                     self.settings.values[spec.attr] = value
-                    if spec.attr == "plan_strategy":
-                        self.settings.values["plan"] = True
             names = {spec.attr for spec, _ in parsed}
             if "api-key" not in names and names & {"model", "url"}:
                 # A different model can have its own stored key. If it has
@@ -2708,10 +2706,6 @@ class AgentSession:
                 self.settings.remember_key()
             else:
                 self.settings.values[spec.attr] = value
-                if spec.attr == "plan_strategy":
-                    # /settings plan-strategy ... implies plan mode, matching
-                    # the CLI flag.
-                    self.settings.values["plan"] = True
         if "api-key" not in changed_names and changed_names & {"model", "url"}:
             # Load the stored key for the newly selected endpoint/model. If
             # there is none, drop a key that belonged to the previous model;
@@ -2734,8 +2728,9 @@ class AgentSession:
         self.plan_strategy = self.args.plan_strategy or planning.DEFAULT_PLAN_STRATEGY
         if self.plan_strategy not in planning.PLAN_STRATEGIES:
             self.plan_strategy = planning.DEFAULT_PLAN_STRATEGY
-        if self.plan_strategy != planning.DEFAULT_PLAN_STRATEGY:
-            self.args.plan = True
+        # Plan mode is its own on/off setting; choosing a strategy does not
+        # silently enable it (the CLI --plan-strategy implication is handled
+        # once at startup, not by every settings edit).
         self.plan_mode = bool(self.args.plan)
         self.allow_nudge = bool(self.args.allow_nudge)
         self.nudge_limit = max(0, int(self.args.nudge_limit))

@@ -685,11 +685,12 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertNotEqual(self.session.messages[0]["content"], before)
         self.assertIn("run_shell_command", self.session.messages[0]["content"])
 
-    def test_plan_strategy_change_implies_plan_mode(self):
+    def test_plan_strategy_change_does_not_enable_plan_mode(self):
         self.console.read_line = mock.Mock(return_value="y")
         self.session._handle_settings_command("plan-strategy plan-verify-step")
-        self.assertTrue(self.session.plan_mode)
-        self.assertEqual(self.session.plan_strategy, "plan-verify-step")
+        self.assertFalse(self.session.plan_mode)
+        self.assertEqual(self.session.settings.values["plan_strategy"],
+                         "plan-verify-step")
 
     def test_immutable_setting_is_rejected(self):
         self.session._handle_settings_command("tui on")
@@ -713,6 +714,20 @@ class SettingsCommandTest(unittest.TestCase):
             self.assertIn("(default)", rows[name]["display"], name)
         # "(not set)" is already explicit enough for an absent API key.
         self.assertNotIn("(default)", rows["api-key"]["display"])
+
+    def test_inline_plan_strategy_change_keeps_plan_mode_off(self):
+        snapshot = self.session._snapshot_settings()
+        rows = self.session.settings.rows()
+        strategy = next(row for row in rows
+                        if row["name"] == "plan-strategy")
+        self.session._change_setting_inline(strategy, "open-plan", rows)
+        self.assertFalse(self.session.settings.values["plan"])
+        self.assertFalse(self.session.plan_mode)
+
+        self.session._commit_staged_settings(snapshot)
+        self.assertFalse(self.session.plan_mode)
+        self.assertEqual(self.session.settings.values["plan_strategy"],
+                         "open-plan")
 
     def test_changing_a_value_removes_the_default_marker(self):
         rows = self.session.settings.rows()
