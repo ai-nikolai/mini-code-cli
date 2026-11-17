@@ -69,7 +69,28 @@ class SettingSpec:
     cache: str = "none"
 
 
+#: Display groups, in table order. Every mutable setting appears exactly once.
+SETTINGS_GROUPS = (
+    ("Model & connection", ("model", "url", "api_key")),
+    ("Generation", ("temperature", "max_tokens", "max_context_tokens")),
+    ("Planning", ("plan", "plan_strategy", "allow_nudge", "nudge_limit")),
+    ("Compaction", ("compaction_strategy",)),
+    ("Tools & permissions",
+     ("enable_shell", "enable_subagents", "enable_skills", "sudo",
+      "ask_permission", "background")),
+    ("Runtime limits", ("tool_timeout", "llm_timeout")),
+    ("Display", ("verbose",)),
+    ("Agent behaviour", ("auto_mode", "scratchpad")),
+)
+
+GROUP_BY_ATTR = {
+    attr: title for title, attrs in SETTINGS_GROUPS for attr in attrs
+}
+
+
 def _specs():
+    # The order follows SETTINGS_GROUPS; /settings numbers are 1-based in this
+    # order.
     return (
         SettingSpec("model", "model", "str", None, cache="model"),
         SettingSpec("url", "url", "str", DEFAULT_MODEL_URL, cache="model"),
@@ -79,19 +100,15 @@ def _specs():
                     DEFAULT_TEMPERATURE),
         SettingSpec("max-tokens", "max_tokens", "int", None),
         SettingSpec("max-context-tokens", "max_context_tokens", "int", None),
-        SettingSpec("compaction-strategy", "compaction_strategy", "choice",
-                    compaction_mod.DEFAULT_COMPACTION_STRATEGY,
-                    choices=compaction_mod.strategy_choices()),
+        SettingSpec("plan", "plan", "bool", False, cache="prompt"),
         SettingSpec("plan-strategy", "plan_strategy", "choice",
                     planning.DEFAULT_PLAN_STRATEGY,
                     choices=planning.PLAN_STRATEGIES, cache="prompt"),
         SettingSpec("allow-nudge", "allow_nudge", "bool", False),
         SettingSpec("nudge-limit", "nudge_limit", "int", 1),
-        SettingSpec("tool-timeout", "tool_timeout", "int",
-                    DEFAULT_TOOL_TIMEOUT),
-        SettingSpec("llm-timeout", "llm_timeout", "int", DEFAULT_HTTP_TIMEOUT),
-        SettingSpec("verbose", "verbose", "bool", False),
-        SettingSpec("plan", "plan", "bool", False, cache="prompt"),
+        SettingSpec("compaction-strategy", "compaction_strategy", "choice",
+                    compaction_mod.DEFAULT_COMPACTION_STRATEGY,
+                    choices=compaction_mod.strategy_choices()),
         SettingSpec("enable-shell", "enable_shell", "bool", False,
                     cache="tools"),
         SettingSpec("enable-subagents", "enable_subagents", "bool", False,
@@ -101,8 +118,12 @@ def _specs():
         SettingSpec("sudo", "sudo", "bool", False),
         SettingSpec("ask-permission", "ask_permission", "bool", False),
         SettingSpec("background", "background", "bool", False, cache="tools"),
-        SettingSpec("scratchpad", "scratchpad", "bool", False, cache="prompt"),
+        SettingSpec("tool-timeout", "tool_timeout", "int",
+                    DEFAULT_TOOL_TIMEOUT),
+        SettingSpec("llm-timeout", "llm_timeout", "int", DEFAULT_HTTP_TIMEOUT),
+        SettingSpec("verbose", "verbose", "bool", False),
         SettingSpec("auto-mode", "auto_mode", "bool", False),
+        SettingSpec("scratchpad", "scratchpad", "bool", False, cache="prompt"),
     )
 
 
@@ -578,6 +599,7 @@ class Settings:
                 "raw": value,
                 "mutable": spec.mutable,
                 "cache": spec.cache,
+                "group": GROUP_BY_ATTR.get(spec.attr, "Other"),
                 "spec": spec,
             })
         return rows

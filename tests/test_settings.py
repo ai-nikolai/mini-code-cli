@@ -771,6 +771,22 @@ class SettingsCommandTest(unittest.TestCase):
         self.session._handle_settings_command("")
         self.assertEqual(self.session.args.temperature, 0.4)
 
+    def test_settings_have_sensible_groups(self):
+        rows = {row["name"]: row for row in self.session.settings.rows()}
+        self.assertEqual(rows["model"]["group"], "Model & connection")
+        self.assertEqual(rows["temperature"]["group"], "Generation")
+        self.assertEqual(rows["plan"]["group"], "Planning")
+        self.assertEqual(rows["verbose"]["group"], "Display")
+        self.assertEqual(rows["auto-mode"]["group"], "Agent behaviour")
+        self.assertEqual(rows["enable-shell"]["group"], "Tools & permissions")
+
+        table = "\n".join(self.session._settings_lines())
+        for group in ("Model & connection:", "Generation:", "Planning:",
+                      "Tools & permissions:", "Runtime limits:", "Display:",
+                      "Agent behaviour:", "Immutable / session:"):
+            self.assertIn(group, table)
+        self.assertLess(table.index("Display:"), table.index("Agent behaviour:"))
+
     def test_default_values_are_marked_in_the_table(self):
         rows = {row["name"]: row for row in self.session.settings.rows()}
         for name in ("temperature", "plan", "plan-strategy"):

@@ -1508,6 +1508,7 @@ class TuiConsole(Console):
                 "raw": None,
                 "mutable": False,
                 "cache": "none",
+                "group": "Immutable / session",
                 "spec": None,
                 "immutable": True,
             })
@@ -1523,12 +1524,23 @@ class TuiConsole(Console):
             cols, _rows = self._size()
             available = max(cols - 4, 20)
             body = []
-            for index, row in enumerate(combined()):
-                marker = ">" if index == selected else " "
+            selected_body = 0
+            selectable = 0
+            group_seen = None
+            for row in combined():
+                group = row.get("group", "Other")
+                if group != group_seen:
+                    group_seen = group
+                    body.append(self.style(f"-- {group} --", fg="cyan",
+                                           bold=True))
+                if selectable == selected:
+                    selected_body = len(body)
+                marker = ">" if selectable == selected else " "
                 if row.get("immutable"):
                     body.append(self.style(self._fit(
                         f"{marker} {row['number']:2}. {row['display']}",
                         available), dim=True))
+                    selectable += 1
                     continue
                 cache = (f"  cache:{row['cache']}"
                          if row.get("cache", "none") != "none" else "")
@@ -1546,12 +1558,13 @@ class TuiConsole(Console):
                 body.append(self._fit(
                     f"{marker} {row['number']:2}. {name:<{name_w}} "
                     f"{value:<{value_w}}{cache}", available))
+                selectable += 1
             is_dirty = dirty() if callable(dirty) else bool(dirty)
             status = (("unsaved", "yellow") if is_dirty
                       else ("saved", "green"))
             self._picker_window(
                 "↑↓←→ Enter · s save · a --all · d default · q",
-                body, selected, status=status)
+                body, selected_body, status=status)
 
         def change(selected, step):
             row = combined()[selected]

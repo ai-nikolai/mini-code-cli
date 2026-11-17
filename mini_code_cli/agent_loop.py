@@ -2563,12 +2563,18 @@ class AgentSession:
     def _settings_lines(self):
         rows = self.settings.rows()
         lines = ["Settings:"]
+        group_seen = None
         for row in rows:
+            group = row.get("group", "Other")
+            if group != group_seen:
+                group_seen = group
+                lines.append(f"  {group}:")
             mutable = "" if row["mutable"] else "  [immutable]"
             cache = f"  cache:{row['cache']}" if row["cache"] != "none" else ""
             lines.append(f"  {row['number']:2}. {row['name']:22} "
                          f"{row.get('display', row['value']):28}"
                          f"{cache}{mutable}")
+        lines.append("  Immutable / session:")
         for name, description in settings_mod.IMMUTABLE:
             lines.append(f"     {name:22} (cannot change: {description})")
         return lines

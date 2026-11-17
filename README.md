@@ -292,9 +292,11 @@ Cache-impacting edits from the plain `settings>` prompt are staged until you typ
 
 In the fixed TUI the centered, unboxed ASCII mark and tagline (the same mark used by
 `--tui off`) sit above the session view and stay visible in the settings views. The
-settings table is a navigable overlay
-that starts at the first setting and scrolls with the selection. Up/down or numbers
-select; left/right toggle an on/off setting or rotate through a fixed-choice setting
+settings table is a navigable overlay grouped into Model & connection, Generation,
+Planning, Compaction, Tools & permissions, Runtime limits, Display, Agent behaviour
+and Immutable/session sections (so e.g. `verbose` lives under Display). It starts at
+the first setting and scrolls with the selection. Up/down or numbers select;
+left/right toggle an on/off setting or rotate through a fixed-choice setting
 (such as `plan-strategy`) in place. Values equal to their built-in default are marked
 `(default)`. Enter opens a focused sub-window that shows only that setting's input
 box (or its option list), where `exit` or Esc returns to the settings table. The full
