@@ -263,7 +263,10 @@ Settings are stored per session in the cache, never in the project’s `.mini`:
 <cache-dir>/<session-id>/settings.json
 ```
 
-Startup deliberately does **not** load previous-session settings: the resume offer
+The file has a single current layout (`version`, `values`, `api_keys`,
+`api_key_envs`, with keys scoped by endpoint/model); older top-level key fields
+are ignored rather than migrated. Startup deliberately does **not** load
+previous-session settings: the resume offer
 uses the CLI/environment/default configuration, so no settings notes or questions
 appear before you choose. Settings are loaded only after that choice. Resuming
 adopts the restored session’s settings; starting a **new** session resets ordinary

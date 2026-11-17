@@ -52,22 +52,44 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertEqual(payload["api_key_envs"][kid],
                          "MINI_CODE_API_KEY")
 
-    def test_legacy_single_key_migrates_to_the_model_map(self):
+    def test_only_the_current_key_format_is_read(self):
+        # There is exactly one supported on-disk format: the per-endpoint/
+        # model maps. Old top-level api_key/api_key_env fields are ignored
+        # rather than migrated.
         payload = {
-            "version": 1,
+            "version": settings.SETTINGS_VERSION,
             "values": {"url": "https://api.deepseek.com",
                        "model": "deepseek-chat"},
-            "api_key": "legacy-key",
+            "api_key": "stale-key",
+            "api_key_env": "STALE_ENV",
         }
         path = os.path.join(self.session, "settings.json")
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle)
 
         loaded = settings.Settings.load(self.session)
-        kid = settings.key_id("https://api.deepseek.com", "deepseek-chat")
-        self.assertEqual(loaded.api_key, "legacy-key")
-        self.assertEqual(loaded.api_keys[kid], "legacy-key")
-        self.assertIn(kid, loaded.persisted_key_ids)
+        self.assertEqual(loaded.api_key, "")
+        self.assertEqual(loaded.api_key_env, "")
+        self.assertEqual(loaded.api_keys, {})
+        self.assertEqual(loaded.api_key_envs, {})
+
+    def test_saving_writes_only_the_current_key_format(self):
+        value = settings.Settings()
+        value.values["url"] = "https://api.example.test"
+        value.values["model"] = "model-a"
+        value.use_key("sk-secret", persist=True)
+        value.save(self.session)
+
+        with open(os.path.join(self.session, "settings.json"),
+                  encoding="utf-8") as handle:
+            payload = json.load(handle)
+
+        self.assertEqual(payload["version"], settings.SETTINGS_VERSION)
+        self.assertNotIn("api_key", payload)
+        self.assertNotIn("api_key_env", payload)
+        kid = settings.key_id("https://api.example.test", "model-a")
+        self.assertEqual(payload["api_keys"], {kid: "sk-secret"})
+        self.assertNotIn("api_key_envs", payload)
 
     def test_keys_are_stored_per_endpoint_and_model(self):
         value = settings.Settings()

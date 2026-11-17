@@ -35,7 +35,11 @@ from .config import (
 from .persistence import find_last_session_dir, resolve_session_dir
 
 SETTINGS_FILENAME = "settings.json"
-SETTINGS_VERSION = 1
+#: Bump when the on-disk layout changes. Only this layout is written and read:
+#: ``{"version", "values", "api_keys", "api_key_envs"}`` with the keys scoped
+#: by ``url|model``. Older top-level ``api_key``/``api_key_env`` fields are not
+#: migrated or read.
+SETTINGS_VERSION = 2
 
 #: Model/key validation is a best-effort startup probe; keep it short so an
 #: unreachable server does not delay an interactive session for long.
@@ -410,30 +414,17 @@ class Settings:
         api_keys = payload.get("api_keys")
         if isinstance(api_keys, dict):
             result.api_keys = {
-                str(kid): str(key) for kid, key in api_keys.items()
-                if key and not str(kid).startswith("_")}
+                str(kid): str(key) for kid, key in api_keys.items() if key}
             result.persisted_key_ids = set(result.api_keys)
         api_key_envs = payload.get("api_key_envs")
         if isinstance(api_key_envs, dict):
             result.api_key_envs = {
-                str(kid): str(env) for kid, env in api_key_envs.items()
-                if env and not str(kid).startswith("_")}
+                str(kid): str(env) for kid, env in api_key_envs.items() if env}
         for kid in list(result.api_key_envs):
             if kid in result.api_keys:
                 # A concrete key is stronger than an environment reference.
                 result.api_key_envs.pop(kid)
 
-        # Older files stored one active key/environment reference at the top
-        # level. Migrate it to the endpoint/model map unless the map already
-        # has an entry for the saved model.
-        key, env, _persisted = result.key_for()
-        if not key and not env:
-            if payload.get("api_key"):
-                result.use_key(str(payload["api_key"]), persist=True)
-            elif payload.get("api_key_env"):
-                result.use_key(
-                    os.environ.get(str(payload["api_key_env"]), ""),
-                    env_name=str(payload["api_key_env"]))
         result.load_key_for()
         result.key_entered = False
         return result
@@ -517,8 +508,7 @@ class Settings:
         if explicit.get("plan_strategy"):
             result.values["plan"] = True
 
-        # API key: CLI > environment > stored key for this url/model > legacy
-        # previous-session value > empty.
+        # API key: CLI > environment > stored key for this url/model > empty.
         url = result.values.get("url")
         model = result.values.get("model")
         if getattr(args, "api_key", None):
@@ -532,12 +522,6 @@ class Settings:
                 saved_key, saved_env, saved_persist = saved.key_for(url, model)
                 if saved_key or saved_env:
                     result.use_key(saved_key, saved_env, saved_persist)
-                    result.key_entered = False
-                elif (not saved.api_keys and not saved.api_key_envs
-                      and (saved.api_key or saved.api_key_env)):
-                    # Legacy Settings objects that predate the per-model map.
-                    result.use_key(saved.api_key, saved.api_key_env,
-                                   saved.persist_api_key)
                     result.key_entered = False
         return result
 
