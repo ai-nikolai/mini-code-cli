@@ -711,7 +711,10 @@ class TuiConsole(Console):
             if self._scroll_offset:
                 hint_text = (f"scrolled {self._scroll_offset}/"
                              f"{self._total_body_lines} lines · "
-                             f"Shift+↓ / Esc to bottom")
+                             f"↑/↓ or Shift+↑/↓ scroll · Esc to bottom")
+            elif self._overlay_lines:
+                hint_text = ("↑/↓ or Shift+↑/↓ scroll · Esc close command · "
+                             "/help")
             else:
                 hint_text = ("Enter send · Shift+Enter newline · ↑/↓ history · "
                              "Shift+↑/↓ scroll · Esc close command · /help")
@@ -1175,14 +1178,20 @@ class TuiConsole(Console):
                         self.dismiss_overlay()
                         continue
                     if seq in (b"[A", b"OA"):
-                        if history:
+                        if self._overlay_lines:
+                            # A command/history overlay owns the arrows: scroll
+                            # it instead of recalling prompt history.
+                            self.scroll_body(1)
+                        elif history:
                             if history_pos == len(history):
                                 draft = "".join(buffer)
                             if history_pos > 0:
                                 history_pos -= 1
                                 set_buffer(history[history_pos])
                     elif seq in (b"[B", b"OB"):
-                        if history_pos < len(history):
+                        if self._overlay_lines:
+                            self.scroll_body(-1)
+                        elif history_pos < len(history):
                             history_pos += 1
                             set_buffer(draft if history_pos == len(history)
                                        else history[history_pos])
@@ -1270,8 +1279,11 @@ class TuiConsole(Console):
         ``status`` is an optional ``(text, colour)`` badge shown first so it
         survives truncation on narrow terminals.
         """
-        visible = max(int(getattr(self, "_last_body_height", 1) or 1), 3)
-        window = max(visible - 1, 1)
+        visible = max(int(getattr(self, "_last_body_height", 1) or 1), 1)
+        # Leave one row for the header when possible; at height 1 show the
+        # selected row itself rather than a header with no room for the list.
+        show_header = visible >= 2
+        window = max(visible - 1, 1) if show_header else 1
         total = len(body)
         top = getattr(self, "_picker_top", 0)
         if selected < top:
@@ -1281,15 +1293,19 @@ class TuiConsole(Console):
         top = max(0, min(top, max(0, total - window)))
         self._picker_top = top
         end = min(top + window, total)
-        label = header
-        if total:
-            label += f"  {top + 1}-{end}/{total}"
-        line = self.style(label, fg="cyan", bold=True)
-        if status is not None:
-            text, fg = status
-            line = (self.style(str(text), fg=fg, bold=True) + "  " + line)
+        lines = body[top:end]
+        if show_header:
+            label = header
+            if total:
+                label += f"  {top + 1}-{end}/{total}"
+            line = self.style(label, fg="cyan", bold=True)
+            if status is not None:
+                text, fg = status
+                line = (self.style(str(text), fg=fg, bold=True)
+                        + "  " + line)
+            lines = [line] + lines
         self._overlay_top = True
-        self._overlay_lines = [line] + body[top:end]
+        self._overlay_lines = lines
         self.render()
 
     def _pick_index(self, draw, count, default=0, allow_exit_word=False,

@@ -355,6 +355,39 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertIn("row-12", scrolled_view)
         self.assertNotIn("row-00", scrolled_view)
 
+    def test_tiny_picker_window_keeps_the_selected_row_visible(self):
+        console = self.console()
+        body = [f"row-{index:02d}" for index in range(20)]
+
+        console._last_body_height = 2
+        console._picker_window("[settings]", body, 19)
+        view = "\n".join(console._body_lines(2, 40))
+        self.assertIn("row-19", view)
+
+        console._last_body_height = 1
+        console._picker_window("[settings]", body, 19)
+        view = "\n".join(console._body_lines(1, 40))
+        self.assertIn("row-19", view)
+
+    def test_prompt_arrows_scroll_a_command_overlay(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            console._overlay_lines = [
+                f"history line {index}" for index in range(60)]
+            console._scroll_offset = 0
+            console.render()
+            self.assertGreater(console._total_body_lines,
+                               console._last_body_height)
+            self._feed_input(console, b"\x1b[A\x04")
+            offset = console._scroll_offset
+            console.stop_tui()
+
+        self.assertEqual(offset, 1)
+
     def test_top_anchored_overlay_is_not_pushed_to_the_bottom(self):
         console = self.console()
         console._overlay_lines = ["header", "row-00", "row-01"]
