@@ -434,6 +434,23 @@ class TuiConsoleTest(unittest.TestCase):
         # The between-prompt listener must not compete for the arrow keys.
         self.assertEqual(picker_events, ["stop", "start"])
 
+    def test_settings_picker_d_requests_defaults(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        events = []
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"dq",
+                lambda: console.settings_pick(
+                    rows, on_defaults=lambda current: events.append("defaults")))
+            console.stop_tui()
+
+        self.assertEqual(events, ["defaults"])
+
     def test_settings_picker_reaches_immutable_rows(self):
         console = self.console()
         rows = settings.Settings().rows()
@@ -446,12 +463,28 @@ class TuiConsoleTest(unittest.TestCase):
             selected = self._feed_pick(
                 console, b"\x1b[B\r",
                 lambda: console.settings_pick(
-                    rows, immutable, selected=len(rows) - 1))
+                    rows, immutable, selected=len(rows) - 1,
+                    show_all=True))
             console.stop_tui()
 
         self.assertEqual(selected["name"], "tui")
         self.assertFalse(selected["mutable"])
         self.assertEqual(selected["number"], len(rows) + 1)
+
+    def test_settings_picker_a_requests_all_settings(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"a",
+                lambda: console.settings_pick(rows))
+            console.stop_tui()
+
+        self.assertEqual(result, tui.SETTINGS_ALL)
 
     def test_settings_picker_left_right_changes_bool_in_place(self):
         console = self.console()

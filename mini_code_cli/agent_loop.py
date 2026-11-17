@@ -942,21 +942,21 @@ class AgentSession:
         self.unique_id = self.unique_id or generate_unique_id()
         self.session_dir = os.path.join(self.cache_dir, self.unique_id)
         self.restored_session = False
-        # Import the previous session's settings only now, after the user has
-        # decided to start a new session. A fresh interactive session then
-        # asks its provider/model questions from scratch.
+        # A new session starts from defaults (plus CLI/environment), not from
+        # the previous session in this folder. The previous API-key archive is
+        # the one thing retained; selecting a model can load its stored key.
         source = None
         if not self.background_mode:
             try:
                 source = find_last_session_dir(self.allowed_dir)
             except Exception as e:
                 self.console.note(
-                    f"Could not load previous settings: {e}", "warn")
+                    f"Could not load previous API keys: {e}", "warn")
         ask = (settings_mod.interactive_startup(self.args)
                and not self.background_mode)
         self._adopt_settings(settings_mod.resolve_for_startup(
             self.args, self.console, source_dir=source, new_session=True,
-            ask=ask))
+            ask=ask, keep_saved_values=False))
 
         self.plan_manager = plan_utils.PlanManager(
             self.session_dir, enabled=self.plan_mode)
@@ -2839,6 +2839,15 @@ class AgentSession:
             self.console.note("Settings updated.", "ok")
         return True
 
+    def _apply_default_settings(self):
+        """Reset ordinary settings to defaults, keeping the API key."""
+        self.settings.reset_to_defaults()
+        parsed = [(spec, self.settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+        self.console.note("Settings reset to defaults (API key kept).", "ok")
+
     def _adopt_settings(self, settings):
         """Replace the session's settings and rebuild everything they affect.
 
@@ -2859,18 +2868,33 @@ class AgentSession:
 
     def _handle_settings_command(self, arg):
         arg = (arg or "").strip()
-        if not arg and self.tui_active and hasattr(self.console, "settings_pick"):
+        preset = arg.lower()
+        tui_preset = preset in ("all", "a", "default", "def")
+        if ((not arg or tui_preset) and self.tui_active
+                and hasattr(self.console, "settings_pick")):
             immutable = [f"{name}: cannot change ({desc})"
                          for name, desc in settings_mod.IMMUTABLE]
             snapshot = self._snapshot_settings()
             state = {"dirty": False}
             selected = 0
+            show_all = preset in ("all", "a")
+            if preset in ("default", "def"):
+                # Stage defaults so the user can review/save or cancel them.
+                self.settings.reset_to_defaults()
+                state["dirty"] = True
 
             def stage_change(row, value, rows):
                 if not self._change_setting_inline(row, value, rows):
                     return False
                 state["dirty"] = True
                 return True
+
+            def defaults(rows):
+                self.settings.reset_to_defaults()
+                state["dirty"] = True
+                rows[:] = self.settings.rows()
+                self.console.note(
+                    "Defaults staged (API key kept); press s to save.", "info")
 
             def save(rows):
                 nonlocal snapshot
@@ -2888,7 +2912,12 @@ class AgentSession:
                 row = self.console.settings_pick(
                     self.settings.rows(), immutable, selected=selected,
                     on_change=stage_change, on_save=save,
-                    dirty=lambda: state["dirty"])
+                    dirty=lambda: state["dirty"], show_all=show_all,
+                    on_defaults=defaults)
+                if row == tui_mod.SETTINGS_ALL:
+                    show_all = not show_all
+                    selected = 0
+                    continue
                 if row is None:
                     if not state["dirty"]:
                         return
@@ -2921,6 +2950,11 @@ class AgentSession:
                 if row["name"] in ("model", "url"):
                     self._ensure_key_for_current_model(stage=True)
             return
+        if preset in ("default", "def"):
+            self._apply_default_settings()
+            return
+        if preset in ("all", "a"):
+            arg = ""
         if not arg:
             for line in self._settings_lines():
                 self.console.emit(line)

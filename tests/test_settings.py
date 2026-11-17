@@ -612,7 +612,7 @@ class NewSessionWizardTest(unittest.TestCase):
                 new_session=True)
         first_run.assert_not_called()
 
-    def test_new_session_imports_previous_settings_after_the_decision(self):
+    def test_new_session_resets_settings_but_keeps_the_api_key(self):
         first_args = make_args(self.work, self.cache)
         first_args.model = "previous-model"
         first_args.temperature = 0.5
@@ -620,21 +620,23 @@ class NewSessionWizardTest(unittest.TestCase):
         first_args.verbose = True
         first = AgentSession(first_args, console=self.console)
         first.start_new_session()
+        first.settings.use_key("previous-key", persist=True)
+        first._save_settings()
 
         second_args = make_args(self.work, self.cache)
-        second_args.model = None
+        second_args.model = "previous-model"
         second_console = silent_console()
         second = AgentSession(second_args, console=second_console,
                               defer_model=True)
-        self.assertIsNone(second.model)
         self.assertFalse(second_console.verbose)
 
         second.start_new_session()
         self.assertEqual(second.model, "previous-model")
-        self.assertEqual(second.settings.values["temperature"], 0.5)
-        self.assertEqual(second.args.max_tokens, 1000)
-        self.assertTrue(second.settings.values["verbose"])
-        self.assertTrue(second_console.verbose)
+        self.assertEqual(second.settings.values["temperature"], 1.0)
+        self.assertNotEqual(second.args.max_tokens, 1000)
+        self.assertFalse(second.settings.values["verbose"])
+        self.assertFalse(second_console.verbose)
+        self.assertEqual(second.api_key, "previous-key")
 
     def test_restore_adopts_the_restored_session_settings(self):
         first_args = make_args(self.work, self.cache)
@@ -707,6 +709,17 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertTrue(self.session.args.enable_shell)
         self.assertNotEqual(self.session.messages[0]["content"], before)
         self.assertIn("run_shell_command", self.session.messages[0]["content"])
+
+    def test_settings_default_preset_keeps_the_api_key(self):
+        self.session.settings.use_key("keep-key", persist=False)
+        self.session._handle_settings_command("temperature 0.3")
+        with mock.patch.object(utils, "determine_vllm_model",
+                               return_value=None):
+            self.session._handle_settings_command("default")
+
+        self.assertEqual(self.session.args.temperature,
+                         settings.DEFAULT_TEMPERATURE)
+        self.assertEqual(self.session.settings.api_key, "keep-key")
 
     def test_plan_strategy_change_does_not_enable_plan_mode(self):
         self.console.read_line = mock.Mock(return_value="y")

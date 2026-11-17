@@ -20,6 +20,11 @@ from .ui import (Console, LOGO, TAGLINE, _ANSI_RE, _pad_visual,
                  _read_escape_sequence, _stop_thread, _visual_len)
 
 
+#: Returned by :meth:`TuiConsole.settings_pick` when the user asks to toggle
+#: between the editable settings and the full (including immutable) table.
+SETTINGS_ALL = "__settings_all__"
+
+
 def tui_mode(value):
     """Normalise ``--tui`` / legacy bool flags to ``auto``, ``on`` or ``off``."""
     if value is True:
@@ -1342,7 +1347,8 @@ class TuiConsole(Console):
         self.render()
 
     def _pick_index(self, draw, count, default=0, allow_exit_word=False,
-                    on_left=None, on_right=None, on_save=None):
+                    on_left=None, on_right=None, on_save=None, on_all=None,
+                    on_defaults=None):
         """Run a blocking raw-key picker and return a 0-based index.
 
         ``draw(selected)`` renders the overlay. Up/down move, a digit jumps to
@@ -1385,6 +1391,12 @@ class TuiConsole(Console):
                     return None
                 if raw in (b"q", b"Q"):
                     return None
+                if raw in (b"a", b"A") and on_all is not None:
+                    return SETTINGS_ALL
+                if raw in (b"d", b"D") and on_defaults is not None:
+                    on_defaults()
+                    draw(selected)
+                    continue
                 if raw in (b"s", b"S") and on_save is not None:
                     on_save()
                     draw(selected)
@@ -1469,7 +1481,8 @@ class TuiConsole(Console):
         return None if index is None else index + 1
 
     def settings_pick(self, rows, immutable_lines=(), selected=0,
-                      on_change=None, on_save=None, dirty=False):
+                      on_change=None, on_save=None, dirty=False,
+                      show_all=False, on_defaults=None):
         """Show the settings table and return the selected row, or None.
 
         Up/down or a number select, Enter opens the focused editor, left/right
@@ -1479,6 +1492,8 @@ class TuiConsole(Console):
         plan and plan-strategy) stay in sync. ``on_save(rows)`` persists the
         staged batch and refreshes the table. ``dirty`` may be a bool or a
         callable; the header shows a green ``saved`` or orange ``unsaved`` badge.
+        ``a`` toggles immutable rows (``show_all`` is the current mode) and
+        ``d`` calls ``on_defaults(rows)`` to stage the defaults.
         """
         if not self._active or not rows:
             return None
@@ -1501,9 +1516,9 @@ class TuiConsole(Console):
             })
 
         def combined():
-            return list(rows) + immutable_rows
+            return list(rows) + (immutable_rows if show_all else [])
 
-        total = len(rows) + len(immutable_rows)
+        total = len(rows) + (len(immutable_rows) if show_all else 0)
         self._picker_top = 0
         start = max(0, min(int(selected), total - 1))
 
@@ -1524,9 +1539,10 @@ class TuiConsole(Console):
             is_dirty = dirty() if callable(dirty) else bool(dirty)
             status = (("unsaved", "yellow") if is_dirty
                       else ("saved", "green"))
+            all_label = "a editable" if show_all else "a all"
             self._picker_window(
-                "[settings] ↑/↓ select · ←/→ change · Enter edit · "
-                "s save · q quit", body, selected, status=status)
+                f"[settings] ↑↓←→ Enter · s save · {all_label} · "
+                "d default · q quit", body, selected, status=status)
 
         def change(selected, step):
             row = combined()[selected]
@@ -1560,10 +1576,20 @@ class TuiConsole(Console):
             if on_save is not None:
                 on_save(rows)
 
+        def defaults():
+            if on_defaults is not None:
+                on_defaults(rows)
+
         index = self._pick_index(
             draw, total, start, on_left=left, on_right=right,
-            on_save=save if on_save is not None else None)
-        return None if index is None else combined()[index]
+            on_save=save if on_save is not None else None,
+            on_all=True,
+            on_defaults=defaults if on_defaults is not None else None)
+        if index is None:
+            return None
+        if index == SETTINGS_ALL:
+            return SETTINGS_ALL
+        return combined()[index]
 
     def read_secret(self, prompt_text="API key: "):
         """Read a secret into the fixed-view input line without echoing it."""

@@ -297,6 +297,21 @@ class Settings:
         url = self.values.get("url") or DEFAULT_MODEL_URL
         return utils.probe_api_key(url, self.api_key, timeout=timeout)
 
+    def reset_to_defaults(self):
+        """Reset every ordinary setting value to its built-in default.
+
+        The API key is deliberately the one thing kept: the active key and the
+        per-model key archive survive a reset. Selecting a model can then load
+        its saved key again.
+        """
+        for spec in SPECS:
+            if spec.attr == "api_key":
+                continue
+            self.values[spec.attr] = spec.default
+        # The kept key is an explicit part of the reset, so a subsequent
+        # model/url edit must not replace or clear it.
+        self.key_entered = bool(self.api_key or self.api_key_env)
+
     # -- construction -----------------------------------------------------
     @classmethod
     def from_args(cls, args):
@@ -396,8 +411,12 @@ class Settings:
 
     # -- merge ------------------------------------------------------------
     @classmethod
-    def resolve(cls, args, saved=None):
-        """Merge CLI, environment and the previous session's settings."""
+    def resolve(cls, args, saved=None, keep_saved_values=True):
+        """Merge CLI, environment and the previous session's settings.
+
+        ``keep_saved_values=False`` still imports the saved per-model API-key
+        map but resets every ordinary value to its default (a new session).
+        """
         saved = saved or cls()
         result = cls()
         result.api_keys = dict(saved.api_keys)
@@ -430,13 +449,13 @@ class Settings:
                 cli = getattr(args, spec.attr, spec.default)
                 if cli:
                     result.values[spec.attr] = True
-                elif spec.attr in saved.values:
+                elif keep_saved_values and spec.attr in saved.values:
                     result.values[spec.attr] = saved.values[spec.attr]
                 else:
                     result.values[spec.attr] = spec.default
             elif explicit.get(spec.attr):
                 result.values[spec.attr] = getattr(args, spec.attr)
-            elif spec.attr in saved.values:
+            elif keep_saved_values and spec.attr in saved.values:
                 value = saved.values[spec.attr]
                 if spec.attr == "plan_strategy" and value is None:
                     value = spec.default
@@ -764,7 +783,7 @@ def first_run(settings, console):
 
 
 def resolve_for_startup(args, console=None, source_dir=_AUTO_SOURCE,
-                        new_session=False, ask=None):
+                        new_session=False, ask=None, keep_saved_values=True):
     """Load previous settings, fill missing values, and apply them to ``args``.
 
     This runs only after the user has chosen to resume or start a session, so
@@ -786,7 +805,8 @@ def resolve_for_startup(args, console=None, source_dir=_AUTO_SOURCE,
     else:
         source = source_dir
     saved = Settings.load(source) if source else Settings()
-    settings = Settings.resolve(args, saved)
+    settings = Settings.resolve(args, saved,
+                                keep_saved_values=keep_saved_values)
 
     interactive = (interactive_startup(args) if ask is None else bool(ask))
     if interactive and new_session and not settings.model_explicit:
