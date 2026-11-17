@@ -541,6 +541,21 @@ class TuiConsole(Console):
             # from the first line instead of anchoring the tail to the bottom.
             self._scroll_offset = 0
             return (lines[:height] + [""] * height)[:height]
+        if self._overlay_lines:
+            # Command output (help/history/context/...) keeps its title line
+            # pinned while the rest scrolls underneath it.
+            header = lines[:1]
+            body = lines[1:]
+            available = max(height - len(header), 1)
+            max_offset = max(len(body) - available, 0)
+            self._scroll_offset = min(max(self._scroll_offset, 0), max_offset)
+            if self._scroll_offset and max_offset:
+                end = max_offset - self._scroll_offset + available
+                start = max(end - available, 0)
+                view = body[start:end]
+            else:
+                view = body[-available:]
+            return (header + view + [""] * height)[:height]
         max_offset = max(len(lines) - height, 0)
         self._scroll_offset = min(max(self._scroll_offset, 0), max_offset)
         if self._scroll_offset and max_offset:
@@ -1304,6 +1319,12 @@ class TuiConsole(Console):
                 line = (self.style(str(text), fg=fg, bold=True)
                         + "  " + line)
             lines = [line] + lines
+        elif status is not None:
+            # A one-row body cannot fit a separate header; keep the status
+            # badge and the selected row together.
+            text, fg = status
+            lines = [self.style(str(text), fg=fg, bold=True)
+                     + "  " + (lines[0] if lines else "")]
         self._overlay_top = True
         self._overlay_lines = lines
         self.render()

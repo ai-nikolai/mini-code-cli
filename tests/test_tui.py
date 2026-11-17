@@ -365,9 +365,21 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertIn("row-19", view)
 
         console._last_body_height = 1
-        console._picker_window("[settings]", body, 19)
+        console._picker_window("[settings]", body, 19,
+                               status=("unsaved", "yellow"))
         view = "\n".join(console._body_lines(1, 40))
         self.assertIn("row-19", view)
+        self.assertIn("unsaved", view)
+
+    def test_command_overlay_keeps_its_title_line_while_scrolling(self):
+        console = self.console()
+        console._overlay_lines = ["[help]"] + [
+            f"line-{index}" for index in range(30)]
+        console._scroll_offset = 5
+        view = console._body_lines(4, 40)
+        self.assertIn("[help]", view[0])
+        self.assertNotIn("[help]", "\n".join(view[1:]))
+        self.assertGreater(len(view), 1)
 
     def test_prompt_arrows_scroll_a_command_overlay(self):
         console = self.console()
