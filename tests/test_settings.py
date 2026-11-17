@@ -847,6 +847,8 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertNotEqual(rows["plan-strategy"]["value"], "(derived)")
         self.assertIn(rows["plan-strategy"]["raw"],
                       rows["plan-strategy"]["spec"].choices)
+        self.assertIn("plan-verify2",
+                      rows["plan-strategy"]["spec"].choices)
 
     def test_fixed_value_setting_uses_a_choice_not_free_text(self):
         plan_row = next(row for row in self.session.settings.rows()

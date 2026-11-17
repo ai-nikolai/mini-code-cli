@@ -14,7 +14,8 @@ import sys
 import unittest
 from unittest import mock
 
-from mini_code_cli import agent_files, agent_loop, compaction, prompts, ui, utils
+from mini_code_cli import (agent_files, agent_loop, compaction, planning,
+                           prompts, ui, utils)
 from mini_code_cli.agent_loop import AgentSession, maybe_compact
 
 from test_e2e_agent_loop import (
@@ -277,6 +278,40 @@ class CompactionStrategyEndToEndTest(_AdvancedCase):
         self.assertIn("Unknown compaction strategy", self.output())
 
 
+class PlanVerifyStatusTest(unittest.TestCase):
+    def test_parses_the_three_prompt_verdicts(self):
+        self.assertEqual(planning.parse_verify_status("STATUS: DONE"), "done")
+        self.assertEqual(planning.parse_verify_status("STATUS: INCOMPLETE"), "incomplete")
+        self.assertEqual(planning.parse_verify_status("STATUS: IN PROGRESS"),
+                         "incomplete")
+        self.assertEqual(planning.parse_verify_status("status: incomplete"),
+                         "incomplete")
+
+    def test_last_status_line_wins(self):
+        reply = ("Step 1 is DONE, step 2 is INCOMPLETE.\n"
+                 "STATUS: INCOMPLETE\n"
+                 "STATUS: DONE")
+        self.assertEqual(planning.parse_verify_status(reply), "done")
+
+    def test_prose_cannot_be_mistaken_for_the_verdict(self):
+        # The analysis mentions completion, but the final status line is what
+        # decides.
+        reply = ("The task looks complete and everything is done...\n"
+                 "Actually one test has not been run.\n"
+                 "STATUS: INCOMPLETE")
+        self.assertEqual(planning.parse_verify_status(reply), "incomplete")
+
+    def test_unknown_or_missing_verdict_returns_none(self):
+        self.assertIsNone(planning.parse_verify_status("I am not sure."))
+        self.assertIsNone(planning.parse_verify_status("STATUS: MAYBE"))
+        self.assertIsNone(planning.parse_verify_status(""))
+
+    def test_bare_final_token_is_accepted(self):
+        self.assertEqual(planning.parse_verify_status("All checks passed.\nDONE"), "done")
+        self.assertEqual(planning.parse_verify_status("One step left.\nINCOMPLETE"),
+                         "incomplete")
+
+
 class PlanStrategyTest(_AdvancedCase):
     def test_open_plan_creates_a_document_and_skips_plan_requests(self):
         session = self.new_session(plan=True, plan_strategy="open-plan")
@@ -422,6 +457,70 @@ class PlanStrategyTest(_AdvancedCase):
         texts = [m.get("content") for m in session.messages]
         self.assertIn("Final step answer.", texts)
 
+    def test_plan_verify2_done_skips_the_post_verify_step(self):
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="plan-verify2")
+        stub = StubLLM([
+            ("Plan:\n1. do the thing", [], USAGE),   # plan generation
+            ("Initial answer.", [], USAGE),          # work settles
+            ("Everything checks out.\nSTATUS: DONE", [], USAGE),  # verify
+        ])
+        run_loop(session, "do the thing", stub)
+
+        # No fourth (post-verify) call: the DONE verdict ended the turn.
+        self.assertEqual(len(stub.calls), 3)
+        texts = [m.get("content") for m in session.messages]
+        self.assertIn("Initial answer.", texts)
+        self.assertNotIn("Everything checks out.\nSTATUS: DONE", texts)
+        self.assertFalse(any("Plan verification (from CURRENT_PLAN.md):"
+                             in (text or "") for text in texts))
+
+    def test_plan_verify2_unfinished_verdict_requeues_work_then_done(self):
+        target = os.path.join(self.workdir, "data.txt")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("alpha\n")
+
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="plan-verify2")
+        stub = StubLLM([
+            ("Plan:\n1. read the file", [], USAGE),      # plan generation
+            ("Initial answer.", [], USAGE),              # settles -> verify
+            ("Step 1 is still outstanding.\nSTATUS: INCOMPLETE", [], USAGE),
+            ("", [tool_call("c1", "read_file",
+                            {"file_path": target})], USAGE),  # resumed work
+            ("After the tool.", [], USAGE),              # settles -> verify
+            ("Read and checked.\nSTATUS: DONE", [], USAGE),
+        ])
+        run_loop(session, "read the file", stub)
+
+        self.assertEqual(len(stub.calls), 6)
+        self.assertEqual(len([m for m in session.messages
+                              if m.get("role") == "tool"]), 1)
+        texts = [m.get("content") for m in session.messages]
+        self.assertIn("After the tool.", texts)
+        self.assertTrue(any("Plan verification (from CURRENT_PLAN.md):"
+                            in (text or "") for text in texts))
+        self.assertNotIn("Read and checked.\nSTATUS: DONE", texts)
+        with open(session.plan_manager.plan_path,
+                  encoding="utf-8") as handle:
+            self.assertIn("STATUS: DONE", handle.read())
+
+    def test_plan_verify2_unfinished_without_action_stops(self):
+        session = self.new_session(start=False, plan=True,
+                                   plan_strategy="plan-verify2")
+        stub = StubLLM([
+            ("Plan:\n1. do the thing", [], USAGE),
+            ("Initial answer.", [], USAGE),
+            ("I am not sure.\nSTATUS: MAYBE", [], USAGE),  # unusable verdict
+            ("Still thinking.", [], USAGE),                # no tool call
+        ])
+        run_loop(session, "do the thing", stub)
+
+        # One verify, one resumed step, then the turn ends instead of looping
+        # on the same transcript forever.
+        self.assertEqual(len(stub.calls), 4)
+        self.assertIn("ending the turn", self.output())
+
     def test_plan_verify_keeps_a_post_review_tool_step(self):
         target = os.path.join(self.workdir, "data.txt")
         with open(target, "w", encoding="utf-8") as handle:
@@ -460,6 +559,16 @@ class PromptStrategyTest(unittest.TestCase):
         self.assertIn("SCRATCHPAD MODE", text)
         self.assertIn("explicit exceptions", text)
         self.assertNotIn("CURRENT_PLAN.md -- an actual step-by-step plan", text)
+
+    def test_plan_verify_prompt_requests_a_machine_readable_verdict(self):
+        text = prompts.plan_verify_prompt(
+            [{"role": "user", "content": "do X"},
+             {"role": "assistant", "content": "did half"}], "do X")
+        self.assertIn("do X", text)
+        self.assertIn("STATUS: DONE", text)
+        self.assertIn("STATUS: INCOMPLETE", text)
+        self.assertIn("STATUS: IN PROGRESS", text)
+        self.assertIn("final line", text)
 
     def test_compaction_strategy_prompts_are_actionable(self):
         files = prompts.compaction_predict_files_prompt("SUMMARY", "do X")

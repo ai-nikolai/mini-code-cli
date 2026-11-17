@@ -87,7 +87,7 @@ given a reference implementation.
 | `--tui [auto\|on\|off]` | `auto` | fixed full-screen dashboard. `auto` enables it only on a known interactive TTY; `on` forces it; `off` uses the scrolling console |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
-| `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
+| `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify2`, `plan-verify-step` or `open-plan` (implies `--plan`) |
 | `--allow-nudge` | off | plan mode only: ask the model to continue (or reply DONE) when it stops without a tool call, before running the plan review |
 | `--nudge-limit N` | 1 | maximum continuation nudges per text-only stop with `--allow-nudge` |
 | `--scratchpad` | off | give the agent a free-form `.mini/SCRATCHPAD.md` (plus further scratch files) for thoughts, plans and learnings |
@@ -379,6 +379,7 @@ on for later turns).
 | Strategy | What happens |
 | --- | --- |
 | `plan-verify` (default) | Author a plan, review it once the work settles, then keep the post-review step only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
+| `plan-verify2` | Author a plan, then verify completion with one machine-readable verdict (`STATUS: DONE` / `STATUS: INCOMPLETE` / `STATUS: IN PROGRESS`). `DONE` ends the turn immediately, without the post-review step; an unfinished verdict re-queues the outstanding work and the agent continues, with another verify after it settles. |
 | `plan-verify-step` | The original behaviour: same plan + review, then always run one extra step and keep whatever that step says. |
 | `open-plan` | The agent owns a plan document at `.mini/PLAN.md` inside `--allowed-dir`, reads and updates it with the normal file tools, and the loop neither authors nor reviews a plan. |
 
@@ -386,8 +387,9 @@ on for later turns).
 > Plan mode also changes **history compaction**: after the transcript is compacted to a summary,
 > `CURRENT_PLAN.md` and `CURRENT_GOAL.md` are re-injected, so the agent keeps working against the
 > same goal. With `open-plan`, the agent's `.mini/PLAN.md` is re-injected instead. When the work
-> looks done the plan is reviewed and any outstanding task is re-queued before the agent returns
-> to you (except with `open-plan`).
+> looks done the plan is reviewed (or, with `plan-verify2`, verified with a DONE/INCOMPLETE
+> verdict) and any outstanding task is re-queued before the agent returns to you (except with
+> `open-plan`).
 
 `--allow-nudge` adds a completion checkpoint to any plan strategy. When the model replies without
 a tool call and the text does not explicitly say `DONE` / complete / finished, the loop appends a

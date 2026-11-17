@@ -169,7 +169,7 @@ def parse_args():
                         help="How to compact history. summarise: summary only (default). predict-files: summary + re-read the files the model predicts it needs. predict-messages: summary + the original messages the model predicts are worth keeping.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
-                        help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify-step: same, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+                        help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify2: verify with a machine-readable DONE/INCOMPLETE verdict and skip the final step on DONE. plan-verify-step: same as plan-verify, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--allow-nudge", action="store_true",
                         help="Plan mode only: when the model replies without a tool call, ask it to continue (or reply DONE) before running the plan review. Works with every --plan-strategy.")
     parser.add_argument("--nudge-limit", type=int, default=1,
@@ -323,16 +323,18 @@ def _compaction_trigger(messages, token_limit, reserved_output_tokens, current_t
     return False, ""
 
 
-#: Prefixes of user messages the *loop* injects (plan authoring and plan
-#: review). They are loop bookkeeping, not instructions from the user, so the
-#: in-flight-tail scan must skip them when it looks for the turn to carry across
-#: a compaction -- otherwise, right after a plan is generated, the plan text
-#: would be treated as the user's request and the real instruction summarised
-#: away. The matching injection points are in ``_generate_plan_and_inject`` and
-#: ``_review_plan_completion``.
+#: Prefixes of user messages the *loop* injects (plan authoring, review and
+#: verification). They are loop bookkeeping, not instructions from the user, so
+#: the in-flight-tail scan must skip them when it looks for the turn to carry
+#: across a compaction -- otherwise, right after a plan is generated, the plan
+#: text would be treated as the user's request and the real instruction
+#: summarised away. The matching injection points are in
+#: ``_generate_plan_and_inject``, ``_review_plan_completion`` and the
+#: ``plan-verify2`` branch of ``_run_turn``.
 _LOOP_INJECTED_USER_PREFIXES = (
     "Current plan for the goal (from CURRENT_PLAN.md):",
     "Plan completion summary (from CURRENT_PLAN.md):",
+    "Plan verification (from CURRENT_PLAN.md):",
 )
 
 
@@ -1973,6 +1975,13 @@ class AgentSession:
             settles, then keep the post-review step only when it calls a tool.
             A no-tool response is shown to the user and ends the turn without
             being appended.
+          * ``plan-verify2`` -- author a plan, then verify completion with one
+            machine-readable verdict (``STATUS: DONE`` / ``INCOMPLETE``). DONE
+            ends the turn immediately, with no post-review step. An unfinished
+            verdict re-queues the outstanding work and lets the agent act; a
+            second verify follows when the work settles again. If the agent
+            makes no tool call after an unfinished verdict, the turn ends
+            instead of verifying forever.
           * ``plan-verify-step`` -- same plan and review, but always run one
             extra step and keep whatever that step says.
           * ``open-plan`` -- the agent owns a plan document and maintains it
@@ -1985,6 +1994,7 @@ class AgentSession:
         """
         self.messages.append({"role": "user", "content": user_input})
         self._text_only_nudges = 0
+        verify_pending_action = False
 
         if self.plan_mode and not skip_plan:
             self._record_goal_request(user_input)
@@ -2007,6 +2017,7 @@ class AgentSession:
                 # A tool call or a recovered reply means the text-only nudge
                 # budget starts fresh at the next settle.
                 self._text_only_nudges = 0
+                verify_pending_action = False
                 self.console.note(
                     "Continuing with LLM calls until no more tool calls.", "info")
                 continue
@@ -2029,6 +2040,39 @@ class AgentSession:
             if (not self.plan_mode or skip_plan
                     or self.plan_strategy == planning.OPEN_PLAN):
                 return
+            if self.plan_strategy == planning.PLAN_VERIFY2:
+                if verify_pending_action:
+                    # The previous verdict said the plan was unfinished, but the
+                    # agent then stopped without a tool call. Verifying the same
+                    # transcript again would loop forever, so end the turn.
+                    self.console.note(
+                        "Plan verification reports unfinished work, but the "
+                        "model made no tool call; ending the turn.", "warn")
+                    return
+                self.console.note("Verifying the plan status.", "info")
+                status, summary = self._verify_plan_completion()
+                self._persist()
+                if status == planning.VERIFY_DONE:
+                    self.console.note("Plan verification: DONE.", "ok")
+                    return
+                label = ("INCOMPLETE" if status == planning.VERIFY_INCOMPLETE
+                         else "UNKNOWN")
+                self.console.note(
+                    f"Plan verification: {label}; letting the agent continue.",
+                    "info")
+                if summary and summary.strip():
+                    # Loop bookkeeping, not user-authored (see
+                    # _LOOP_INJECTED_USER_PREFIXES). The next _step sees the
+                    # outstanding tasks and can act on them.
+                    self.messages.append({
+                        "role": "user",
+                        "content":
+                            "Plan verification (from CURRENT_PLAN.md):\n%s"
+                            % summary.strip(),
+                    })
+                    self._persist()
+                verify_pending_action = True
+                continue
             self.console.note("Reviewing the plan, if everything is done.", "info")
             self._review_plan_completion()
             self._persist()
@@ -2237,6 +2281,48 @@ class AgentSession:
             })
 
         return True
+
+
+    def _verify_plan_completion(self):
+        """Run the ``plan-verify2`` check and return ``(status, summary)``.
+
+        The verdict is parsed from the reply by
+        :func:`mini_code_cli.planning.parse_verify_status`; a missing or
+        unreadable verdict returns ``None`` as the status. The reply is always
+        written to ``CURRENT_PLAN.md`` for inspection. Unlike the review path,
+        this method does not inject anything into the transcript: the caller
+        only re-queues the outstanding work when the verdict says it is not
+        done, so a DONE turn ends without leaving an orphan user message.
+        """
+        prompt_text = prompts.plan_verify_prompt(
+            self.messages, self.plan_manager.goal or "")
+        summary = ""
+        self._begin_activity("verifying plan")
+        try:
+            self.console.start_thinking("verifying plan")
+            response, _, usage, _ = utils.unpack_llm_result(
+                utils.call_openai_server(
+                    [{"role": "user", "content": prompt_text}],
+                    max_tokens=1024,
+                    temperature=0.0,
+                    model=self.model,
+                    server_url=self.server_url,
+                    api_key=self.api_key,
+                    timeout=self.args.llm_timeout,
+                    console=self.console,
+                ))
+            self._record_usage(usage)
+            self._note_prompt_size(usage, len(self.messages))
+            summary = response or ""
+        except Exception as exc:
+            self.console.note(f"Could not verify the plan: {exc}", "warn")
+        finally:
+            self.console.stop_thinking()
+            self._end_activity()
+
+        status = planning.parse_verify_status(summary)
+        self.plan_manager.write_plan_summary(summary)
+        return status, summary
 
 
     def _handle_compaction(self, compacted, tail=()):

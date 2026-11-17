@@ -18,6 +18,9 @@ model:
   * :func:`plan_review_prompt` -- the completion-review request used once the
     work for a request is done, to mark each plan task done / outstanding and
     emit a summary (see :func:`plan_instructions`).
+  * :func:`plan_verify_prompt` -- the completion request for the
+    ``plan-verify2`` strategy; it ends with one machine-readable
+    ``STATUS:`` line so the loop can decide without another step.
 """
 
 import os
@@ -380,6 +383,55 @@ else:
 Do not take any action yourself -- only report the plan state.
 
 Be concise in your analysis.
+
+Current goal:
+{goal}
+
+Conversation so far:
+{conversation}
+"""
+    return prompt.strip()
+
+
+def plan_verify_prompt(messages, goal):
+    """Build the machine-readable completion check for ``plan-verify2``.
+
+    Like :func:`plan_review_prompt`, this is a tool-free request sent by the
+    loop after the work settles. Unlike the review, its reply is not re-sent to
+    the agent as advice: the loop only needs a verdict, so the prompt requires a
+    final line in one fixed form::
+
+        STATUS: DONE
+        STATUS: INCOMPLETE
+        STATUS: IN PROGRESS
+
+    The final line must be last and contain no extra text, which lets
+    :func:`mini_code_cli.planning.parse_verify_status` classify it with a
+    regular expression instead of a second model step.
+
+    ``messages`` is the full conversation; ``goal`` is the instruction the plan
+    must satisfy.
+    """
+    conversation = "\n".join(
+        [f"{msg.get('role', '?')}: {msg.get('content') or ''}" for msg in messages])
+    prompt = f"""
+You are verifying whether the work for the current goal is complete. Use the
+full conversation and the plan the agent has been following. Check the actual
+result against the goal -- do not take the agent's own claim of completion at
+face value.
+
+Rules:
+- DONE only when every part of the goal is satisfied and verified.
+- INCOMPLETE when required work is missing, failed, unverified, or the goal is
+  not fully met yet.
+- IN PROGRESS when work is actively underway and the goal is not finished.
+- Do not call tools and do not take any action. Only report the verdict.
+- Put your short reasoning first, then end with exactly one final line in one
+  of these three forms (the final line must contain the verdict and nothing
+  else):
+  STATUS: DONE
+  STATUS: INCOMPLETE
+  STATUS: IN PROGRESS
 
 Current goal:
 {goal}

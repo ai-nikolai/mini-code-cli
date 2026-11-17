@@ -109,7 +109,7 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
 - **`test_advanced_features.py`** — the scratchpad (`SCRATCHPAD.md` + prompt), the
   compaction-strategy registry and message shapes (`summarise` / `predict-files` /
   `predict-messages`), and the planning strategies (`plan-verify` (default) /
-  `plan-verify-step` / `open-plan`).
+  `plan-verify2` / `plan-verify-step` / `open-plan`).
 - **`test_background.py`** — background shell/sub-agent tasks: output and exit codes,
   process-group cancellation, the `/background` view, tool registration, and shutdown cleanup.
 - **`test_settings.py`** — per-session settings: load/save permissions, CLI/env/session
