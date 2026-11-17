@@ -20,11 +20,6 @@ from .ui import (Console, LOGO, TAGLINE, _ANSI_RE, _pad_visual,
                  _read_escape_sequence, _stop_thread, _visual_len)
 
 
-#: Returned by :meth:`TuiConsole.settings_pick` when the user asks to toggle
-#: between the editable settings and the full (including immutable) table.
-SETTINGS_ALL = "__settings_all__"
-
-
 def tui_mode(value):
     """Normalise ``--tui`` / legacy bool flags to ``auto``, ``on`` or ``off``."""
     if value is True:
@@ -1392,7 +1387,9 @@ class TuiConsole(Console):
                 if raw in (b"q", b"Q"):
                     return None
                 if raw in (b"a", b"A") and on_all is not None:
-                    return SETTINGS_ALL
+                    on_all()
+                    draw(selected)
+                    continue
                 if raw in (b"d", b"D") and on_defaults is not None:
                     on_defaults()
                     draw(selected)
@@ -1482,7 +1479,7 @@ class TuiConsole(Console):
 
     def settings_pick(self, rows, immutable_lines=(), selected=0,
                       on_change=None, on_save=None, dirty=False,
-                      show_all=False, on_defaults=None):
+                      on_defaults=None, on_all=None):
         """Show the settings table and return the selected row, or None.
 
         Up/down or a number select, Enter opens the focused editor, left/right
@@ -1492,8 +1489,8 @@ class TuiConsole(Console):
         plan and plan-strategy) stay in sync. ``on_save(rows)`` persists the
         staged batch and refreshes the table. ``dirty`` may be a bool or a
         callable; the header shows a green ``saved`` or orange ``unsaved`` badge.
-        ``a`` toggles immutable rows (``show_all`` is the current mode) and
-        ``d`` calls ``on_defaults(rows)`` to stage the defaults.
+        ``a`` calls ``on_all(rows)`` (the CLI ``--all`` preset) and ``d``
+        calls ``on_defaults(rows)`` to stage the defaults.
         """
         if not self._active or not rows:
             return None
@@ -1516,9 +1513,9 @@ class TuiConsole(Console):
             })
 
         def combined():
-            return list(rows) + (immutable_rows if show_all else [])
+            return list(rows) + immutable_rows
 
-        total = len(rows) + (len(immutable_rows) if show_all else 0)
+        total = len(rows) + len(immutable_rows)
         self._picker_top = 0
         start = max(0, min(int(selected), total - 1))
 
@@ -1552,9 +1549,8 @@ class TuiConsole(Console):
             is_dirty = dirty() if callable(dirty) else bool(dirty)
             status = (("unsaved", "yellow") if is_dirty
                       else ("saved", "green"))
-            all_label = "a editable" if show_all else "a all"
             self._picker_window(
-                f"↑↓←→ Enter · s save · {all_label} · d def · q",
+                "↑↓←→ Enter · s save · a --all · d default · q",
                 body, selected, status=status)
 
         def change(selected, step):
@@ -1593,16 +1589,16 @@ class TuiConsole(Console):
             if on_defaults is not None:
                 on_defaults(rows)
 
+        def all_preset():
+            if on_all is not None:
+                on_all(rows)
+
         index = self._pick_index(
             draw, total, start, on_left=left, on_right=right,
             on_save=save if on_save is not None else None,
-            on_all=True,
+            on_all=all_preset if on_all is not None else None,
             on_defaults=defaults if on_defaults is not None else None)
-        if index is None:
-            return None
-        if index == SETTINGS_ALL:
-            return SETTINGS_ALL
-        return combined()[index]
+        return None if index is None else combined()[index]
 
     def read_secret(self, prompt_text="API key: "):
         """Read a secret into the fixed-view input line without echoing it."""

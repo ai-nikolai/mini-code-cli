@@ -124,6 +124,17 @@ IMMUTABLE = (
     ("agent-md", "extra agent instructions"),
 )
 
+#: The settings equivalent of the CLI ``--all`` preset.
+ALL_PRESET = {
+    "plan": True,
+    "enable_subagents": True,
+    "enable_shell": True,
+    "enable_skills": True,
+    "auto_mode": True,
+    "sudo": True,
+    "background": True,
+}
+
 
 def _bool_value(raw):
     text = str(raw).strip().lower()

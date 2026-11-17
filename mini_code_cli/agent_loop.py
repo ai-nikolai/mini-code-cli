@@ -2839,6 +2839,18 @@ class AgentSession:
             self.console.note("Settings updated.", "ok")
         return True
 
+    def _stage_all_preset(self):
+        for attr, value in settings_mod.ALL_PRESET.items():
+            self.settings.values[attr] = value
+
+    def _apply_all_settings(self):
+        self._stage_all_preset()
+        parsed = [(spec, self.settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+        self.console.note("--all preset applied.", "ok")
+
     def _apply_default_settings(self):
         """Reset ordinary settings to defaults, keeping the API key."""
         self.settings.reset_to_defaults()
@@ -2877,13 +2889,13 @@ class AgentSession:
             snapshot = self._snapshot_settings()
             state = {"dirty": False}
             selected = 0
-            # Show the complete table by default; `a` toggles the editable-only
-            # view. /settings all is therefore the same explicit preset.
-            show_all = True
             if preset in ("default", "def"):
                 # Stage defaults so the user can review/save or cancel them.
                 self.settings.reset_to_defaults()
                 state["dirty"] = True
+            elif preset in ("all", "a"):
+                # Stage the same feature flags as the CLI --all preset.
+                self._stage_all_preset()
 
             def stage_change(row, value, rows):
                 if not self._change_setting_inline(row, value, rows):
@@ -2897,6 +2909,13 @@ class AgentSession:
                 rows[:] = self.settings.rows()
                 self.console.note(
                     "Defaults staged (API key kept); press s to save.", "info")
+
+            def all_preset(rows):
+                self._stage_all_preset()
+                state["dirty"] = True
+                rows[:] = self.settings.rows()
+                self.console.note(
+                    "--all preset staged; press s to save.", "info")
 
             def save(rows):
                 nonlocal snapshot
@@ -2914,12 +2933,8 @@ class AgentSession:
                 row = self.console.settings_pick(
                     self.settings.rows(), immutable, selected=selected,
                     on_change=stage_change, on_save=save,
-                    dirty=lambda: state["dirty"], show_all=show_all,
-                    on_defaults=defaults)
-                if row == tui_mod.SETTINGS_ALL:
-                    show_all = not show_all
-                    selected = 0
-                    continue
+                    dirty=lambda: state["dirty"], on_defaults=defaults,
+                    on_all=all_preset)
                 if row is None:
                     if not state["dirty"]:
                         return
@@ -2956,7 +2971,8 @@ class AgentSession:
             self._apply_default_settings()
             return
         if preset in ("all", "a"):
-            arg = ""
+            self._apply_all_settings()
+            return
         if not arg:
             for line in self._settings_lines():
                 self.console.emit(line)

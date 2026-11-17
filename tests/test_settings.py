@@ -724,6 +724,16 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertNotEqual(self.session.messages[0]["content"], before)
         self.assertIn("run_shell_command", self.session.messages[0]["content"])
 
+    def test_settings_all_preset_enables_the_cli_all_flags(self):
+        self.session._handle_settings_command("all")
+        self.assertTrue(self.session.args.plan)
+        self.assertTrue(self.session.args.enable_shell)
+        self.assertTrue(self.session.args.enable_subagents)
+        self.assertTrue(self.session.args.enable_skills)
+        self.assertTrue(self.session.args.sudo)
+        self.assertTrue(self.session.args.background)
+        self.assertTrue(self.session.args.auto_mode)
+
     def test_settings_default_preset_keeps_the_api_key(self):
         self.session.settings.use_key("keep-key", persist=False)
         self.session._handle_settings_command("temperature 0.3")

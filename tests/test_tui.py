@@ -463,28 +463,29 @@ class TuiConsoleTest(unittest.TestCase):
             selected = self._feed_pick(
                 console, b"\x1b[B\r",
                 lambda: console.settings_pick(
-                    rows, immutable, selected=len(rows) - 1,
-                    show_all=True))
+                    rows, immutable, selected=len(rows) - 1))
             console.stop_tui()
 
         self.assertEqual(selected["name"], "tui")
         self.assertFalse(selected["mutable"])
         self.assertEqual(selected["number"], len(rows) + 1)
 
-    def test_settings_picker_a_requests_all_settings(self):
+    def test_settings_picker_a_requests_the_all_preset(self):
         console = self.console()
         rows = settings.Settings().rows()
+        events = []
         with mock.patch.object(
                 tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((60, 20))), \
                 mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
             console.start_tui()
-            result = self._feed_pick(
-                console, b"a",
-                lambda: console.settings_pick(rows))
+            self._feed_pick(
+                console, b"aq",
+                lambda: console.settings_pick(
+                    rows, on_all=lambda current: events.append("all")))
             console.stop_tui()
 
-        self.assertEqual(result, tui.SETTINGS_ALL)
+        self.assertEqual(events, ["all"])
 
     def test_settings_picker_left_right_changes_bool_in_place(self):
         console = self.console()
