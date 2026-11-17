@@ -444,6 +444,27 @@ class TuiConsoleTest(unittest.TestCase):
 
         self.assertEqual(changes, [("plan-strategy", expected)])
 
+    def test_settings_picker_s_saves_and_stays_in_the_table(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        saved = []
+
+        def on_save(current_rows):
+            saved.append(list(current_rows))
+
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            result = self._feed_pick(
+                console, b"sq",
+                lambda: console.settings_pick(rows, on_save=on_save))
+            console.stop_tui()
+
+        self.assertIsNone(result)
+        self.assertEqual(len(saved), 1)
+
     def test_settings_edit_shows_only_the_focused_box(self):
         console = self.console()
         with mock.patch.object(
@@ -465,6 +486,8 @@ class TuiConsoleTest(unittest.TestCase):
         self.assertTrue(edit_frames)
         edit_output = "\n".join(edit_frames)
         self.assertIn("Value", edit_output)
+        # The persistent ASCII banner stays visible while editing a setting.
+        self.assertIn("__  __", edit_output)
         self.assertNotIn("Mini-Code", edit_output)
         self.assertNotIn("You", edit_output)
 
@@ -649,9 +672,21 @@ class TuiConsoleTest(unittest.TestCase):
             console.set_summary(["version 1.0", "model test"])
             console.render()
             content = "\n".join(console._last_frame_lines)
+            lines = list(console._last_frame_lines)
             console.stop_tui()
         self.assertIn("__  __", content)
         self.assertIn("version 1.0", content)
+        # The mark is a separate, centered banner above the dashboard box,
+        # with a separator between them.
+        art = next(line for line in lines if "__  __" in line)
+        self.assertTrue(art.startswith(" " * 18))
+        art_index = lines.index(art)
+        header_index = next(index for index, line in enumerate(lines)
+                            if "Mini-Code" in line)
+        self.assertLess(art_index, header_index)
+        separator = lines[art_index + len(tui.LOGO)]
+        self.assertGreater(len(separator.strip()), 10)
+        self.assertEqual(len(set(separator.strip())), 1)
 
     def test_the_middle_pane_scrolls(self):
         console = self.console()

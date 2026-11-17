@@ -661,14 +661,11 @@ class TuiConsole(Console):
         if self._edit_active:
             self._render_edit_locked(cols, rows)
             return
+        # The ASCII mark is a persistent banner above every view, not part of
+        # the dashboard box: it stays visible while settings are open too.
+        banner = self._banner_lines(cols, rows)
         summary = [str(line) for line in (self._summary_lines
                                           or ["Mini-Code"])]
-        # The fixed view replaces the scrolling welcome banner, so show the
-        # same mark at the top of the dashboard when the terminal is big
-        # enough. On a short/narrow terminal the information lines win.
-        if (rows >= 24 and cols >= max(len(line) for line in LOGO) + 4):
-            summary = [self.style(line, fg="cyan", bold=True)
-                       for line in LOGO] + summary
         if self._info_provider is not None:
             try:
                 info = self._info_provider()
@@ -676,14 +673,7 @@ class TuiConsole(Console):
                 info = ""
             if info:
                 summary.append(self.style(info, dim=True))
-        # The dashboard is not only decoration: keep enough lines for the
-        # workload settings and the live usage line. The old rows//3 cap
-        # truncated them after the logo was added.
-        max_summary = max(rows // 3, 3)
-        if rows >= 24:
-            max_summary = max(max_summary, 12)
-        elif rows >= 20:
-            max_summary = max(max_summary, 8)
+        max_summary = max(rows // 4, 3)
         header = self._box("Mini-Code", summary[:max_summary], cols,
                            fg="cyan")
 
@@ -724,10 +714,10 @@ class TuiConsole(Console):
             question_box = self._box(
                 self._question_title or "Question to User",
                 self._question_lines[:max(rows // 3, 3)], cols, fg="yellow")
-        body_height = max(rows - len(header) - len(question_box)
-                          - len(input_box), 1)
+        body_height = max(rows - len(banner) - len(header)
+                          - len(question_box) - len(input_box), 1)
         body = self._body_lines(body_height, max(cols - 4, 1))
-        lines = header + body + question_box + input_box
+        lines = banner + header + body + question_box + input_box
         lines = (lines + [""] * rows)[:rows]
         padded = [_pad_visual(self._fit(line, cols), cols) for line in lines]
         self._write("\x1b[?25l")
@@ -741,7 +731,8 @@ class TuiConsole(Console):
         self._last_frame_lines = padded
         self._last_frame_size = (cols, rows)
         if self._input_active:
-            input_top = len(header) + body_height + len(question_box)
+            input_top = (len(banner) + len(header) + body_height
+                         + len(question_box))
             row = min(input_top + 2 + visible_cursor_line, rows)
             # Text starts at column 3 (border + space); stop at the inner edge
             # so a long line never puts the caret on the right border.
@@ -750,8 +741,37 @@ class TuiConsole(Console):
         else:
             self._write("\x1b[?25l")
 
+    def _center(self, text, width):
+        """Center an already-styled line, ignoring ANSI escape width."""
+        pad = max((width - _visual_len(text)) // 2, 0)
+        return " " * pad + text
+
+    def _banner_lines(self, cols, rows):
+        """Return the persistent, centered ASCII mark plus a separator.
+
+        The mark is shown above every view (including the focused settings
+        editor); on a short or narrow terminal a compact one-line label is
+        used so it always fits.
+        """
+        art_width = max(_visual_len(line) for line in LOGO)
+        if rows >= 18 and cols >= art_width + 4:
+            # Center the block once: centering each line separately would
+            # misalign the 42- and 43-column rows relative to each other.
+            pad = max((cols - art_width) // 2, 0)
+            lines = [" " * pad + self.style(line, fg="cyan", bold=True)
+                     for line in LOGO]
+        else:
+            lines = [self._center(
+                self.style("MINI CODE", fg="cyan", bold=True), cols)]
+        rule_width = max(min(cols - 2, 64), 1)
+        lines.append(self._center(
+            self.style(self.glyph("h") * rule_width, fg="cyan", dim=True),
+            cols))
+        return lines
+
     def _render_edit_locked(self, cols, rows):
-        """Draw only the focused setting edit window (no dashboard/notices)."""
+        """Draw the focused setting window plus the persistent banner."""
+        banner = self._banner_lines(cols, rows)
         if self._edit_choice_mode:
             head = [self.style(f"[{self._edit_title or 'Edit setting'}]",
                                fg="cyan", bold=True)]
@@ -767,7 +787,7 @@ class TuiConsole(Console):
                 marker = ">" if index == self._edit_selected else " "
                 body.append(f"{marker} {index + 1}. {option}")
             box = self._box("Value", body, cols, fg="green")
-            lines = (head + box + [""] * rows)[:rows]
+            lines = (banner + head + box + [""] * rows)[:rows]
             padded = [_pad_visual(self._fit(line, cols), cols)
                       for line in lines]
             self._write("\x1b[2J\x1b[H" + "\n".join(padded))
@@ -788,7 +808,8 @@ class TuiConsole(Console):
         head.append(self.style(
             "Enter save · type 'exit' or Esc to go back", dim=True))
 
-        max_input = max(1, min(rows // 2, rows - len(head) - 4))
+        max_input = max(1, min(rows // 2,
+                               rows - len(banner) - len(head) - 4))
         if self._edit_mask:
             real = "".join(self._input_buffer)
             input_lines = ["*" * len(real)]
@@ -810,7 +831,7 @@ class TuiConsole(Console):
                 column = 0
 
         box = self._box("Value", input_lines, cols, fg="green")
-        lines = (head + box + [""] * rows)[:rows]
+        lines = (banner + head + box + [""] * rows)[:rows]
         padded = [_pad_visual(self._fit(line, cols), cols) for line in lines]
         # The focused window owns the whole screen; a full repaint avoids
         # leaving slices of the settings table or dashboard behind it.
@@ -818,7 +839,8 @@ class TuiConsole(Console):
         self._last_frame_lines = padded
         self._last_frame_size = (cols, rows)
         if self._input_active:
-            row = max(1, min(len(head) + 2 + visible_cursor_line, rows))
+            row = max(1, min(len(banner) + len(head) + 2
+                             + visible_cursor_line, rows))
             col = max(3, min(3 + column, cols - 2))
             self._write(f"\x1b[{row};{col}H\x1b[?25h")
         else:
@@ -1253,13 +1275,14 @@ class TuiConsole(Console):
         self.render()
 
     def _pick_index(self, draw, count, default=0, allow_exit_word=False,
-                    on_left=None, on_right=None):
+                    on_left=None, on_right=None, on_save=None):
         """Run a blocking raw-key picker and return a 0-based index.
 
         ``draw(selected)`` renders the overlay. Up/down move, a digit jumps to
-        that row, left/right call the optional change callbacks, Enter confirms,
-        and q/Esc cancels (returning ``None``). With ``allow_exit_word``, typing
-        ``exit`` also cancels -- used by the focused settings sub-window.
+        that row, left/right call the optional change callbacks, ``s`` calls
+        ``on_save`` (when set), Enter confirms, and q/Esc cancels (returning
+        ``None``). With ``allow_exit_word``, typing ``exit`` also cancels --
+        used by the focused settings sub-window.
         """
         if not self._active or count <= 0:
             return None
@@ -1295,6 +1318,10 @@ class TuiConsole(Console):
                     return None
                 if raw in (b"q", b"Q"):
                     return None
+                if raw in (b"s", b"S") and on_save is not None:
+                    on_save()
+                    draw(selected)
+                    continue
                 if allow_exit_word and raw.isalpha():
                     typed.append(raw.decode("utf-8", "ignore").lower())
                     if "".join(typed).endswith("exit"):
@@ -1375,14 +1402,15 @@ class TuiConsole(Console):
         return None if index is None else index + 1
 
     def settings_pick(self, rows, immutable_lines=(), selected=0,
-                      on_change=None):
+                      on_change=None, on_save=None):
         """Show the settings table and return the selected row, or None.
 
         Up/down or a number select, Enter opens the focused editor, left/right
-        rotate a toggle or fixed-choice value in place, and q/Esc cancels.
-        ``on_change(row, value, rows)`` applies an inline change; it may replace
-        the ``rows`` list so dependent rows (e.g. plan and plan-strategy) stay
-        in sync.
+        rotate a toggle or fixed-choice value in place, ``s`` saves staged
+        settings, and q/Esc cancels. ``on_change(row, value, rows)`` stages an
+        inline change; it may replace the ``rows`` list so dependent rows (e.g.
+        plan and plan-strategy) stay in sync. ``on_save(rows)`` persists the
+        staged batch and refreshes the table.
         """
         if not self._active or not rows:
             return None
@@ -1400,8 +1428,8 @@ class TuiConsole(Console):
             for line in immutable_lines:
                 body.append(self.style("  " + str(line), dim=True))
             self._picker_window(
-                "[settings] ↑/↓ select · ←/→ change · Enter edit · q cancel",
-                body, selected)
+                "[settings] ↑/↓ select · ←/→ change · Enter edit · "
+                "s save · q quit", body, selected)
 
         def change(selected, step):
             row = rows[selected]
@@ -1431,8 +1459,13 @@ class TuiConsole(Console):
         def right(selected):
             return change(selected, 1)
 
+        def save():
+            if on_save is not None:
+                on_save(rows)
+
         index = self._pick_index(
-            draw, len(rows), start, on_left=left, on_right=right)
+            draw, len(rows), start, on_left=left, on_right=right,
+            on_save=save if on_save is not None else None)
         return None if index is None else rows[index]
 
     def read_secret(self, prompt_text="API key: "):

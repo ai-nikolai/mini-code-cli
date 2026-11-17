@@ -1165,6 +1165,19 @@ class FarewellBoxTest(_SessionCase):
         self.assertIn("resume", text)
         self.assertIn("--load-last-session", text)
 
+    def test_the_ascii_mark_is_centered_above_the_goodbye_box(self):
+        session = self.make()
+        session.console.emit("")
+
+        session.shutdown()
+
+        text = self.output()
+        self.assertIn("__  __", text)
+        self.assertLess(text.index("__  __"),
+                        text.index("MiniCodeCLI v"))
+        art = next(line for line in text.splitlines() if "__  __" in line)
+        self.assertGreater(len(art) - len(art.lstrip(" ")), 0)
+
     def test_it_is_not_the_startup_banner(self):
         # The welcome box lists how the session *will* run; the farewell box
         # must not repeat any of that once it is over.

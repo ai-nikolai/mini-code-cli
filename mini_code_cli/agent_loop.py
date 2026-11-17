@@ -2567,18 +2567,54 @@ class AgentSession:
         return None if text.lower() == "exit" else text
 
     def _change_setting_inline(self, row, value, rows):
-        """Apply a left/right settings change and refresh the visible table."""
+        """Stage a left/right settings change and refresh the visible table."""
         if not self._apply_settings({row["name"]: value},
-                                    confirm_cache=False, announce=False):
+                                    confirm_cache=False, announce=False,
+                                    stage=True):
             return False
         rows[:] = self.settings.rows()
         return True
 
-    def _apply_settings(self, changes, confirm_cache=True, announce=True):
-        """Validate and apply one or more settings.
+    def _snapshot_settings(self):
+        """Capture the values needed to cancel a staged settings edit."""
+        return (dict(self.settings.values), self.settings.api_key,
+                self.settings.api_key_env, self.settings.persist_api_key)
+
+    def _restore_settings(self, snapshot):
+        values, api_key, api_key_env, persist_api_key = snapshot
+        self.settings.values = dict(values)
+        self.settings.api_key = api_key
+        self.settings.api_key_env = api_key_env
+        self.settings.persist_api_key = persist_api_key
+
+    def _commit_staged_settings(self, snapshot):
+        """Apply all staged changes to the runtime and persist them."""
+        values, api_key, api_key_env, persist_api_key = snapshot
+        parsed = []
+        for spec in settings_mod.SPECS:
+            if spec.attr == "api_key":
+                if (self.settings.api_key != api_key
+                        or self.settings.persist_api_key != persist_api_key
+                        or self.settings.api_key_env != api_key_env):
+                    parsed.append((spec, self.settings.api_key))
+                continue
+            value = self.settings.values.get(spec.attr, spec.default)
+            if value != values.get(spec.attr):
+                parsed.append((spec, value))
+        if not parsed:
+            self._save_settings()
+            return True
+        return self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+
+    def _apply_settings(self, changes, confirm_cache=True, announce=True,
+                        stage=False):
+        """Validate and apply (or stage) one or more settings.
 
         Cache-impacting changes are applied as one transaction, so a batch of
-        tool/prompt edits rebuilds the prompt once.
+        tool/prompt edits rebuilds the prompt once. ``stage`` keeps the change
+        in ``settings.values`` without touching the runtime or the disk; the
+        TUI settings menu commits the batch with ``s``.
         """
         parsed = []
         for name, raw in changes.items():
@@ -2599,6 +2635,16 @@ class AgentSession:
                 self.console.note(f"{canonical.name}: {exc}", "warn")
                 return False
             parsed.append((canonical, value))
+
+        if stage:
+            for spec, value in parsed:
+                if spec.attr == "api_key":
+                    self.settings.api_key = value
+                else:
+                    self.settings.values[spec.attr] = value
+                    if spec.attr == "plan_strategy":
+                        self.settings.values["plan"] = True
+            return True
 
         cache_effects = {spec.cache for spec, _ in parsed
                          if spec.cache != "none"}
@@ -2723,12 +2769,43 @@ class AgentSession:
         if not arg and self.tui_active and hasattr(self.console, "settings_pick"):
             immutable = [f"{name}: cannot change ({desc})"
                          for name, desc in settings_mod.IMMUTABLE]
+            snapshot = self._snapshot_settings()
+            state = {"dirty": False}
             selected = 0
+
+            def stage_change(row, value, rows):
+                if not self._change_setting_inline(row, value, rows):
+                    return False
+                state["dirty"] = True
+                return True
+
+            def save(rows):
+                if not self._commit_staged_settings(snapshot):
+                    self.console.note("Could not save settings.", "error")
+                    return
+                state["dirty"] = False
+                rows[:] = self.settings.rows()
+                self.console.note("Settings saved.", "ok")
+
             while True:
                 row = self.console.settings_pick(
                     self.settings.rows(), immutable, selected=selected,
-                    on_change=self._change_setting_inline)
+                    on_change=stage_change, on_save=save)
                 if row is None:
+                    if not state["dirty"]:
+                        return
+                    choice = self.console.settings_choose(
+                        "Unsaved settings",
+                        ["Save and quit", "Cancel changes and quit"],
+                        current="Save and quit")
+                    if choice is None:
+                        # Esc/exit from the prompt: stay in the menu.
+                        continue
+                    if choice == "Save and quit":
+                        if self._commit_staged_settings(snapshot):
+                            return
+                        continue
+                    self._restore_settings(snapshot)
                     return
                 selected = max(0, row["number"] - 1)
                 if not row["mutable"]:
@@ -2738,9 +2815,11 @@ class AgentSession:
                 raw = self._read_setting_value(row["name"])
                 if raw is None or raw == "":
                     continue
-                # The menu already shows the cache marker and the value was
-                # chosen explicitly, so apply without another prompt.
-                self._apply_settings({row["name"]: raw}, confirm_cache=False)
+                if not self._apply_settings({row["name"]: raw},
+                                            confirm_cache=False,
+                                            announce=False, stage=True):
+                    continue
+                state["dirty"] = True
             return
         if not arg:
             for line in self._settings_lines():

@@ -860,6 +860,19 @@ class Console:
         label_w = max((len(str(label)) for label, _ in rows), default=0)
         lines = [sign_off or "Goodbye, and thanks for using MiniCodeCLI!", ""]
         lines += [f"{str(label).ljust(label_w)} : {value}" for label, value in rows]
+        # The same yellow as the good-bye box, printed outside/above it. The
+        # fixed TUI stops its alternate screen before this runs, so it lands on
+        # the normal terminal just like the box.
+        art_width = max(len(line) for line in LOGO)
+        if self.width >= art_width + 4:
+            pad = " " * max((self.width - art_width) // 2, 0)
+            for line in LOGO:
+                self.emit(pad + self.style(line, fg="yellow", bold=True))
+        else:
+            label = "MINI CODE"
+            pad = " " * max((self.width - len(label)) // 2, 0)
+            self.emit(pad + self.style(label, fg="yellow", bold=True))
+        self.emit()
         # Yellow, not the welcome banner's cyan: this is the one box that
         # *closes* the session, so it reads as a distinct, valedictory note
         # rather than the startup banner reappearing. Colours only apply on a

@@ -610,14 +610,30 @@ class SettingsCommandTest(unittest.TestCase):
         self.console.settings_edit = mock.Mock(return_value="exit")
         self.assertIsNone(self.session._read_setting_value("temperature"))
 
-    def test_inline_change_applies_and_refreshes_rows(self):
+    def test_inline_change_stages_until_saved(self):
+        snapshot = self.session._snapshot_settings()
         rows = self.session.settings.rows()
         plan_row = next(row for row in rows if row["name"] == "plan")
         self.assertTrue(
             self.session._change_setting_inline(plan_row, True, rows))
         self.assertTrue(self.session.settings.values["plan"])
+        self.assertFalse(self.session.plan_mode)
         self.assertTrue(next(row for row in rows
                              if row["name"] == "plan")["raw"])
+
+        self.assertTrue(self.session._commit_staged_settings(snapshot))
+        self.assertTrue(self.session.plan_mode)
+
+    def test_cancelled_staged_changes_restore_the_snapshot(self):
+        snapshot = self.session._snapshot_settings()
+        rows = self.session.settings.rows()
+        plan_row = next(row for row in rows if row["name"] == "plan")
+        self.session._change_setting_inline(plan_row, True, rows)
+        self.assertTrue(self.session.settings.values["plan"])
+
+        self.session._restore_settings(snapshot)
+        self.assertFalse(self.session.settings.values["plan"])
+        self.assertFalse(self.session.plan_mode)
 
     def test_api_key_edit_is_masked_and_not_stored_by_default(self):
         self.console.read_secret = mock.Mock(return_value="sk-new")
