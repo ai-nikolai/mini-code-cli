@@ -169,17 +169,10 @@ ALL_PRESET = {
     "background": True,
 }
 
-#: The kitchen-sink preset: all feature flags plus the preferred planning,
-#: verification and recovery choices. ``model``/``url`` are included because
-#: the preset is the user's "super" profile; an explicit CLI --model/--url
-#: still wins when ``--super`` is parsed. The API key is never hard-coded --
-#: it is loaded from the per-model archive or the environment.
+#: The kitchen-sink behaviour preset: feature flags plus the preferred
+#: planning, verification and recovery choices. It deliberately leaves the
+#: model, URL, API key and generation/context values untouched.
 SUPER_PRESET = {
-    "model": "deepseek-flash",
-    "url": "https://api.deepseek.com",
-    "temperature": DEFAULT_TEMPERATURE,
-    "max_tokens": None,
-    "max_context_tokens": None,
     "plan": True,
     "plan_strategy": planning.PLAN_VERIFY2,
     "strict_verify": True,

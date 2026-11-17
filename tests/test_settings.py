@@ -772,9 +772,9 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertEqual(self.session.args.runtime_strategy, "prompt-change")
         self.assertTrue(self.session.args.dynamic_todo_tracking)
         self.assertEqual(self.session.settings.values["model"],
-                         "deepseek-flash")
+                         "test-model")
         self.assertEqual(self.session.settings.values["url"],
-                         "https://api.deepseek.com")
+                         "http://0.0.0.0:30000")
 
     def test_settings_default_preset_keeps_model_url_and_api_key(self):
         self.session.settings.use_key("keep-key", persist=False)

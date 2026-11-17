@@ -87,7 +87,7 @@ given a reference implementation.
 | `--tui [auto\|on\|off]` | `auto` | fixed full-screen dashboard. `auto` enables it only on a known interactive TTY; `on` forces it; `off` uses the scrolling console |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
-| `--super` | off | kitchen-sink preset: plan-verify2 + strict verification, all shell/sub-agent/skill/sudo/background features, auto-mode, prompt-change recovery and dynamic todos; also selects DeepSeek `deepseek-flash` unless `--model`/`--url` are explicit. The API key is never hard-coded |
+| `--super` | off | kitchen-sink behaviour preset: plan-verify2 + strict verification, all shell/sub-agent/skill/sudo/background features, auto-mode, prompt-change recovery and dynamic todos. The model, URL and API key are left untouched |
 | `--plan-strategy NAME` | `plan-verify2` | `plan-verify2`, `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
 | `--allow-nudge` | off | plan mode only: ask the model to continue (or reply DONE) when it stops without a tool call, before running the plan review |
 | `--nudge-limit N` | 1 | maximum continuation nudges per text-only stop with `--allow-nudge` |

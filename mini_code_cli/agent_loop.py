@@ -192,7 +192,7 @@ def parse_args():
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
     parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
     parser.add_argument("--super", action="store_true",
-                        help="The kitchen-sink preset: --plan with plan-verify2 and strict verification, --enable-shell/--enable-subagents/--skills/--sudo/--background, --auto-mode, --runtime-strategy prompt-change, --dynamic-todo-tracking, and the DeepSeek defaults (model deepseek-flash, url https://api.deepseek.com) unless --model/--url are given explicitly. The API key is loaded from the environment or the per-model archive, never hard-coded.")
+                        help="The kitchen-sink behaviour preset: --plan with plan-verify2 and strict verification, --enable-shell/--enable-subagents/--skills/--sudo/--background, --auto-mode, --runtime-strategy prompt-change, --dynamic-todo-tracking, and the default nudge/compaction/timeouts/verbose/scratchpad values. It leaves the model, URL and API key untouched.")
 
     # Output verbosity
     parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
@@ -212,18 +212,10 @@ def parse_args():
         args.load_last_session = True
 
     if args.super:
-        # Apply the feature/runtime profile while preserving an explicit
-        # --model/--url. The API key is never part of the preset.
+        # A behaviour preset: the model, URL and API key stay exactly as
+        # configured on the command line/environment.
         for attr, value in settings_mod.SUPER_PRESET.items():
-            if attr == "model":
-                if getattr(args, "model", None) is None:
-                    args.model = value
-            elif attr == "url":
-                if getattr(args, "url", None) == DEFAULT_MODEL_URL:
-                    args.url = value
-            else:
-                setattr(args, attr, value)
-        args.plan = True
+            setattr(args, attr, value)
 
     # A planning strategy is only meaningful in plan mode, so asking for one
     # implies the flag (the banner and help then agree with the session).

@@ -845,10 +845,10 @@ class ParseArgsTest(unittest.TestCase):
         self.assertTrue(args.auto_mode)
         self.assertEqual(args.runtime_strategy, "prompt-change")
         self.assertTrue(args.dynamic_todo_tracking)
-        self.assertEqual(args.model, "deepseek-flash")
-        self.assertEqual(args.url, "https://api.deepseek.com")
+        self.assertIsNone(args.model)
+        self.assertEqual(args.url, agent_loop.DEFAULT_MODEL_URL)
 
-    def test_super_preset_keeps_explicit_model_and_url(self):
+    def test_super_preset_keeps_an_explicit_model_and_url(self):
         with mock.patch.object(
                 sys, "argv",
                 ["mini-code", "--super", "--model", "local-model",
