@@ -807,7 +807,7 @@ class TuiConsole(Console):
         lines = [pad + self.style(line, fg="cyan", bold=True)
                  for line in LOGO]
         lines.append(pad + self.style(TAGLINE, dim=True))
-        lines.append("")
+        # No blank spacer: keep the mark one line closer to the main box.
         return lines
 
     def _render_edit_locked(self, cols, rows):
