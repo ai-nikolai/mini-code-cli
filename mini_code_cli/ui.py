@@ -362,11 +362,17 @@ class Console:
         self._render_transient_block(text)
 
     # -- building blocks ----------------------------------------------------
-    def box(self, lines, title=None, fg="cyan"):
-        """Render *lines* inside a bordered box and return it as a string."""
+    def box(self, lines, title=None, fg="cyan", min_width=None):
+        """Render *lines* inside a bordered box and return it as a string.
+
+        ``min_width`` is a minimum inner width, used to keep the good-bye box
+        wide enough for the ASCII mark above it.
+        """
         lines = ["" if line is None else str(line) for line in lines]
         content_w = max((_visual_len(line) for line in lines), default=0)
         inner = min(max(content_w + 2, 12), max(self.width - 2, 12))
+        if min_width is not None:
+            inner = max(inner, min(int(min_width), max(self.width - 2, 12)))
         if title is not None:
             inner = max(inner, _visual_len(title) + 4)
 
@@ -432,8 +438,9 @@ class Console:
         return oneline(text, limit)
 
     # -- semantic renderers -------------------------------------------------
-    def banner(self, title, lines, fg="cyan"):
-        self.emit(self.box(lines, title=title, fg=fg))
+    def banner(self, title, lines, fg="cyan", min_width=None):
+        self.emit(self.box(lines, title=title, fg=fg,
+                           min_width=min_width))
 
     def turn(self, role, content, accent="cyan", badge=None):
         """Render a single conversation turn (user / assistant / system).
@@ -825,17 +832,20 @@ class Console:
         self.print_mark()
         self.banner(f"MiniCodeCLI v{version}", lines, fg="cyan")
 
-    def print_mark(self, fg="cyan", tagline_fg=None):
+    def print_mark(self, fg="cyan", tagline_fg=None, center_width=None):
         """Print the centered ASCII mark and tagline (no box).
 
-        The art is skipped on very narrow terminals; wrapping a logo is worse
-        than omitting it. Colour is optional, so piped logs still show the
-        plain mark.
+        ``center_width`` centers the mark over a narrower box (the good-bye
+        box) instead of the whole terminal. The art is skipped on very narrow
+        targets; wrapping a logo is worse than omitting it. Colour is optional,
+        so piped logs still show the plain mark.
         """
         art_width = max(len(line) for line in LOGO)
-        if self.width < art_width + 4:
+        width = (self.width if center_width is None
+                 else min(int(center_width), self.width))
+        if width < art_width + 4:
             return
-        pad = " " * max((self.width - art_width) // 2, 0)
+        pad = " " * max((width - art_width) // 2, 0)
         for line in LOGO:
             self.emit(pad + self.style(line, fg=fg, bold=True))
         self.emit(pad + self.style(TAGLINE, fg=tagline_fg, dim=True))
@@ -862,16 +872,28 @@ class Console:
         row_lines = [f"{str(label).ljust(label_w)} : {value}"
                      for label, value in rows]
 
-        # The same centered mark used by the welcome banner, above the box and
-        # in the box's yellow. The box itself stays content-width.
-        self.print_mark(fg="yellow", tagline_fg="yellow")
+        # Center the mark over the *box*, not the whole terminal, so it sits
+        # directly above the good-bye frame. Compute the same width `box` will
+        # use for the content and title.
+        title = f"MiniCodeCLI v{version} - goodbye"
+        art_width = max(len(line) for line in LOGO)
+        content_width = max(
+            [_visual_len(sign)] + [_visual_len(line) for line in row_lines])
+        inner = min(max(content_width + 2, 12), max(self.width - 2, 12))
+        # Keep the box wide enough for the mark above it, so the mark can be
+        # centered over the box rather than over the whole terminal.
+        inner = max(inner, min(art_width + 2, max(self.width - 2, 12)))
+        inner = max(inner, _visual_len(title) + 4)
+        box_width = inner + 2
+        self.print_mark(fg="yellow", tagline_fg="yellow",
+                        center_width=box_width)
         lines = [sign, ""] + row_lines
         # Yellow, not the welcome banner's cyan: this is the one box that
         # *closes* the session, so it reads as a distinct, valedictory note
         # rather than the startup banner reappearing. Colours only apply on a
         # colour-capable TTY (see :meth:`box`), so piped/ASCII output is
         # unchanged.
-        self.banner(f"MiniCodeCLI v{version} - goodbye", lines, fg="yellow")
+        self.banner(title, lines, fg="yellow", min_width=inner)
 
     def announce_api_key(self, present, source="", model=""):
         if present:

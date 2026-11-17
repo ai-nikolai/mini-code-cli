@@ -1183,11 +1183,17 @@ class FarewellBoxTest(_SessionCase):
         sign_index = next(index for index, line in enumerate(lines)
                           if "Goodbye, and thanks" in line)
         art = lines[art_index]
+        tagline = lines[tagline_index]
         self.assertLess(art_index, top)
         self.assertLess(tagline_index, top)
         self.assertLess(art_index, sign_index)
         self.assertTrue(art.strip().startswith("__"))
         self.assertGreater(len(art) - len(art.lstrip(" ")), 2)
+        # The mark is centered over the box width, not the terminal width.
+        box_width = len(lines[top])
+        art_width = max(len(line) for line in ui.LOGO)
+        expected = max((box_width - art_width) // 2, 0)
+        self.assertEqual(len(tagline) - len(tagline.lstrip(" ")), expected)
         bottom = [line for line in lines if line.startswith("+")][-1]
         self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
 
