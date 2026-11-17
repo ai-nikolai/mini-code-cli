@@ -2847,6 +2847,10 @@ class AgentSession:
                 "changes affect the tool registry only.", "warn")
         self.settings.capture_from_args(self.args)
         self._save_settings()
+        if self.tui_active:
+            # Permission/shell/planning/model lines live in the static header
+            # summary; refresh them after any applied settings change.
+            self.console.set_summary(self._tui_header_lines())
         if announce:
             self.console.note("Settings updated.", "ok")
         return True

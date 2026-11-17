@@ -1578,6 +1578,27 @@ class TuiHeaderRefreshTest(unittest.TestCase):
                  if line.startswith("context:")),
         )
 
+    def test_all_preset_refreshes_permissions_and_shell_header(self):
+        with tempfile.TemporaryDirectory() as work, \
+                tempfile.TemporaryDirectory() as cache:
+            console = tui.TuiConsole(stream=_FakeTty(), color=False,
+                                     unicode=False)
+            args = make_args(work, cache)
+            args.tui = True
+            session = AgentSession(args, console=console)
+            with mock.patch.object(
+                    tui.shutil, "get_terminal_size",
+                    return_value=os.terminal_size((80, 24))), \
+                    mock.patch.object(tui.TuiConsole,
+                                      "start_scroll_listener"):
+                console.start_tui()
+                session.start_new_session()
+                session._apply_all_settings()
+                summary = "\n".join(console._summary_lines)
+                console.stop_tui()
+
+        self.assertIn("permissions: sudo | shell: on", summary)
+
 
 class TuiInfoAndColorTest(unittest.TestCase):
     def test_an_untitled_rule_does_not_clear_command_output(self):
