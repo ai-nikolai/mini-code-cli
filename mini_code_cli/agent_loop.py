@@ -2819,10 +2819,14 @@ class AgentSession:
                 return True
 
             def save(rows):
+                nonlocal snapshot
                 if not self._commit_staged_settings(snapshot):
                     self.console.note("Could not save settings.", "error")
                     return
                 state["dirty"] = False
+                # Later cancels must restore to the last *saved* state, not
+                # to the state that existed when the menu first opened.
+                snapshot = self._snapshot_settings()
                 rows[:] = self.settings.rows()
                 self.console.note("Settings saved.", "ok")
 

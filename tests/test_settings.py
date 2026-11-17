@@ -827,6 +827,20 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertTrue(self.session._commit_staged_settings(snapshot))
         self.assertTrue(self.session.plan_mode)
 
+    def test_snapshot_after_save_keeps_the_saved_state_on_cancel(self):
+        snapshot = self.session._snapshot_settings()
+        rows = self.session.settings.rows()
+        plan_row = next(row for row in rows if row["name"] == "plan")
+        self.session._change_setting_inline(plan_row, True, rows)
+        self.assertTrue(self.session._commit_staged_settings(snapshot))
+        snapshot = self.session._snapshot_settings()
+
+        rows = self.session.settings.rows()
+        plan_row = next(row for row in rows if row["name"] == "plan")
+        self.session._change_setting_inline(plan_row, False, rows)
+        self.session._restore_settings(snapshot)
+        self.assertTrue(self.session.settings.values["plan"])
+
     def test_cancelled_staged_changes_restore_the_snapshot(self):
         snapshot = self.session._snapshot_settings()
         rows = self.session.settings.rows()
