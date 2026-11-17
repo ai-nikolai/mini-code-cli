@@ -172,7 +172,7 @@ def parse_args():
                         help="How to compact history. summarise: summary only (default). predict-files: summary + re-read the files the model predicts it needs. predict-messages: summary + the original messages the model predicts are worth keeping.")
     parser.add_argument("-p","--plan", action="store_true", help="Enable plan mode: the agent keeps a CURRENT_PLAN.md (its step-by-step plan, marked finished when the goal is done) and CURRENT_GOAL.md (the user's latest instruction) in the session directory. Also changes how history compaction works.")
     parser.add_argument("--plan-strategy", choices=planning.PLAN_STRATEGIES, default=None,
-                        help="Planning strategy (implies --plan when given). plan-verify (default): author a plan, review it, and keep the final step only when it calls a tool. plan-verify2: verify with a machine-readable DONE/INCOMPLETE verdict and skip the final step on DONE. plan-verify-step: same as plan-verify, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
+                        help="Planning strategy (implies --plan when given). plan-verify2 (default): author a plan, verify with a machine-readable DONE/INCOMPLETE verdict and skip the final step on DONE. plan-verify: author a plan, review it, and keep the final step only when it calls a tool. plan-verify-step: same as plan-verify, but always run and keep one final step. open-plan: the agent maintains its own plan document in --allowed-dir/.mini and the loop does not author or review it.")
     parser.add_argument("--strict-verify", action="store_true",
                         help="Use the evidence-based strict verification prompt for every planning verify/review stage (plan-verify, plan-verify2, plan-verify-step) and also verify after open-plan work settles. Unproven requirements count as unfinished.")
     parser.add_argument("--runtime-strategy", choices=recovery.RUNTIME_STRATEGIES,
@@ -191,6 +191,8 @@ def parse_args():
 
     parser.add_argument("--all", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background")
     parser.add_argument("--all-last", action="store_true", help="Enable: --plan, --enable-subagents, --enable-shell, --skills, --auto-mode, --sudo, --background, --load-last-session")
+    parser.add_argument("--super", action="store_true",
+                        help="The kitchen-sink preset: --plan with plan-verify2 and strict verification, --enable-shell/--enable-subagents/--skills/--sudo/--background, --auto-mode, --runtime-strategy prompt-change, --dynamic-todo-tracking, and the DeepSeek defaults (model deepseek-flash, url https://api.deepseek.com) unless --model/--url are given explicitly. The API key is loaded from the environment or the per-model archive, never hard-coded.")
 
     # Output verbosity
     parser.add_argument("--verbose", action="store_true", help="Print the full, detailed output. Without it (default), only user/assistant turns, token usage and tool calls are shown.")
@@ -208,6 +210,20 @@ def parse_args():
 
     if args.all_last:
         args.load_last_session = True
+
+    if args.super:
+        # Apply the feature/runtime profile while preserving an explicit
+        # --model/--url. The API key is never part of the preset.
+        for attr, value in settings_mod.SUPER_PRESET.items():
+            if attr == "model":
+                if getattr(args, "model", None) is None:
+                    args.model = value
+            elif attr == "url":
+                if getattr(args, "url", None) == DEFAULT_MODEL_URL:
+                    args.url = value
+            else:
+                setattr(args, attr, value)
+        args.plan = True
 
     # A planning strategy is only meaningful in plan mode, so asking for one
     # implies the flag (the banner and help then agree with the session).
@@ -2026,17 +2042,16 @@ class AgentSession:
 
         The planning *strategy* changes the plan/review wiring only:
 
-          * ``plan-verify`` (default) -- author a plan, review it when the work
-            settles, then keep the post-review step only when it calls a tool.
-            A no-tool response is shown to the user and ends the turn without
-            being appended.
-          * ``plan-verify2`` -- author a plan, then verify completion with one
+          * ``plan-verify2`` (default) -- author a plan, then verify completion with one
             machine-readable verdict (``STATUS: DONE`` / ``INCOMPLETE``). DONE
             ends the turn immediately, with no post-review step. An unfinished
             verdict re-queues the outstanding work and lets the agent act; a
             second verify follows when the work settles again. If the agent
             makes no tool call after an unfinished verdict, the turn ends
             instead of verifying forever.
+          * ``plan-verify`` -- author a plan, review it when the work settles,
+            then keep the post-review step only when it calls a tool. A no-tool
+            answer is shown to the user and ends the turn without being stored.
           * ``plan-verify-step`` -- same plan and review, but always run one
             extra step and keep whatever that step says.
           * ``open-plan`` -- the agent owns a plan document and maintains it
@@ -3112,6 +3127,18 @@ class AgentSession:
         for attr, value in settings_mod.ALL_PRESET.items():
             self.settings.values[attr] = value
 
+    def _stage_super_preset(self):
+        for attr, value in settings_mod.SUPER_PRESET.items():
+            self.settings.values[attr] = value
+
+    def _apply_super_settings(self):
+        self._stage_super_preset()
+        parsed = [(spec, self.settings.values.get(spec.attr, spec.default))
+                  for spec in settings_mod.SPECS if spec.attr != "api_key"]
+        self._apply_parsed_settings(
+            parsed, {spec.name for spec, _ in parsed}, announce=False)
+        self.console.note("--super preset applied.", "ok")
+
     def _apply_all_settings(self):
         self._stage_all_preset()
         parsed = [(spec, self.settings.values.get(spec.attr, spec.default))
@@ -3150,7 +3177,7 @@ class AgentSession:
     def _handle_settings_command(self, arg):
         arg = (arg or "").strip()
         preset = arg.lower()
-        tui_preset = preset in ("all", "a", "default", "def")
+        tui_preset = preset in ("all", "a", "default", "def", "super")
         if ((not arg or tui_preset) and self.tui_active
                 and hasattr(self.console, "settings_pick")):
             immutable = [f"{name}: cannot change ({desc})"
@@ -3165,6 +3192,9 @@ class AgentSession:
             elif preset in ("all", "a"):
                 # Stage the same feature flags as the CLI --all preset.
                 self._stage_all_preset()
+            elif preset == "super":
+                self._stage_super_preset()
+                state["dirty"] = True
 
             def stage_change(row, value, rows):
                 if not self._change_setting_inline(row, value, rows):
@@ -3186,6 +3216,13 @@ class AgentSession:
                 self.console.note(
                     "--all preset staged; press s to save.", "info")
 
+            def super_preset(rows):
+                self._stage_super_preset()
+                state["dirty"] = True
+                rows[:] = self.settings.rows()
+                self.console.note(
+                    "--super preset staged; press s to save.", "info")
+
             def save(rows):
                 nonlocal snapshot
                 if not self._commit_staged_settings(snapshot):
@@ -3203,7 +3240,7 @@ class AgentSession:
                     self.settings.rows(), immutable, selected=selected,
                     on_change=stage_change, on_save=save,
                     dirty=lambda: state["dirty"], on_defaults=defaults,
-                    on_all=all_preset)
+                    on_all=all_preset, on_super=super_preset)
                 if row is None:
                     if not state["dirty"]:
                         return
@@ -3241,6 +3278,9 @@ class AgentSession:
             return
         if preset in ("all", "a"):
             self._apply_all_settings()
+            return
+        if preset == "super":
+            self._apply_super_settings()
             return
         if not arg:
             for line in self._settings_lines():

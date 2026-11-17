@@ -1,23 +1,21 @@
 """Planning strategies for ``--plan`` mode.
 
-The default is ``plan-verify``, the strategy that won the clean benchmark
-comparison:
+The default is ``plan-verify2``, the machine-readable successor to the
+``plan-verify`` strategy that won the clean benchmark comparison:
 
   * the loop asks the model to author a plan;
-  * after the work settles it asks the model to review the plan;
-  * the post-review step is appended to the transcript only when it calls a
-    tool. A no-tool answer is shown to the user and ends the turn without being
-    stored.
+  * after the work settles it asks for a short verdict ending in
+    ``STATUS: DONE`` / ``STATUS: INCOMPLETE`` / ``STATUS: IN PROGRESS``;
+  * a DONE verdict ends the turn immediately. An unfinished verdict injects
+    the outstanding work and lets the agent act; another verdict follows the
+    next time the work settles. If the agent makes no tool call after an
+    unfinished verdict, the turn ends instead of verifying forever.
 
 Alternative strategies:
 
-  * ``plan-verify2`` -- author a plan, then verify completion with one
-    machine-readable answer (``STATUS: DONE`` / ``STATUS: INCOMPLETE``). A DONE
-    verdict ends the turn immediately, without the post-review step that
-    ``plan-verify`` always runs. An unfinished verdict injects the outstanding
-    work and lets the agent act; another verdict follows the next time the work
-    settles. If the agent makes no tool call after an unfinished verdict, the
-    turn ends instead of verifying forever.
+  * ``plan-verify`` -- author a plan, review it once the work settles, then
+    keep the post-review step only when it calls a tool. A no-tool answer is
+    shown to the user and ends the turn without being stored.
   * ``plan-verify-step`` -- the original behaviour: same plan + review, then
     always run one extra step and keep whatever that step says.
   * ``open-plan`` -- the agent owns a plan document in ``--allowed-dir/.mini``
@@ -36,7 +34,7 @@ PLAN_VERIFY2 = "plan-verify2"
 OPEN_PLAN = "open-plan"
 
 PLAN_STRATEGIES = (PLAN_VERIFY_STEP, PLAN_VERIFY, PLAN_VERIFY2, OPEN_PLAN)
-DEFAULT_PLAN_STRATEGY = PLAN_VERIFY
+DEFAULT_PLAN_STRATEGY = PLAN_VERIFY2
 
 #: Outcomes returned by :func:`parse_verify_status`.
 VERIFY_DONE = "done"

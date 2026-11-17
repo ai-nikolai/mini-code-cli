@@ -169,6 +169,38 @@ ALL_PRESET = {
     "background": True,
 }
 
+#: The kitchen-sink preset: all feature flags plus the preferred planning,
+#: verification and recovery choices. ``model``/``url`` are included because
+#: the preset is the user's "super" profile; an explicit CLI --model/--url
+#: still wins when ``--super`` is parsed. The API key is never hard-coded --
+#: it is loaded from the per-model archive or the environment.
+SUPER_PRESET = {
+    "model": "deepseek-flash",
+    "url": "https://api.deepseek.com",
+    "temperature": DEFAULT_TEMPERATURE,
+    "max_tokens": None,
+    "max_context_tokens": None,
+    "plan": True,
+    "plan_strategy": planning.PLAN_VERIFY2,
+    "strict_verify": True,
+    "allow_nudge": False,
+    "nudge_limit": 1,
+    "compaction_strategy": compaction_mod.DEFAULT_COMPACTION_STRATEGY,
+    "enable_shell": True,
+    "enable_subagents": True,
+    "enable_skills": True,
+    "sudo": True,
+    "ask_permission": False,
+    "background": True,
+    "tool_timeout": DEFAULT_TOOL_TIMEOUT,
+    "llm_timeout": DEFAULT_HTTP_TIMEOUT,
+    "verbose": False,
+    "runtime_strategy": recovery.PROMPT_CHANGE,
+    "dynamic_todo_tracking": True,
+    "auto_mode": True,
+    "scratchpad": False,
+}
+
 
 def _bool_value(raw):
     text = str(raw).strip().lower()

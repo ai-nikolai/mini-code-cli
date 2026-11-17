@@ -757,6 +757,25 @@ class SettingsCommandTest(unittest.TestCase):
         self.assertTrue(self.session.args.background)
         self.assertTrue(self.session.args.auto_mode)
 
+    def test_settings_super_preset_enables_everything(self):
+        self.session._handle_settings_command("super")
+        self.assertTrue(self.session.args.plan)
+        self.assertEqual(self.session.args.plan_strategy, "plan-verify2")
+        self.assertTrue(self.session.args.strict_verify)
+        self.assertFalse(self.session.args.allow_nudge)
+        self.assertTrue(self.session.args.enable_shell)
+        self.assertTrue(self.session.args.enable_subagents)
+        self.assertTrue(self.session.args.enable_skills)
+        self.assertTrue(self.session.args.sudo)
+        self.assertTrue(self.session.args.background)
+        self.assertTrue(self.session.args.auto_mode)
+        self.assertEqual(self.session.args.runtime_strategy, "prompt-change")
+        self.assertTrue(self.session.args.dynamic_todo_tracking)
+        self.assertEqual(self.session.settings.values["model"],
+                         "deepseek-flash")
+        self.assertEqual(self.session.settings.values["url"],
+                         "https://api.deepseek.com")
+
     def test_settings_default_preset_keeps_model_url_and_api_key(self):
         self.session.settings.use_key("keep-key", persist=False)
         model = self.session.settings.values["model"]

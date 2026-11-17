@@ -1350,7 +1350,7 @@ class TuiConsole(Console):
 
     def _pick_index(self, draw, count, default=0, allow_exit_word=False,
                     on_left=None, on_right=None, on_save=None, on_all=None,
-                    on_defaults=None):
+                    on_defaults=None, on_super=None):
         """Run a blocking raw-key picker and return a 0-based index.
 
         ``draw(selected)`` renders the overlay. Up/down move, a digit jumps to
@@ -1399,6 +1399,10 @@ class TuiConsole(Console):
                     continue
                 if raw in (b"d", b"D") and on_defaults is not None:
                     on_defaults()
+                    draw(selected)
+                    continue
+                if raw in (b"p", b"P") and on_super is not None:
+                    on_super()
                     draw(selected)
                     continue
                 if raw in (b"s", b"S") and on_save is not None:
@@ -1486,7 +1490,7 @@ class TuiConsole(Console):
 
     def settings_pick(self, rows, immutable_lines=(), selected=0,
                       on_change=None, on_save=None, dirty=False,
-                      on_defaults=None, on_all=None):
+                      on_defaults=None, on_all=None, on_super=None):
         """Show the settings table and return the selected row, or None.
 
         Up/down or a number select, Enter opens the focused editor, left/right
@@ -1496,8 +1500,9 @@ class TuiConsole(Console):
         plan and plan-strategy) stay in sync. ``on_save(rows)`` persists the
         staged batch and refreshes the table. ``dirty`` may be a bool or a
         callable; the header shows a green ``saved`` or orange ``unsaved`` badge.
-        ``a`` calls ``on_all(rows)`` (the CLI ``--all`` preset) and ``d``
-        calls ``on_defaults(rows)`` to stage the defaults.
+        ``a`` calls ``on_all(rows)`` (the CLI ``--all`` preset), ``p`` calls
+        ``on_super(rows)`` (the CLI ``--super`` preset) and ``d`` calls
+        ``on_defaults(rows)`` to stage the defaults.
         """
         if not self._active or not rows:
             return None
@@ -1570,7 +1575,7 @@ class TuiConsole(Console):
             status = (("unsaved", "yellow") if is_dirty
                       else ("saved", "green"))
             self._picker_window(
-                "↑↓←→ Enter · s save · a --all · d default · q",
+                "↑↓←→ Enter · s save · a --all · p super · d default · q",
                 body, selected_body, status=status)
 
         def change(selected, step):
@@ -1613,11 +1618,16 @@ class TuiConsole(Console):
             if on_all is not None:
                 on_all(rows)
 
+        def super_preset():
+            if on_super is not None:
+                on_super(rows)
+
         index = self._pick_index(
             draw, total, start, on_left=left, on_right=right,
             on_save=save if on_save is not None else None,
             on_all=all_preset if on_all is not None else None,
-            on_defaults=defaults if on_defaults is not None else None)
+            on_defaults=defaults if on_defaults is not None else None,
+            on_super=super_preset if on_super is not None else None)
         return None if index is None else combined()[index]
 
     def read_secret(self, prompt_text="API key: "):

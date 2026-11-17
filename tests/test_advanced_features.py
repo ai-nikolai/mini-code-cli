@@ -344,9 +344,9 @@ class PlanStrategyTest(_AdvancedCase):
         session = self.new_session(plan=False, plan_strategy="open-plan")
         self.assertTrue(session.plan_mode)
 
-    def test_plan_mode_defaults_to_plan_verify(self):
+    def test_plan_mode_defaults_to_plan_verify2(self):
         session = self.new_session(plan=True)
-        self.assertEqual(session.plan_strategy, "plan-verify")
+        self.assertEqual(session.plan_strategy, "plan-verify2")
 
     def test_generation_budget_defaults_to_32k(self):
         session = self.new_session()
@@ -788,7 +788,7 @@ class WelcomeBannerTest(_AdvancedCase):
     def test_banner_marks_planning_off_when_plan_mode_is_disabled(self):
         out = self._welcome(compaction_strategy="summarise")
         self.assertIn("compaction  : summarise", out)
-        self.assertIn("planning    : plan-verify (plan mode off)", out)
+        self.assertIn("planning    : plan-verify2 (plan mode off)", out)
 
     def test_welcome_shows_the_ascii_mark(self):
         out = self._welcome()
@@ -809,6 +809,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertFalse(args.strict_verify)
         self.assertEqual(args.runtime_strategy, "normal")
         self.assertFalse(args.dynamic_todo_tracking)
+        self.assertFalse(args.super)
 
     def test_new_flags_are_accepted(self):
         with mock.patch.object(
@@ -829,6 +830,32 @@ class ParseArgsTest(unittest.TestCase):
         self.assertTrue(args.dynamic_todo_tracking)
         # A strategy implies plan mode so the banner and the session agree.
         self.assertTrue(args.plan)
+
+    def test_super_preset_sets_the_kitchen_sink(self):
+        with mock.patch.object(sys, "argv", ["mini-code", "--super"]):
+            args = agent_loop.parse_args()
+        self.assertTrue(args.plan)
+        self.assertEqual(args.plan_strategy, "plan-verify2")
+        self.assertTrue(args.strict_verify)
+        self.assertTrue(args.enable_shell)
+        self.assertTrue(args.enable_subagents)
+        self.assertTrue(args.enable_skills)
+        self.assertTrue(args.sudo)
+        self.assertTrue(args.background)
+        self.assertTrue(args.auto_mode)
+        self.assertEqual(args.runtime_strategy, "prompt-change")
+        self.assertTrue(args.dynamic_todo_tracking)
+        self.assertEqual(args.model, "deepseek-flash")
+        self.assertEqual(args.url, "https://api.deepseek.com")
+
+    def test_super_preset_keeps_explicit_model_and_url(self):
+        with mock.patch.object(
+                sys, "argv",
+                ["mini-code", "--super", "--model", "local-model",
+                 "--url", "http://127.0.0.1:30000"]):
+            args = agent_loop.parse_args()
+        self.assertEqual(args.model, "local-model")
+        self.assertEqual(args.url, "http://127.0.0.1:30000")
 
     def test_strict_verify_alone_implies_plan_mode(self):
         with mock.patch.object(sys, "argv",

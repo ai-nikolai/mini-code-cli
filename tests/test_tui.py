@@ -487,6 +487,23 @@ class TuiConsoleTest(unittest.TestCase):
 
         self.assertEqual(events, ["all"])
 
+    def test_settings_picker_p_requests_the_super_preset(self):
+        console = self.console()
+        rows = settings.Settings().rows()
+        events = []
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))), \
+                mock.patch.object(tui.TuiConsole, "start_scroll_listener"):
+            console.start_tui()
+            self._feed_pick(
+                console, b"pq",
+                lambda: console.settings_pick(
+                    rows, on_super=lambda current: events.append("super")))
+            console.stop_tui()
+
+        self.assertEqual(events, ["super"])
+
     def test_settings_picker_left_right_changes_bool_in_place(self):
         console = self.console()
         rows = settings.Settings().rows()

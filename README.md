@@ -87,7 +87,8 @@ given a reference implementation.
 | `--tui [auto\|on\|off]` | `auto` | fixed full-screen dashboard. `auto` enables it only on a known interactive TTY; `on` forces it; `off` uses the scrolling console |
 | `--skills` | off | enable the `.mini` skills directory (`skill.md`s, `SKILLS.md`, runnable scripts). **`run_skill` executes those Python scripts — arbitrary code execution, even without `--enable-shell`**; only enable it for a directory you trust |
 | `-p`, `--plan` | off | plan mode (`CURRENT_GOAL.md` / `CURRENT_PLAN.md`, printed plan, `/plan`, `/skip-plan`) |
-| `--plan-strategy NAME` | `plan-verify` | `plan-verify`, `plan-verify2`, `plan-verify-step` or `open-plan` (implies `--plan`) |
+| `--super` | off | kitchen-sink preset: plan-verify2 + strict verification, all shell/sub-agent/skill/sudo/background features, auto-mode, prompt-change recovery and dynamic todos; also selects DeepSeek `deepseek-flash` unless `--model`/`--url` are explicit. The API key is never hard-coded |
+| `--plan-strategy NAME` | `plan-verify2` | `plan-verify2`, `plan-verify`, `plan-verify-step` or `open-plan` (implies `--plan`) |
 | `--allow-nudge` | off | plan mode only: ask the model to continue (or reply DONE) when it stops without a tool call, before running the plan review |
 | `--nudge-limit N` | 1 | maximum continuation nudges per text-only stop with `--allow-nudge` |
 | `--strict-verify` | off | use the evidence-based verification prompt for every plan review/verify stage; also verifies after `open-plan` work settles. Unproven requirements count as unfinished |
@@ -310,9 +311,10 @@ left/right toggle an on/off setting or rotate through a fixed-choice setting
 box (or its option list), where `exit` or Esc returns to the settings table. The full
 table (including immutable rows) is always shown. `a` stages the same feature flags
 as the CLI `--all` preset (plan, shell, sub-agents, skills, auto-mode, sudo,
-background); `d` stages all defaults while keeping the model, URL and API key. The
+background); `p` stages the CLI `--super` preset; `d` stages all defaults while
+keeping the model, URL and API key. The
 same presets are
-available as `/settings all` and `/settings default`. Changes are staged in the
+available as `/settings all`, `/settings super` and `/settings default`. Changes are staged in the
 table until you press `s` to save; `q` quits, and if there are unsaved changes it
 asks whether to save them or cancel the changes. The table header shows a green
 `saved` or yellow `unsaved` badge. Plan
@@ -383,8 +385,8 @@ on for later turns).
 
 | Strategy | What happens |
 | --- | --- |
-| `plan-verify` (default) | Author a plan, review it once the work settles, then keep the post-review step only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
-| `plan-verify2` | Author a plan, then verify completion with one machine-readable verdict (`STATUS: DONE` / `STATUS: INCOMPLETE` / `STATUS: IN PROGRESS`). `DONE` ends the turn immediately, without the post-review step; an unfinished verdict re-queues the outstanding work and the agent continues, with another verify after it settles. |
+| `plan-verify2` (default) | Author a plan, then verify completion with one machine-readable verdict (`STATUS: DONE` / `STATUS: INCOMPLETE` / `STATUS: IN PROGRESS`). `DONE` ends the turn immediately, without the post-review step; an unfinished verdict re-queues the outstanding work and the agent continues, with another verify after it settles. |
+| `plan-verify` | Author a plan, review it once the work settles, then keep the post-review step only when it calls a tool. A no-tool answer is shown to you and ends the turn without being appended to the transcript. |
 | `plan-verify-step` | The original behaviour: same plan + review, then always run one extra step and keep whatever that step says. |
 | `open-plan` | The agent owns a plan document at `.mini/PLAN.md` inside `--allowed-dir`, reads and updates it with the normal file tools, and the loop neither authors nor reviews a plan. |
 

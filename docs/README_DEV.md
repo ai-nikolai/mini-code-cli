@@ -108,8 +108,8 @@ dir, never into a real `.mini` (that one is yours: your skills folder and `last_
   `report.md` channel and the intersection of child permissions with the parent's.
 - **`test_advanced_features.py`** — the scratchpad (`SCRATCHPAD.md` + prompt), the
   compaction-strategy registry and message shapes (`summarise` / `predict-files` /
-  `predict-messages`), and the planning strategies (`plan-verify` (default) /
-  `plan-verify2` / `plan-verify-step` / `open-plan`), including strict verification and
+  `predict-messages`), and the planning strategies (`plan-verify2` (default) /
+  `plan-verify` / `plan-verify-step` / `open-plan`), including strict verification and
   the runtime recovery prompts (`prompt-change` / `prompt-change-plan`).
 - **`test_recovery.py`** — the pure runtime-recovery helpers: failure detection,
   approach keys, and the recovery prompt text.
