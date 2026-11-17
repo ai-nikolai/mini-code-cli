@@ -1655,16 +1655,17 @@ class AgentSession:
         the DENY-tier limits). We render it as a red box so it stands out on any
         real terminal (it degrades to a plain ASCII box when colour is off).
         """
-        self.console.print_box(
-            [
-                "SUDO MODE: the agent will NEVER ask for permission.",
-                "All tool calls and shell commands run automatically and unattended.",
-                "Only clearly-destructive (DENY-tier) commands are still refused.",
-                "You are responsible for everything it does on this machine.",
-            ],
-            title="DANGER",
-            fg="red",
-        )
+        lines = [
+            "SUDO MODE: the agent will NEVER ask for permission.",
+            "All tool calls and shell commands run automatically and unattended.",
+            "Only clearly-destructive (DENY-tier) commands are still refused.",
+            "You are responsible for everything it does on this machine.",
+        ]
+        if self.tui_active:
+            for line in lines:
+                self.console.note(line, "error")
+        else:
+            self.console.print_box(lines, title="DANGER", fg="red")
 
     def _tui_info_line(self):
         """A one-line session summary for the fixed dashboard."""
@@ -1745,7 +1746,10 @@ class AgentSession:
         API key, unrestricted shell execution and --sudo are exactly the things
         that must not be hidden behind --verbose.
         """
-        self.console.announce_api_key(present=bool(self.api_key))
+        self.console.announce_api_key(
+            present=bool(self.api_key),
+            source=self.settings.api_key_env,
+            model=self.model or "")
 
         if shell_execution_enabled(self.args):
             self.console.announce_shell(

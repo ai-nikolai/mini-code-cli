@@ -873,9 +873,11 @@ class Console:
         # unchanged.
         self.banner(f"MiniCodeCLI v{version} - goodbye", lines, fg="yellow")
 
-    def announce_api_key(self, present):
+    def announce_api_key(self, present, source="", model=""):
         if present:
-            self.note("API key found (MINI_CODE_API_KEY).", "ok")
+            where = f" for {model}" if model else ""
+            origin = f" ({source})" if source else ""
+            self.note(f"API key found{where}{origin}.", "ok")
         else:
             self.note("No API key found. Set MINI_CODE_API_KEY='sk-...' if your server needs one.",
                       "warn")

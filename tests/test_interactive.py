@@ -1191,6 +1191,19 @@ class FarewellBoxTest(_SessionCase):
         bottom = [line for line in lines if line.startswith("+")][-1]
         self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
 
+    def test_api_key_found_is_announced_for_the_selected_model(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+        session.api_key = "sk-test"
+        session.settings.api_key_env = "MINI_CODE_API_KEY"
+        session.model = "test-model"
+
+        session.print_announcements()
+
+        self.assertIn(
+            "API key found for test-model (MINI_CODE_API_KEY).",
+            self.output())
+
     def test_plain_startup_prints_the_mark_before_and_after_the_decision(self):
         session = AgentSession(make_args(self.workdir, self.cache_dir),
                                console=self.console())

@@ -93,6 +93,9 @@ class TuiConsole(Console):
         self._status_line = ""
         self._notice_line = ""
         self._notices = []
+        # Notes/warnings emitted before the first turn belong in the core
+        # view, above the conversation (or its "no conversation yet" hint).
+        self._startup_notices = []
         self._overlay_lines = []
         # Command output overlays are anchored to the bottom (like a rolling
         # log). Interactive pickers set this so their table starts at the top
@@ -228,6 +231,10 @@ class TuiConsole(Console):
     def note(self, msg, level="info"):
         if not self._active:
             return super().note(msg, level)
+        if not self._turns and not self._overlay_lines:
+            self._startup_notices.append((level, str(msg)))
+            self.render()
+            return
         self._notices.append((level, str(msg)))
         del self._notices[:-3]
         self.render()
@@ -481,6 +488,11 @@ class TuiConsole(Console):
         if self._overlay_lines:
             return [self._fit(line, width) for line in self._overlay_lines]
         lines = []
+        if self._startup_notices:
+            lines.extend(self._notice_style(level, msg)
+                         for level, msg in self._startup_notices)
+            lines.append(self.style(self.glyph("h") * max(width, 1),
+                                    dim=True))
         assistant_counts = {}
         for record in self._turns:
             if record.get("role") == "Assistant":
@@ -514,7 +526,7 @@ class TuiConsole(Console):
             lines.append(self.style(self.glyph("h") * max(width, 1), dim=True))
         if lines and self._turns:
             lines.pop()             # no separator after the newest turn
-        if not lines:
+        if not self._turns:
             lines.append(self.style(
                 "No conversation yet. Type a message; /help lists commands.",
                 dim=True))

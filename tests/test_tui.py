@@ -802,6 +802,8 @@ class TuiConsoleTest(unittest.TestCase):
                 tui.shutil, "get_terminal_size",
                 return_value=os.terminal_size((50, 16))):
             console.start_tui()
+            # Once a turn exists, notes are the transient bottom notices.
+            console.turn("You", "hello")
             console.note("first warning", "warn")
             console.note("second warning", "warn")
             console.note("third warning", "warn")
@@ -818,6 +820,25 @@ class TuiConsoleTest(unittest.TestCase):
             self.assertTrue(any(set(line.strip()) == {separator}
                                 for line in plain[:warning_index]))
             console.stop_tui()
+
+    def test_startup_notes_are_above_the_first_turn(self):
+        console = self.console()
+        with mock.patch.object(
+                tui.shutil, "get_terminal_size",
+                return_value=os.terminal_size((60, 20))):
+            console.start_tui()
+            console.note("API key found for test-model.", "ok")
+            console.note("Shell execution is ENABLED.", "warn")
+            plain = [ui._ANSI_RE.sub("", line)
+                     for line in console._content_lines(50)]
+            console.stop_tui()
+        text = "\n".join(plain)
+        self.assertIn("API key found for test-model.", text)
+        self.assertIn("Shell execution is ENABLED.", text)
+        self.assertLess(text.index("API key found"),
+                        text.index("No conversation yet"))
+        self.assertLess(text.index("Shell execution"),
+                        text.index("No conversation yet"))
 
     def test_escape_does_not_dismiss_an_active_question(self):
         console = self.console()
