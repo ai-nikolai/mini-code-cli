@@ -281,6 +281,23 @@ class Settings:
         self.key_entered = False
         return True
 
+    def find_key_for_url(self, url):
+        """Return any stored ``(key, env, persisted)`` for one endpoint.
+
+        Used to query a provider's model list before the model (and therefore
+        the exact per-model key) has been chosen.
+        """
+        prefix = f"{str(url or '').rstrip('/')}|"
+        for kid, key in self.api_keys.items():
+            if kid.startswith(prefix) and key:
+                return key, "", kid in self.persisted_key_ids
+        for kid, env in self.api_key_envs.items():
+            if kid.startswith(prefix):
+                key = os.environ.get(env, "")
+                if key:
+                    return key, env, False
+        return "", "", False
+
     def forget_key(self, url=None, model=None):
         """Drop the stored key for one endpoint/model."""
         kid = key_id(
@@ -658,8 +675,11 @@ def _ask_key(console, settings, provider):
 
 def _deepseek_model_choices(settings):
     """Live DeepSeek model ids, falling back to the stable aliases."""
+    api_key = settings.api_key
+    if not api_key:
+        api_key, _env, _persisted = settings.find_key_for_url(DEEPSEEK_URL)
     served = utils.list_served_models(
-        DEEPSEEK_URL, api_key=settings.api_key or None,
+        DEEPSEEK_URL, api_key=api_key or None,
         timeout=MODEL_CHECK_TIMEOUT)
     models = []
     for name in list(served or ()) + list(DEEPSEEK_MODELS):
@@ -763,15 +783,11 @@ def first_run(settings, console):
         _finish_key_for_model(settings, console, "localhost")
     elif choice == 2:
         settings.values["url"] = DEEPSEEK_URL
-        # Ask for the key first so the live model list can be queried with it;
-        # if the key is skipped the stable aliases are offered instead.
-        _ask_key(console, settings, "deepseek")
+        # Choose the model first: a stored key for that model can then be
+        # loaded without asking. The live list is queried with any stored
+        # DeepSeek key, or the stable aliases are offered when none exists.
         _ask_deepseek_model(settings, console)
-        # The key prompt already happened above; now load/remember the key
-        # for the selected model and verify it.
-        _finish_key_for_model(
-            settings, console, "deepseek",
-            ask_if_missing=not settings.key_asked)
+        _finish_key_for_model(settings, console, "deepseek")
     else:
         settings.values["url"] = (
             _ask(console, f"URL [{current_url}]: ") or current_url)

@@ -441,6 +441,20 @@ class FirstRunWizardTest(unittest.TestCase):
         self.assertEqual(value.values["url"], "http://custom:8000")
         self.assertEqual(value.values["model"], "my-model")
 
+    def test_deepseek_reuses_a_stored_key_for_the_selected_model(self):
+        value = settings.Settings()
+        kid = settings.key_id(settings.DEEPSEEK_URL, "deepseek-chat")
+        value.api_keys[kid] = "stored-key"
+        value.persisted_key_ids.add(kid)
+        console = _WizardConsole(choice_answers=[2, 1],
+                                 key="should-not-be-asked")
+        with mock.patch.object(utils, "list_served_models",
+                               return_value=None):
+            settings.first_run(value, console)
+
+        self.assertEqual(value.api_key, "stored-key")
+        self.assertEqual(console.secrets, [])
+
     def test_selecting_a_model_loads_its_stored_key(self):
         value = settings.Settings()
         value.values["url"] = settings.DEEPSEEK_URL
