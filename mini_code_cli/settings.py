@@ -6,8 +6,9 @@ A session owns one small JSON file next to its history::
 
 There is deliberately no global profile.  A bare ``mini-code`` imports the
 settings of the most recent session (the existing ``.mini/last_session.json``
-pointer), asks only for values that cannot be inferred, and writes them into
-the new session.  The file is mode 0600 because it may contain an API key.
+pointer), re-checks the saved model/key, and asks the provider/model questions
+before a new session.  The file is mode 0600 because it may contain API keys
+for one or more endpoint/model pairs.
 
 Precedence is: explicit CLI arguments, environment, the previous session's
 settings, then built-in defaults.
@@ -16,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -31,7 +31,6 @@ from .config import (
     DEFAULT_MODEL_URL,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOOL_TIMEOUT,
-    SESSION_DIRNAME,
 )
 from .persistence import find_last_session_dir, resolve_session_dir
 
@@ -62,22 +61,16 @@ class SettingSpec:
     kind: str                         # str | int | float | bool | choice
     default: Any
     choices: tuple[str, ...] = ()
-    label: str = ""
     mutable: bool = True
     cache: str = "none"
-
-    def display(self):
-        return self.label or self.name
 
 
 def _specs():
     return (
-        SettingSpec("model", "model", "str", None, cache="model",
-                    label="model"),
-        SettingSpec("url", "url", "str", DEFAULT_MODEL_URL, cache="model",
-                    label="url"),
+        SettingSpec("model", "model", "str", None, cache="model"),
+        SettingSpec("url", "url", "str", DEFAULT_MODEL_URL, cache="model"),
         SettingSpec("api-key", "api_key", "str", "", mutable=True,
-                    cache="model", label="API key"),
+                    cache="model"),
         SettingSpec("temperature", "temperature", "float",
                     DEFAULT_TEMPERATURE),
         SettingSpec("max-tokens", "max_tokens", "int", None),
@@ -96,14 +89,13 @@ def _specs():
         SettingSpec("verbose", "verbose", "bool", False),
         SettingSpec("plan", "plan", "bool", False, cache="prompt"),
         SettingSpec("enable-shell", "enable_shell", "bool", False,
-                    cache="tools", label="shell"),
+                    cache="tools"),
         SettingSpec("enable-subagents", "enable_subagents", "bool", False,
-                    cache="tools", label="sub-agents"),
+                    cache="tools"),
         SettingSpec("enable-skills", "enable_skills", "bool", False,
-                    cache="tools", label="skills"),
+                    cache="tools"),
         SettingSpec("sudo", "sudo", "bool", False),
-        SettingSpec("ask-permission", "ask_permission", "bool", False,
-                    label="ask permission"),
+        SettingSpec("ask-permission", "ask_permission", "bool", False),
         SettingSpec("background", "background", "bool", False, cache="tools"),
         SettingSpec("scratchpad", "scratchpad", "bool", False, cache="prompt"),
         SettingSpec("auto-mode", "auto_mode", "bool", False),
@@ -237,9 +229,6 @@ class Settings:
             self.values.setdefault(spec.attr, spec.default)
 
     # -- API keys by endpoint/model ---------------------------------------
-    def current_key_id(self):
-        return key_id(self.values.get("url"), self.values.get("model"))
-
     def key_for(self, url=None, model=None):
         """Return ``(key, env_name, persisted)`` for one endpoint/model."""
         url = self.values.get("url") if url is None else url
@@ -281,10 +270,6 @@ class Settings:
         """Load a stored key for one endpoint/model; False if none exists."""
         key, env, persisted = self.key_for(url, model)
         if not key and not env:
-            self.api_key = ""
-            self.api_key_env = ""
-            self.persist_api_key = False
-            self.key_entered = False
             return False
         self.api_key = key
         self.api_key_env = env
@@ -390,11 +375,9 @@ class Settings:
         """Persist this session's settings with mode 0600."""
         if not self.enabled:
             return None
-        if self.key_entered and (self.api_key or self.api_key_env):
-            # Only persist a key that was explicitly supplied for the current
-            # endpoint/model. A key merely loaded from elsewhere must not be
-            # copied onto a newly selected model.
-            self.remember_key()
+        # Keys are remembered when supplied/loaded; save only persists the
+        # entries the user opted to write. Re-associating the active key here
+        # would copy an explicit CLI key onto whatever model is current.
         payload = {"version": SETTINGS_VERSION, "values": dict(self.values)}
         literal = {kid: key for kid, key in self.api_keys.items()
                    if kid in self.persisted_key_ids and key}
@@ -539,33 +522,15 @@ class Settings:
             rows.append({
                 "number": index,
                 "name": spec.name,
-                "label": spec.display(),
                 "value": formatted,
                 "display": display,
                 "is_default": is_default,
                 "raw": value,
-                "kind": spec.kind,
-                "choices": spec.choices,
                 "mutable": spec.mutable,
                 "cache": spec.cache,
                 "spec": spec,
             })
         return rows
-
-    def set_value(self, name, raw):
-        """Validate and store one value; returns ``(spec, parsed)``."""
-        canonical = BY_NAME.get(name) or BY_NAME.get(ALIASES.get(name, ""))
-        if canonical is None:
-            raise ValueError(f"unknown setting {name!r}")
-        if not canonical.mutable:
-            raise ValueError(f"{canonical.name} cannot be changed in this session")
-        parsed = parse_value(canonical, raw)
-        if canonical.attr == "api_key":
-            self.api_key = parsed
-            self.persist_api_key = True
-        else:
-            self.values[canonical.attr] = parsed
-        return canonical, parsed
 
     def by_number(self, number):
         for row in self.rows():
@@ -582,10 +547,6 @@ def interactive_startup(args):
     """
     return (args.prompt is None and sys.stdin.isatty()
             and not getattr(args, "no_settings", False))
-
-
-#: Backwards-compatible private alias used inside this module.
-_interactive = interactive_startup
 
 
 def _source_session(args):
@@ -798,10 +759,6 @@ def first_run(settings, console):
     return settings
 
 
-#: Backwards-compatible private name used by the existing tests.
-_first_run = first_run
-
-
 def resolve_for_startup(args, console=None):
     """Load previous settings, fill missing values, and apply them to ``args``."""
     console = console or ui.console
@@ -815,7 +772,7 @@ def resolve_for_startup(args, console=None):
     saved = Settings.load(source) if source else Settings()
     settings = Settings.resolve(args, saved)
 
-    interactive = _interactive(args)
+    interactive = interactive_startup(args)
     missing_model = not (settings.values.get("model")
                          or settings.values.get("url") != DEFAULT_MODEL_URL)
     invalid_model = False

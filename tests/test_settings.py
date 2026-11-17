@@ -52,6 +52,23 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertEqual(payload["api_key_envs"][kid],
                          "MINI_CODE_API_KEY")
 
+    def test_legacy_single_key_migrates_to_the_model_map(self):
+        payload = {
+            "version": 1,
+            "values": {"url": "https://api.deepseek.com",
+                       "model": "deepseek-chat"},
+            "api_key": "legacy-key",
+        }
+        path = os.path.join(self.session, "settings.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+
+        loaded = settings.Settings.load(self.session)
+        kid = settings.key_id("https://api.deepseek.com", "deepseek-chat")
+        self.assertEqual(loaded.api_key, "legacy-key")
+        self.assertEqual(loaded.api_keys[kid], "legacy-key")
+        self.assertIn(kid, loaded.persisted_key_ids)
+
     def test_keys_are_stored_per_endpoint_and_model(self):
         value = settings.Settings()
         value.values["url"] = "https://api.example.test"
@@ -95,6 +112,22 @@ class SettingsStoreTest(unittest.TestCase):
         value = settings.Settings.resolve(args, saved)
         self.assertEqual(value.api_key, "")
 
+    def test_save_does_not_copy_a_key_to_a_new_model(self):
+        value = settings.Settings()
+        value.values["url"] = "https://api.example.test"
+        value.values["model"] = "model-a"
+        value.use_key("key-a", persist=True)
+        value.values["model"] = "model-b"
+        value.save(self.session)
+
+        with open(os.path.join(self.session, "settings.json"),
+                  encoding="utf-8") as handle:
+            payload = json.load(handle)
+        kid_a = settings.key_id("https://api.example.test", "model-a")
+        kid_b = settings.key_id("https://api.example.test", "model-b")
+        self.assertIn(kid_a, payload["api_keys"])
+        self.assertNotIn(kid_b, payload["api_keys"])
+
     def test_cli_key_wins_and_is_not_persisted_by_default(self):
         args = make_args(self.cache, self.cache)
         args.api_key = "cli-secret"
@@ -135,11 +168,24 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertFalse(args.plan)
         self.assertIsNone(args.plan_strategy)
 
+    def test_no_settings_does_not_prompt_or_save(self):
+        args = make_args(self.cache, self.cache)
+        args.no_settings = True
+        args.prompt = None
+        args.model = None
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+                mock.patch.object(settings, "first_run") as first_run:
+            value = settings.resolve_for_startup(args,
+                                                console=silent_console())
+        first_run.assert_not_called()
+        self.assertFalse(value.enabled)
+        self.assertIsNone(value.save(self.session))
+
     def test_non_tty_startup_does_not_prompt(self):
         args = make_args(self.cache, self.cache)
         args.model = None
         with mock.patch("sys.stdin.isatty", return_value=False), \
-                mock.patch.object(settings, "_first_run") as first_run:
+                mock.patch.object(settings, "first_run") as first_run:
             settings.resolve_for_startup(args)
         first_run.assert_not_called()
 
@@ -333,7 +379,7 @@ class FirstRunWizardTest(unittest.TestCase):
         value = settings.Settings()
         with mock.patch.object(utils, "list_served_models",
                                return_value=None):
-            settings._first_run(value, console)
+            settings.first_run(value, console)
 
         self.assertEqual(value.values["url"], "https://api.deepseek.com")
         self.assertEqual(value.values["model"], "deepseek-chat")
@@ -356,7 +402,7 @@ class FirstRunWizardTest(unittest.TestCase):
         value = settings.Settings()
         with mock.patch.object(utils, "list_served_models",
                                return_value=None):
-            settings._first_run(value, console)
+            settings.first_run(value, console)
         with tempfile.TemporaryDirectory() as session:
             path = value.save(session)
             with open(path, encoding="utf-8") as handle:
@@ -381,7 +427,7 @@ class FirstRunWizardTest(unittest.TestCase):
         console = _WizardConsole(choice_answers=[2, 1], key="existing")
         with mock.patch.object(utils, "list_served_models",
                                return_value=None):
-            settings._first_run(value, console)
+            settings.first_run(value, console)
         self.assertEqual(console.choices[0][2], 2)
 
     def test_custom_provider_keeps_current_values_when_blank(self):
@@ -390,7 +436,7 @@ class FirstRunWizardTest(unittest.TestCase):
         value.values["model"] = "my-model"
         value.api_key = "existing"
         console = _WizardConsole(choice=3, answers=["", ""])
-        settings._first_run(value, console)
+        settings.first_run(value, console)
         self.assertEqual(console.choices[0][2], 3)
         self.assertEqual(value.values["url"], "http://custom:8000")
         self.assertEqual(value.values["model"], "my-model")
@@ -452,7 +498,7 @@ class FirstRunWizardTest(unittest.TestCase):
         value = settings.Settings()
         with mock.patch.object(utils, "list_served_models",
                                return_value=None):
-            settings._first_run(value, console)
+            settings.first_run(value, console)
         with tempfile.TemporaryDirectory() as session:
             path = value.save(session)
             with open(path, encoding="utf-8") as handle:
@@ -791,6 +837,17 @@ class SettingsCommandTest(unittest.TestCase):
         self.session._restore_settings(snapshot)
         self.assertFalse(self.session.settings.values["plan"])
         self.assertFalse(self.session.plan_mode)
+
+    def test_explicit_key_survives_a_model_change(self):
+        self.session.settings.use_key("explicit-key", persist=False)
+        kid = settings.key_id(self.session.settings.values["url"],
+                              "different-model")
+        self.session.settings.api_keys[kid] = "stored-key"
+        self.session.settings.persisted_key_ids.add(kid)
+        self.assertTrue(self.session._apply_settings(
+            {"model": "different-model"}, confirm_cache=False,
+            announce=False, stage=True))
+        self.assertEqual(self.session.settings.api_key, "explicit-key")
 
     def test_api_key_edit_is_masked_and_not_stored_by_default(self):
         self.console.read_secret = mock.Mock(return_value="sk-new")

@@ -2665,12 +2665,13 @@ class AgentSession:
                 else:
                     self.settings.values[spec.attr] = value
             names = {spec.attr for spec, _ in parsed}
-            if "api-key" not in names and names & {"model", "url"}:
+            if ("api-key" not in names and names & {"model", "url"}
+                    and not self.settings.key_entered):
                 # A different model can have its own stored key. If it has
                 # none, do not silently keep another model's key; the menu
-                # will ask for one (unless an explicit CLI/env key is active).
-                if (not self.settings.load_key_for()
-                        and not self.settings.key_entered):
+                # will ask for one. An explicit CLI/env/typed key wins over a
+                # stored key for the new model.
+                if not self.settings.load_key_for():
                     self.settings.api_key = ""
                     self.settings.api_key_env = ""
                     self.settings.persist_api_key = False
@@ -2706,12 +2707,12 @@ class AgentSession:
                 self.settings.remember_key()
             else:
                 self.settings.values[spec.attr] = value
-        if "api-key" not in changed_names and changed_names & {"model", "url"}:
+        if ("api-key" not in changed_names and changed_names & {"model", "url"}
+                and not self.settings.key_entered):
             # Load the stored key for the newly selected endpoint/model. If
-            # there is none, drop a key that belonged to the previous model;
-            # an explicit CLI/env key stays active.
-            if (not self.settings.load_key_for()
-                    and not self.settings.key_entered):
+            # there is none, drop a key that belonged to the previous model.
+            # An explicit CLI/env/typed key wins over a stored key.
+            if not self.settings.load_key_for():
                 self.settings.api_key = ""
                 self.settings.api_key_env = ""
                 self.settings.persist_api_key = False
