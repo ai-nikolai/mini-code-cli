@@ -1828,6 +1828,12 @@ class AgentSession:
                     "TUI is not available on this terminal; using the "
                     "scrolling console.", "warn")
 
+        # The plain console shows the mark immediately, even before the resume
+        # offer; print_welcome() shows it again with the session info once a
+        # session has actually started. The TUI has the persistent banner.
+        if not self.tui_active:
+            self.console.print_mark()
+
         # The resume offer comes first. Settings are loaded only after the
         # user chooses to resume or start a session, so the banner and the
         # announcements describe the session that was actually chosen.

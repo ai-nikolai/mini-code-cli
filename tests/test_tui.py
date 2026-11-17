@@ -750,22 +750,18 @@ class TuiConsoleTest(unittest.TestCase):
             console.stop_tui()
         self.assertIn("__  __", content)
         self.assertIn("version 1.0", content)
-        # The mark is a full-width boxed banner above the dashboard box; its
-        # borders fully enclose the ASCII art and the art is centered.
+        # The mark is the same centered, unboxed banner as --tui off, above
+        # the dashboard box.
         art = next(line for line in lines if "__  __" in line)
-        self.assertEqual(len(art), 80)
+        self.assertTrue(art.strip().startswith("__"))
+        self.assertGreater(len(art) - len(art.lstrip(" ")), 2)
         art_index = lines.index(art)
         header_index = next(index for index, line in enumerate(lines)
                             if "Mini-Code" in line)
         self.assertLess(art_index, header_index)
-        self.assertTrue(art.startswith("|"))
-        self.assertTrue(art.rstrip().endswith("|"))
-        inner = art.strip()[1:-1]
-        self.assertGreater(len(inner) - len(inner.lstrip(" ")), 2)
-        top = lines[art_index - 1].strip()
-        bottom = lines[art_index + len(tui.LOGO)].strip()
-        self.assertTrue(top.startswith("+") and top.endswith("+"))
-        self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
+        tagline_index = next(index for index, line in enumerate(lines)
+                             if "minimal coding agent CLI" in line)
+        self.assertLess(tagline_index, header_index)
 
     def test_the_middle_pane_scrolls(self):
         console = self.console()

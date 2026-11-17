@@ -16,8 +16,8 @@ import textwrap
 import threading
 from collections import deque
 
-from .ui import (Console, LOGO, _ANSI_RE, _pad_visual, _read_escape_sequence,
-                 _stop_thread, _visual_len)
+from .ui import (Console, LOGO, TAGLINE, _ANSI_RE, _pad_visual,
+                 _read_escape_sequence, _stop_thread, _visual_len)
 
 
 def tui_mode(value):
@@ -679,10 +679,12 @@ class TuiConsole(Console):
         # The ASCII mark is a persistent banner above every view, not part of
         # the dashboard box: it stays visible while settings are open too.
         banner = self._banner_lines(cols, rows)
-        # On a very short terminal the conversation and input matter more than
-        # the dashboard; the banner + input still leave a usable body.
-        compact_layout = rows < 14
-        if compact_layout:
+        # On a short terminal the conversation and input matter more than the
+        # dashboard; the banner + input still leave a usable body. The hint is
+        # dropped only when even that does not fit.
+        hide_header = rows < 18
+        show_hint = rows >= 14
+        if hide_header:
             header = []
         else:
             summary = [str(line) for line in (self._summary_lines
@@ -722,7 +724,7 @@ class TuiConsole(Console):
         input_title = "Answer" if self._question_active else "You"
         input_fg = "yellow" if self._question_active else "green"
         body_box = list(input_lines)
-        if not compact_layout:
+        if show_hint:
             if self._scroll_offset:
                 hint_text = (f"scrolled {self._scroll_offset}/"
                              f"{self._total_body_lines} lines · "
@@ -773,25 +775,23 @@ class TuiConsole(Console):
         return " " * pad + text
 
     def _banner_lines(self, cols, rows):
-        """Return a centered box containing the persistent ASCII mark.
+        """Return the centered, unboxed ASCII mark used by --tui off.
 
-        The boxed mark is shown above every view (including the focused
-        settings editor); on a short or narrow terminal a compact one-line
-        label is boxed instead so it always fits.
+        The art is skipped on narrow terminals, exactly like the scrolling
+        welcome banner. It is shown above every view, including the focused
+        settings editor.
         """
         art_width = max(_visual_len(line) for line in LOGO)
-        inner = max(cols - 4, 1)
-        if rows >= 18 and cols >= art_width + 8:
-            # Center the block once: centering each logo line separately would
-            # misalign the 42- and 43-column rows relative to each other.
-            pad = max((inner - art_width) // 2, 0)
-            body = [" " * pad + self.style(line, fg="cyan", bold=True)
-                    for line in LOGO]
-        else:
-            label = self.style("MINI CODE", fg="cyan", bold=True)
-            body = [self._center(label, inner)]
-        # Span the terminal; the box border itself is the separator.
-        return self._box(None, body, cols, fg="cyan")
+        if cols < art_width + 4:
+            return []
+        # Center the block once: centering each logo line separately would
+        # misalign the 42- and 43-column rows relative to each other.
+        pad = " " * max((cols - art_width) // 2, 0)
+        lines = [pad + self.style(line, fg="cyan", bold=True)
+                 for line in LOGO]
+        lines.append(pad + self.style(TAGLINE, dim=True))
+        lines.append("")
+        return lines
 
     def _render_edit_locked(self, cols, rows):
         """Draw the focused setting window plus the persistent banner."""

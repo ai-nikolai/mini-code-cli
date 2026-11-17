@@ -1165,7 +1165,7 @@ class FarewellBoxTest(_SessionCase):
         self.assertIn("resume", text)
         self.assertIn("--load-last-session", text)
 
-    def test_the_ascii_mark_is_centered_inside_the_goodbye_box(self):
+    def test_the_ascii_mark_is_centered_above_the_goodbye_box(self):
         session = self.make()
         session.console.emit("")
 
@@ -1178,19 +1178,41 @@ class FarewellBoxTest(_SessionCase):
                    if "MiniCodeCLI v" in line and line.startswith("+"))
         art_index = next(index for index, line in enumerate(lines)
                          if "__  __" in line)
+        tagline_index = next(index for index, line in enumerate(lines)
+                             if "minimal coding agent CLI" in line)
         sign_index = next(index for index, line in enumerate(lines)
                           if "Goodbye, and thanks" in line)
         art = lines[art_index]
-        self.assertGreater(art_index, top)
+        self.assertLess(art_index, top)
+        self.assertLess(tagline_index, top)
         self.assertLess(art_index, sign_index)
-        self.assertTrue(art.strip().startswith("|"))
-        self.assertTrue(art.rstrip().endswith("|"))
-        # The art is horizontally centered in the box content area, not
-        # pressed against the left border.
-        inner = art.strip()[1:-1]
-        self.assertGreater(len(inner) - len(inner.lstrip(" ")), 2)
+        self.assertTrue(art.strip().startswith("__"))
+        self.assertGreater(len(art) - len(art.lstrip(" ")), 2)
         bottom = [line for line in lines if line.startswith("+")][-1]
         self.assertTrue(bottom.startswith("+") and bottom.endswith("+"))
+
+    def test_plain_startup_prints_the_mark_before_and_after_the_decision(self):
+        session = AgentSession(make_args(self.workdir, self.cache_dir),
+                               console=self.console())
+        original = session.start_session
+        before_start = {}
+
+        def marked_start():
+            before_start["text"] = self.output()
+            original()
+
+        with mock.patch.object(session, "start_session",
+                               side_effect=marked_start), \
+                mock.patch.object(session, "_read_user_line",
+                                  return_value="quit"):
+            session.run()
+
+        before = before_start["text"]
+        self.assertIn("__  __", before)
+        self.assertIn("minimal coding agent CLI", before)
+        after = self.output()[len(before):]
+        self.assertIn("__  __", after)
+        self.assertIn("minimal coding agent CLI", after)
 
     def test_shutdown_before_a_session_prints_the_no_session_farewell(self):
         session = AgentSession(make_args(self.workdir, self.cache_dir),

@@ -822,11 +822,11 @@ class Console:
             f"compaction  : {compaction_strategy or 'summarise'}",
             f"planning    : {planning}",
         ]
-        self._print_logo()
+        self.print_mark()
         self.banner(f"MiniCodeCLI v{version}", lines, fg="cyan")
 
-    def _print_logo(self):
-        """Print the ASCII mark above the welcome box.
+    def print_mark(self, fg="cyan", tagline_fg=None):
+        """Print the centered ASCII mark and tagline (no box).
 
         The art is skipped on very narrow terminals; wrapping a logo is worse
         than omitting it. Colour is optional, so piped logs still show the
@@ -837,8 +837,8 @@ class Console:
             return
         pad = " " * max((self.width - art_width) // 2, 0)
         for line in LOGO:
-            self.emit(pad + self.style(line, fg="cyan", bold=True))
-        self.emit(pad + self.style(TAGLINE, dim=True))
+            self.emit(pad + self.style(line, fg=fg, bold=True))
+        self.emit(pad + self.style(TAGLINE, fg=tagline_fg, dim=True))
         self.emit()
 
     def farewell(self, version, rows, sign_off=None):
@@ -862,34 +862,10 @@ class Console:
         row_lines = [f"{str(label).ljust(label_w)} : {value}"
                      for label, value in rows]
 
-        # The ASCII mark is centered inside the good-bye box (not a separate
-        # box above it), in the same yellow as the box. On a narrow terminal
-        # use the compact label so the box stays readable.
-        art_width = max(len(line) for line in LOGO)
-        if self.width >= art_width + 10:
-            logo_width = art_width
-            logo = LOGO
-        else:
-            logo_width = len("MINI CODE")
-            logo = ("MINI CODE",)
-        content_width = max(
-            [_visual_len(sign)] + [_visual_len(line) for line in row_lines]
-            + [logo_width])
-        if logo is LOGO:
-            # Center the block as a unit: the 42- and 43-column rows differ by
-            # one space and must stay aligned.
-            pad = " " * max((content_width - art_width) // 2, 0)
-            logo_lines = [
-                _pad_visual(pad + self.style(line, fg="yellow", bold=True),
-                            content_width)
-                for line in LOGO]
-        else:
-            label = self.style("MINI CODE", fg="yellow", bold=True)
-            pad = " " * max(
-                (content_width - _visual_len(label)) // 2, 0)
-            logo_lines = [_pad_visual(pad + label, content_width)]
-
-        lines = logo_lines + [""] + [sign, ""] + row_lines
+        # The same centered mark used by the welcome banner, above the box and
+        # in the box's yellow. The box itself stays content-width.
+        self.print_mark(fg="yellow", tagline_fg="yellow")
+        lines = [sign, ""] + row_lines
         # Yellow, not the welcome banner's cyan: this is the one box that
         # *closes* the session, so it reads as a distinct, valedictory note
         # rather than the startup banner reappearing. Colours only apply on a

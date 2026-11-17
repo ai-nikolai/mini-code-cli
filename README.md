@@ -289,8 +289,9 @@ the tool list or generated system prompt — these invalidate the LLM prompt cac
 Cache-impacting edits from the plain `settings>` prompt are staged until you type
 `apply`, so a batch rebuilds the prompt once.
 
-In the fixed TUI the ASCII mark sits in its own centered box above the session view
-and stays visible in the settings views. The settings table is a navigable overlay
+In the fixed TUI the centered, unboxed ASCII mark and tagline (the same mark used by
+`--tui off`) sit above the session view and stay visible in the settings views. The
+settings table is a navigable overlay
 that starts at the first setting and scrolls with the selection. Up/down or numbers
 select; left/right toggle an on/off setting or rotate through a fixed-choice setting
 (such as `plan-strategy`) in place. Values equal to their built-in default are marked
@@ -472,19 +473,21 @@ later request fail.
 
 ### Exiting — the good-bye box
 
-Quitting (`/quit`, `exit`, or EOF on stdin) saves the session and then prints a short yellow
-box with the centered Mini Code ASCII mark inside it: the version, a sign-off, and what the
-session left behind — session id, model, folder, the history segments on disk, how many turns
-were recorded, run duration, token / call totals, background tasks cancelled on exit, and a
-`--load-last-session` resume hint.
+Quitting (`/quit`, `exit`, or EOF on stdin) saves the session, prints the centered
+yellow Mini Code mark and tagline above the box, and then prints a short content-width
+yellow box: the version, a sign-off, and what the session left behind — session id,
+model, folder, the history segments on disk, how many turns were recorded, run duration,
+token / call totals, background tasks cancelled on exit, and a `--load-last-session`
+resume hint.
 
 ```
+                  __  __ ___ _  _ ___    ___ ___  ___  ___
+                 |  \/  |_ _| \| |_ _|  / __/ _ \|   \| __|
+                 | |\/| || || .` || |  | (_| (_) | |) | _|
+                 |_|  |_|___|_|\_|___|  \___\___/|___/|___|
+                a minimal coding agent CLI
+
 ╔══════════ MiniCodeCLI v0.1.1.2 - goodbye ═════════════════════╗
-║         __  __ ___ _  _ ___    ___ ___  ___  ___              ║
-║        |  \/  |_ _| \| |_ _|  / __/ _ \|   \| __|             ║
-║        | |\/| || || .` || |  | (_| (_) | |) | _|              ║
-║        |_|  |_|___|_|\_|___|  \___\___/|___/|___|             ║
-║                                                               ║
 ║ Goodbye, and thanks for using MiniCodeCLI!                    ║
 ║                                                               ║
 ║ session id   : 1792666273983619-36ca3c2e                      ║
